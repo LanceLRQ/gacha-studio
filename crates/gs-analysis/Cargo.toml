@@ -1,0 +1,10 @@
+[package]
+name = "gs-analysis"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "通用分析引擎：保底 / 欧非 / 时间线跨游戏聚合"
+
+# 本阶段的保底计数器是纯计数逻辑，尚不需要依赖 gs-core 的错误类型；
+# 待接入真实记录数据（含校验失败路径）时再引入。

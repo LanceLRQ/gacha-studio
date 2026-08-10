@@ -1,0 +1,12 @@
+[package]
+name = "gs-host"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "宿主运行时骨架：聚合存储与分析能力"
+
+[dependencies]
+gs-core.workspace = true
+gs-storage.workspace = true
+gs-analysis.workspace = true

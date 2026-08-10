@@ -1,0 +1,15 @@
+packages:
+  - web
+  - packages/*
+  - plugins
+  - plugins/*
+
+# 共享依赖的单一版本源。各包写 "catalog:" 引用，避免版本在多处漂移
+# —— 插件数量会随里程碑增长，每个插件一份 package.json，分散声明必然失同步。
+catalog:
+  # 锁在 6.x：typescript-eslint 的 peer 要求为 >=4.8.4 <6.1.0，
+  # TypeScript 7 尚未提供稳定的 programmatic API（预计 7.1），
+  # 导致 typescript-eslint 无法工作。本项目的 lint 承担 HC-1 静态检查职责
+  # （禁 eval / new Function / 动态 import），属安全基础设施，不可缺。
+  typescript: ^6.0.3
+  zod: ^4.4.3

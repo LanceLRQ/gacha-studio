@@ -1,0 +1,11 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "主窗口的最小权限集合。仅授予 Tauri 核心框架的基础能力（窗口/菜单/事件等），未注册任何文件系统、网络、shell、dialog 类插件，因此这些能力目前对前端完全不可见。后续新增的 IPC 窄口命令（scanGameCache / callGameApi 等）须各自声明独立权限，不得复用本文件。",
+  "windows": [
+    "main"
+  ],
+  "permissions": [
+    "core:default"
+  ]
+}

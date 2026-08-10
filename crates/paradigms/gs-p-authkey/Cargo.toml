@@ -1,0 +1,10 @@
+[package]
+name = "gs-p-authkey"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "L1 范式层：authkey 采集流程（data_2 缓存扫描 + 分页拉取）"
+
+[dependencies]
+gs-core.workspace = true

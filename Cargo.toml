@@ -1,0 +1,33 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/gs-core",
+    "crates/gs-storage",
+    "crates/gs-analysis",
+    "crates/gs-host",
+    "crates/paradigms/gs-p-authkey",
+    "crates/paradigms/gs-p-uigf",
+    "src-tauri",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+
+# 跨 crate 共享的依赖统一在此声明版本，各 crate 通过 `xxx.workspace = true` 引用，
+# 避免同一依赖在不同 crate 里出现版本漂移。
+# 只收录确实被多个 crate 使用的公共依赖；单个 crate 专属的依赖（如 gs-storage 的
+# rusqlite、src-tauri 的 tauri）直接写在各自的 Cargo.toml 里，不进这张表。
+[workspace.dependencies]
+gs-core = { path = "crates/gs-core" }
+gs-storage = { path = "crates/gs-storage" }
+gs-analysis = { path = "crates/gs-analysis" }
+gs-host = { path = "crates/gs-host" }
+gs-p-authkey = { path = "crates/paradigms/gs-p-authkey" }
+gs-p-uigf = { path = "crates/paradigms/gs-p-uigf" }
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"

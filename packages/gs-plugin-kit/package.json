@@ -1,0 +1,18 @@
+{
+  "name": "gs-plugin-kit",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "exports": {
+    ".": "./index.ts",
+    "./types": "./types/index.ts",
+    "./schema": "./schema/index.ts",
+    "./testkit": "./testkit/index.ts"
+  },
+  "dependencies": {
+    "zod": "catalog:"
+  },
+  "devDependencies": {
+    "typescript": "catalog:"
+  }
+}

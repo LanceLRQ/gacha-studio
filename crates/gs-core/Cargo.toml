@@ -1,0 +1,10 @@
+[package]
+name = "gs-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "领域模型与错误类型基础层，供 L1 范式层与宿主运行时共享"
+
+[dependencies]
+thiserror.workspace = true

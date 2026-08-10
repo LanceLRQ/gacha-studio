@@ -1,0 +1,9 @@
+{
+  "name": "plugins",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "devDependencies": {
+    "typescript": "catalog:"
+  }
+}

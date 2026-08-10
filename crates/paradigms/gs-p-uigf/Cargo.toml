@@ -1,0 +1,9 @@
+[package]
+name = "gs-p-uigf"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "UIGF v4.x 交换格式适配器"
+
+# 版本号判定是纯字符串逻辑，本阶段尚不需要任何依赖。

@@ -1,0 +1,12 @@
+[package]
+name = "gs-storage"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "SQLite 存储引擎"
+
+[dependencies]
+gs-core.workspace = true
+# bundled：静态链接 SQLite，避免依赖系统库版本，保证构建可复现。
+rusqlite = { version = "0.40", features = ["bundled"] }
