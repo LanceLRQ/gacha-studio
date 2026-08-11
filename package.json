@@ -6,7 +6,11 @@
     "dev": "pnpm --filter web dev",
     "build": "pnpm --filter web build",
     "typecheck": "pnpm -r exec tsc --noEmit",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "gs:check": "node scripts/gs-check/index.mjs",
+    "gs:check:no-dynamic-import": "node scripts/gs-check/checks/no-dynamic-import.mjs",
+    "gs:check:ipc-surface": "node scripts/gs-check/checks/ipc-surface.mjs",
+    "gs:check:codegen-diff": "node scripts/gs-check/checks/codegen-diff.mjs"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.11.4"

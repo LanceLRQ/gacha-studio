@@ -10,3 +10,4 @@ description = "宿主运行时骨架：聚合存储与分析能力"
 gs-core.workspace = true
 gs-storage.workspace = true
 gs-analysis.workspace = true
+ts-rs.workspace = true

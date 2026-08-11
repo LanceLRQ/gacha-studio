@@ -1,4 +1,12 @@
 {
   "extends": "../../tsconfig.base.json",
-  "include": ["index.ts", "types", "schema", "testkit"]
+  "compilerOptions": {
+    // testkit/self-check.ts 会被 `node --experimental-strip-types` 直接执行，
+    // 而 Node 的 ESM 解析要求相对导入带显式扩展名（TS 的 Bundler 解析允许省略，
+    // Node 不允许）。本包的 package.json exports 本来就直接指向 .ts 源码，
+    // 没有产物发布环节，因此允许在相对导入里写 .ts 扩展名，与本包定位一致。
+    // 该选项要求 noEmit，已由 tsconfig.base.json 提供。
+    "allowImportingTsExtensions": true
+  },
+  "include": ["index.ts", "manifest.ts", "types", "schema", "testkit"]
 }

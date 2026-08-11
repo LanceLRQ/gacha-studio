@@ -8,3 +8,8 @@ description = "领域模型与错误类型基础层，供 L1 范式层与宿主�
 
 [dependencies]
 thiserror.workspace = true
+serde.workspace = true
+ts-rs.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
