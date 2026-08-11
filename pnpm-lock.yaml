@@ -57,6 +57,16 @@ importers:
         specifier: ^2.11.4
         version: 2.11.4
 
+  drills:
+    dependencies:
+      gs-plugin-kit:
+        specifier: workspace:*
+        version: link:../packages/gs-plugin-kit
+    devDependencies:
+      typescript:
+        specifier: 'catalog:'
+        version: 6.0.3
+
   packages/gs-plugin-kit:
     dependencies:
       zod:

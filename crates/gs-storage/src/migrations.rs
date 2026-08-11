@@ -7,8 +7,9 @@
 //! ③ SQL 用 `include_str!` 编译期内嵌，二进制自带，不依赖运行时文件；
 //! ④ 每个迁移自带事务 + savepoint；
 //! ⑤ 改主键这类 SQLite 不支持的 DDL，未来迁移走
-//!   rename → create new → `INSERT...SELECT` → drop old（本文件目前只有
-//!   一条初始迁移，尚未用到这一模式，留作后续迁移的参照）。
+//!   rename → create new → `INSERT...SELECT` → drop old（本文件目前的两条
+//!   迁移都不需要这个模式——`0002` 只是重建视图，视图不持有数据，DROP 它
+//!   不会丢东西——留作后续真的要改表结构时的参照）。
 //!
 //! 有意不照抄的一处：参考实现的批量入库是逐条 `execute` 循环，我方在
 //! `repository.rs` 的 `insert_records` 里用批量多值 `INSERT`——这与迁移机制
@@ -29,10 +30,16 @@ pub(crate) struct Migration {
 ///
 /// 可见性是 `pub(crate)` 而非私有：`lib.rs` 的测试需要用 `MIGRATIONS.len()`
 /// 断言"已在最新版本"，避免在测试里硬编码迁移条数。
-pub(crate) const MIGRATIONS: &[Migration] = &[Migration {
-    name: "0001_initial",
-    sql: include_str!("../migrations/0001_initial.sql"),
-}];
+pub(crate) const MIGRATIONS: &[Migration] = &[
+    Migration {
+        name: "0001_initial",
+        sql: include_str!("../migrations/0001_initial.sql"),
+    },
+    Migration {
+        name: "0002_v_integrity_page_columns",
+        sql: include_str!("../migrations/0002_v_integrity_page_columns.sql"),
+    },
+];
 
 /// 把连接从当前 `user_version` 推进到 [`MIGRATIONS`] 的最新版本。
 ///

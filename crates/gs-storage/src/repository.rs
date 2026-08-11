@@ -151,8 +151,74 @@ fn map_gacha_record_row(row: &Row<'_>) -> rusqlite::Result<GachaRecordRow> {
 fn rows_into_records(
     rows: impl Iterator<Item = rusqlite::Result<GachaRecordRow>>,
 ) -> Result<Vec<GachaRecord>, GsError> {
-    rows.map(|row| row.map_err(storage_err).and_then(GachaRecordRow::into_domain))
-        .collect()
+    rows.map(|row| {
+        row.map_err(storage_err)
+            .and_then(GachaRecordRow::into_domain)
+    })
+    .collect()
+}
+
+/// 一条尚未持久化的出金事件（`rare_event` 表，L2）。
+///
+/// `origin` 由调用方显式指定，不是按写入路径隐式推断——`NewBannerSnapshot`
+/// 已经是这个先例（同样是调用方显式传入的字段），两条写入路径的心智模型
+/// 保持一致：显式字段 + review 是这个项目一贯的安全模型（参照
+/// `plugins/index.ts` 显式注册表而非自动收集的同一条理由），不需要每个
+/// 写入路径都在类型层面堵死"传错值"这一种可能。
+pub struct NewRareEvent {
+    pub account_id: i64,
+    pub banner_key: String,
+    pub pity_group: String,
+    pub occurred_at: i64,
+    pub item_id: String,
+    pub rarity: String,
+    /// 距上次出金的抽数（含本次）。塔吉多这类权威接口会直接给这个值；
+    /// 从 L1 派生时同样能算出来（`gs_analysis::derive_rare_events`），
+    /// 理论上恒有值，但类型上仍用 `Option` 与表结构 `pity_count INTEGER`
+    /// （可空）保持形状一致。
+    pub pity_count: Option<i64>,
+    /// 1/0/NULL 三态，`None` 表示"不知道"。**不能用 `Some(false)` 顶替
+    /// "不知道"**——那会把"确认没歪"和"不知道歪没歪"混为一谈，污染歪率
+    /// 统计（存储数据模型设计文档 §4.2）。从 L1 派生时（本 Stage 唯一的
+    /// 写入方）恒为 `None`，因为没有任何数据源能提供当期 UP 物品列表。
+    pub is_rate_up: Option<bool>,
+    pub origin: SnapshotOrigin,
+    /// 自由文本来源标识，如 `'tajiduo'`（权威）/ `'derived:pity'`
+    /// （从 L1 用保底计数算法派生）——理由同 `NewBannerSnapshot.source`，
+    /// 取值随来源而异，不是封闭集合，不用枚举收窄。
+    pub source: String,
+    /// 指回产生这条出金事件的 L1 记录。`origin` 为 `Derived` 时应当总是
+    /// `Some`（派生数据必然能指回它的来源）；`Authoritative` 时通常是
+    /// `None`（塔吉多这类接口不知道本地是否已采集到对应的 L1 记录）。
+    pub record_id: Option<i64>,
+    pub extra: Option<String>,
+}
+
+const RARE_EVENT_SELECT_COLUMNS: &str = "id, account_id, banner_key, pity_group, occurred_at, \
+    item_id, rarity, pity_count, is_rate_up, origin, source, record_id, extra";
+const RARE_EVENT_INSERT_COLUMNS: &str = "account_id, banner_key, pity_group, occurred_at, \
+    item_id, rarity, pity_count, is_rate_up, origin, source, record_id, extra";
+const RARE_EVENT_INSERT_ARITY: usize = 12;
+
+/// `rare_event` 表的一行。`origin`/`source` 保留原始字符串而不是解析成
+/// 枚举——这两列目前只用于展示与按值过滤（如测试里的
+/// `row.origin == "authoritative"`），没有消费点需要把 `origin` 转回
+/// [`SnapshotOrigin`] 再往下传，多一层解析只会是无谓的转换成本。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RareEventRow {
+    pub id: i64,
+    pub account_id: i64,
+    pub banner_key: String,
+    pub pity_group: String,
+    pub occurred_at: i64,
+    pub item_id: String,
+    pub rarity: String,
+    pub pity_count: Option<i64>,
+    pub is_rate_up: Option<bool>,
+    pub origin: String,
+    pub source: String,
+    pub record_id: Option<i64>,
+    pub extra: Option<String>,
 }
 
 /// 一个尚未持久化的账号。`retention_days` 落的是插件声明的
@@ -272,6 +338,11 @@ pub struct NewRawPayload {
 }
 
 /// `v_integrity` 视图的一行，`precision` 恒为 `'exact'` 或 `'page'`。
+///
+/// `page_size`/`page_count` 只在 `precision == "page"` 时有值——它们是
+/// `json_extract` 自 `banner_snapshot.extra` 直接拿出来的（迁移
+/// `0002_v_integrity_page_columns`），调用方（`gs-analysis` 的
+/// `evaluate_draw_count_gap`）不需要再自己解一遍 `extra` JSON。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IntegrityRow {
     pub account_id: i64,
@@ -281,6 +352,8 @@ pub struct IntegrityRow {
     pub official_rares: Option<i64>,
     pub local_rares: i64,
     pub precision: String,
+    pub page_size: Option<i64>,
+    pub page_count: Option<i64>,
 }
 
 /// `v_unknown_banner` 视图的一行：有记录但 `banner_meta` 未收录的卡池。
@@ -349,9 +422,9 @@ impl<'conn> Repository<'conn> {
                     Err(err) => {
                         // 回滚失败时保留原始错误——原始错误才是根因，
                         // 回滚失败只是它的后果。
-                        let _ = self
-                            .conn
-                            .execute_batch("ROLLBACK TO gs_insert_records; RELEASE gs_insert_records");
+                        let _ = self.conn.execute_batch(
+                            "ROLLBACK TO gs_insert_records; RELEASE gs_insert_records",
+                        );
                         return Err(err);
                     }
                 }
@@ -459,6 +532,203 @@ impl<'conn> Repository<'conn> {
             .query_map(params![account_id, rarity], map_gacha_record_row)
             .map_err(storage_err)?;
         rows_into_records(rows)
+    }
+
+    // ------------------------------------------------------------------
+    // rare_event
+    // ------------------------------------------------------------------
+
+    /// 写入单条出金事件，不去重、不做冲突处理——命中
+    /// `UNIQUE(account_id, banner_key, occurred_at, item_id)` 时直接把
+    /// `rusqlite` 的约束错误原样报出来。这条路径面向权威数据的单条写入
+    /// （如塔吉多按次拉取的出金事件），语义与 [`Self::insert_banner_snapshot`]
+    /// 一致：一次只描述一件事实，不需要静默吞掉冲突。
+    ///
+    /// 批量派生数据的写入走 [`Self::replace_derived_rare_events`]，那条路径
+    /// 才需要"重复没关系"的 `INSERT OR IGNORE` 语义——两者服务的场景不同，
+    /// 不合并成一个参数可控的方法。
+    pub fn insert_rare_event(&self, new: &NewRareEvent) -> Result<i64, GsError> {
+        self.conn
+            .execute(
+                &format!(
+                    "INSERT INTO rare_event ({RARE_EVENT_INSERT_COLUMNS}) \
+                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)"
+                ),
+                params![
+                    new.account_id,
+                    new.banner_key,
+                    new.pity_group,
+                    new.occurred_at,
+                    new.item_id,
+                    new.rarity,
+                    new.pity_count,
+                    new.is_rate_up.map(|value| value as i64),
+                    new.origin.as_sql(),
+                    new.source,
+                    new.record_id,
+                    new.extra
+                ],
+            )
+            .map_err(storage_err)?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    /// 全量重算替换某个 `(account_id, pity_group)` 下 `origin = 'derived'`
+    /// 的出金事件：先删掉旧的 derived 行，再整批插入 `events`。
+    ///
+    /// `origin = 'authoritative'` 的行永远不会被这次 DELETE 触碰——WHERE
+    /// 子句显式带 `origin = 'derived'`，这是存储数据模型设计文档 §七.4
+    /// "派生数据可随时重算、不做增量维护；权威数据不可重算"在写入路径上的
+    /// 唯一落点。删除范围按 `pity_group` 而不是 `banner_key`：派生算法本身
+    /// 是按 `pity_group` 合并计数的（原神 301/400 共享保底），重算就要把
+    /// 这个分组下全部 `banner_key` 的旧派生结果一并换掉，只删一个
+    /// `banner_key` 会留下用旧计数算出来的另一半，两份结果互相矛盾。
+    ///
+    /// 删除与插入包在同一个 SAVEPOINT 里：这是"重新算一遍、整批替换旧结果"
+    /// 的操作，中途失败若不回滚，会留下"旧数据已删、新数据没插完"的中间
+    /// 状态——那比"没有触发重算"更糟，调用方（分析引擎）看到的行数会比
+    /// 真实情况更少。
+    ///
+    /// 返回实际插入的行数（`INSERT OR IGNORE` 语义，理由见
+    /// [`Self::insert_rare_events_chunked`]）。
+    pub fn replace_derived_rare_events(
+        &self,
+        account_id: i64,
+        pity_group: &str,
+        events: &[NewRareEvent],
+    ) -> Result<u64, GsError> {
+        self.conn
+            .execute_batch("SAVEPOINT gs_replace_derived_rare_events")
+            .map_err(storage_err)?;
+
+        let outcome = (|| -> Result<u64, GsError> {
+            self.conn
+                .execute(
+                    "DELETE FROM rare_event WHERE account_id = ?1 AND pity_group = ?2 \
+                     AND origin = 'derived'",
+                    params![account_id, pity_group],
+                )
+                .map_err(storage_err)?;
+            self.insert_rare_events_chunked(events)
+        })();
+
+        match &outcome {
+            Ok(_) => self
+                .conn
+                .execute_batch("RELEASE gs_replace_derived_rare_events")
+                .map_err(storage_err)?,
+            Err(_) => {
+                // 回滚失败时保留原始错误——回滚失败只是原始错误的后果，
+                // 不是根因，理由同 `insert_records` 的同一处理。
+                let _ = self.conn.execute_batch(
+                    "ROLLBACK TO gs_replace_derived_rare_events; \
+                     RELEASE gs_replace_derived_rare_events",
+                );
+            }
+        }
+        outcome
+    }
+
+    /// 分块 + 多值 `INSERT OR IGNORE` 写入一批出金事件，复用
+    /// `insert_records` 已经踩过的 `SQLITE_LIMIT_VARIABLE_NUMBER` 分块策略
+    /// ——原理相同：一次多值 INSERT 的占位符个数是 条数 × 12，一个保底组
+    /// 累积的出金事件数量远小于逐抽记录，正常情况下撞不到上限，但"正常情况
+    /// 撞不到"正是 `insert_records` 那次踩坑的教训，不能假设这里也一样安全
+    /// 而跳过分块。
+    ///
+    /// 用 `OR IGNORE` 而不是要求零冲突：派生数据的写入语义是"重算一遍"，
+    /// 如果某条派生结果恰好撞上了 `UNIQUE(account_id, banner_key,
+    /// occurred_at, item_id)`（比如这个位置已经有一条权威数据），静默跳过
+    /// 优先保留权威数据，比让整批重算因为一条冲突而失败更符合"派生数据让路
+    /// 给权威数据"的既定优先级（存储数据模型设计文档 §二"查询时优先取
+    /// authoritative"）。
+    fn insert_rare_events_chunked(&self, events: &[NewRareEvent]) -> Result<u64, GsError> {
+        if events.is_empty() {
+            return Ok(0);
+        }
+
+        let max_variables = self
+            .conn
+            .limit(rusqlite::limits::Limit::SQLITE_LIMIT_VARIABLE_NUMBER)
+            .map_err(storage_err)?
+            .max(1) as usize;
+        let chunk_size = (max_variables / RARE_EVENT_INSERT_ARITY).max(1);
+
+        let mut total = 0u64;
+        for chunk in events.chunks(chunk_size) {
+            total += self.insert_rare_events_single_statement(chunk)?;
+        }
+        Ok(total)
+    }
+
+    fn insert_rare_events_single_statement(&self, events: &[NewRareEvent]) -> Result<u64, GsError> {
+        let placeholder_group = format!("({})", ["?"; RARE_EVENT_INSERT_ARITY].join(","));
+        let sql = format!(
+            "INSERT OR IGNORE INTO rare_event ({RARE_EVENT_INSERT_COLUMNS}) VALUES {}",
+            vec![placeholder_group.as_str(); events.len()].join(",")
+        );
+
+        let mut owned_params: Vec<Box<dyn ToSql>> =
+            Vec::with_capacity(events.len() * RARE_EVENT_INSERT_ARITY);
+        for event in events {
+            owned_params.push(Box::new(event.account_id));
+            owned_params.push(Box::new(event.banner_key.clone()));
+            owned_params.push(Box::new(event.pity_group.clone()));
+            owned_params.push(Box::new(event.occurred_at));
+            owned_params.push(Box::new(event.item_id.clone()));
+            owned_params.push(Box::new(event.rarity.clone()));
+            owned_params.push(Box::new(event.pity_count));
+            owned_params.push(Box::new(event.is_rate_up.map(|value| value as i64)));
+            owned_params.push(Box::new(event.origin.as_sql()));
+            owned_params.push(Box::new(event.source.clone()));
+            owned_params.push(Box::new(event.record_id));
+            owned_params.push(Box::new(event.extra.clone()));
+        }
+        let param_refs: Vec<&dyn ToSql> = owned_params.iter().map(Box::as_ref).collect();
+
+        let changed = self
+            .conn
+            .execute(&sql, param_refs.as_slice())
+            .map_err(storage_err)?;
+        Ok(changed as u64)
+    }
+
+    /// 按 `(account_id, pity_group)` 查询出金事件，按 `occurred_at` 升序——
+    /// `GuaranteeRule::FiftyFifty` 状态机（`gs_analysis::pity::apply_guarantee_rule`）
+    /// 是有状态的顺序处理，顺序错了结果就是错的，这里直接保证，不指望
+    /// 调用方自己再排一遍序。
+    pub fn find_rare_events_by_pity_group(
+        &self,
+        account_id: i64,
+        pity_group: &str,
+    ) -> Result<Vec<RareEventRow>, GsError> {
+        let sql = format!(
+            "SELECT {RARE_EVENT_SELECT_COLUMNS} FROM rare_event \
+             WHERE account_id = ?1 AND pity_group = ?2 ORDER BY occurred_at"
+        );
+        let mut stmt = self.conn.prepare(&sql).map_err(storage_err)?;
+        let rows = stmt
+            .query_map(params![account_id, pity_group], |row| {
+                let is_rate_up: Option<i64> = row.get(8)?;
+                Ok(RareEventRow {
+                    id: row.get(0)?,
+                    account_id: row.get(1)?,
+                    banner_key: row.get(2)?,
+                    pity_group: row.get(3)?,
+                    occurred_at: row.get(4)?,
+                    item_id: row.get(5)?,
+                    rarity: row.get(6)?,
+                    pity_count: row.get(7)?,
+                    is_rate_up: is_rate_up.map(|value| value != 0),
+                    origin: row.get(9)?,
+                    source: row.get(10)?,
+                    record_id: row.get(11)?,
+                    extra: row.get(12)?,
+                })
+            })
+            .map_err(storage_err)?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(storage_err)
     }
 
     // ------------------------------------------------------------------
@@ -641,7 +911,13 @@ impl<'conn> Repository<'conn> {
             .execute(
                 "INSERT INTO raw_payload (session_id, seq, payload, encoding, created_at) \
                  VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![new.session_id, new.seq, new.payload, new.encoding, new.created_at],
+                params![
+                    new.session_id,
+                    new.seq,
+                    new.payload,
+                    new.encoding,
+                    new.created_at
+                ],
             )
             .map_err(storage_err)?;
         Ok(self.conn.last_insert_rowid())
@@ -657,7 +933,7 @@ impl<'conn> Repository<'conn> {
             .conn
             .prepare(
                 "SELECT account_id, banner_key, official_draws, local_draws, official_rares, \
-                 local_rares, precision FROM v_integrity",
+                 local_rares, precision, page_size, page_count FROM v_integrity",
             )
             .map_err(storage_err)?;
         let rows = stmt
@@ -670,10 +946,13 @@ impl<'conn> Repository<'conn> {
                     official_rares: row.get(4)?,
                     local_rares: row.get(5)?,
                     precision: row.get(6)?,
+                    page_size: row.get(7)?,
+                    page_count: row.get(8)?,
                 })
             })
             .map_err(storage_err)?;
-        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(storage_err)
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(storage_err)
     }
 
     /// 查询 `v_unknown_banner` 视图的全部行，供 UI 提示
@@ -697,7 +976,8 @@ impl<'conn> Repository<'conn> {
                 })
             })
             .map_err(storage_err)?;
-        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(storage_err)
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(storage_err)
     }
 }
 

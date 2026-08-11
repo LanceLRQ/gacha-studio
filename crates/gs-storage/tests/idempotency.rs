@@ -74,6 +74,8 @@ fn inserting_a_full_archive_sized_batch_does_not_exceed_sqlite_variable_limit() 
         .map(|i| sample_record(account_id, "starrail:character-event", &format!("11:{i}")))
         .collect();
 
-    let inserted = repo.insert_records(&records).expect("整份存档量级的批量插入应当成功");
+    let inserted = repo
+        .insert_records(&records)
+        .expect("整份存档量级的批量插入应当成功");
     assert_eq!(inserted, 5372, "所有记录都应当写入");
 }

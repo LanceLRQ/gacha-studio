@@ -48,7 +48,9 @@ impl RetryPolicy {
             // （2^(attempt-1) 倍数，attempt 从 1 开始），而不是留空 todo!()——
             // 类型可达但语义未经证实的分支，至少不能是"编译能过但一跑就 panic"。
             BackoffKind::Exponential => {
-                let multiplier = 1u32.checked_shl(attempt.saturating_sub(1)).unwrap_or(u32::MAX);
+                let multiplier = 1u32
+                    .checked_shl(attempt.saturating_sub(1))
+                    .unwrap_or(u32::MAX);
                 self.delay.saturating_mul(multiplier)
             }
         }

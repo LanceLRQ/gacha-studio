@@ -126,12 +126,9 @@ mod tests {
         }
     }
 
-    fn genshin_rarity_spec() -> RaritySpec {
-        RaritySpec {
-            ladder: vec!["3".to_string(), "4".to_string(), "5".to_string()],
-            pity_target: "5".to_string(),
-        }
-    }
+    // 不在本模块手抄原神 RaritySpec fixture——直接调用
+    // `crate::genshin_rarity_spec`（从 manifest 派生的单一数据源），
+    // 与 `pity.rs`/`rare_event.rs`/集成测试统一。
 
     #[test]
     fn rarity_distribution_counts_known_and_unknown_records() {
@@ -142,7 +139,7 @@ mod tests {
             record("神秘物品", None, MetaState::Complete, 1),
         ];
 
-        let dist = rarity_distribution(&records, &genshin_rarity_spec());
+        let dist = rarity_distribution(&records, &crate::genshin_rarity_spec());
 
         assert_eq!(dist.counts["3"], 0);
         assert_eq!(dist.counts["4"], 2);
@@ -176,7 +173,7 @@ mod tests {
         // 插件声明的阶梯和实际数据对不上时的异常情况：不 panic、不静默吞掉，
         // 计入 unrecognized_count。
         let records = vec![record("异常物品", Some("9"), MetaState::Complete, 1)];
-        let dist = rarity_distribution(&records, &genshin_rarity_spec());
+        let dist = rarity_distribution(&records, &crate::genshin_rarity_spec());
         assert_eq!(dist.unrecognized_count, 1);
         assert_eq!(dist.unknown_count, 0);
     }

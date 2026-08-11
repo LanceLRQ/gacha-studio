@@ -1,0 +1,10 @@
+[package]
+name = "gs-manifest-data"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "插件 manifest 纯数据 JSON 的只读访问入口，不依赖 JS 运行时"
+
+[dependencies]
+serde_json.workspace = true

@@ -82,6 +82,64 @@ fn integrity_view_exposes_page_precision_for_pagination_baseline() {
 }
 
 #[test]
+fn integrity_view_exposes_page_size_and_page_count_from_snapshot_extra() {
+    let storage = Storage::open_in_memory().expect("应当成功打开内存数据库");
+    let repo = storage.repository();
+    let account_id = create_test_account(&repo, "nte");
+
+    // 异环校准场景：官方 59 页 × 5 条/页。page_size/page_count 之前只在
+    // banner_snapshot.extra 里，视图没有 json_extract 出来，调用方
+    // （evaluate_draw_count_gap）拿不到就只能另外传参——这两列补上后，
+    // 视图对它自己的用途才算自足。
+    repo.insert_banner_snapshot(&NewBannerSnapshot {
+        account_id,
+        banner_key: "nte:limited".to_string(),
+        captured_at: 1_754_800_000_000,
+        draw_count: Some(291),
+        rare_count: None,
+        pity_current: None,
+        pity_max: Some(90),
+        origin: SnapshotOrigin::Authoritative,
+        source: "pagination".to_string(),
+        extra: Some(r#"{"page_count":59,"page_size":5,"precision":"page"}"#.to_string()),
+    })
+    .expect("写入快照应当成功");
+
+    let rows = repo.integrity_report().expect("查询应当成功");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].page_size, Some(5));
+    assert_eq!(rows[0].page_count, Some(59));
+}
+
+#[test]
+fn integrity_view_leaves_page_size_and_page_count_null_for_exact_precision() {
+    let storage = Storage::open_in_memory().expect("应当成功打开内存数据库");
+    let repo = storage.repository();
+    let account_id = create_test_account(&repo, "nte");
+
+    // 权威基准（如塔吉多）没有分页概念，extra 不带这两个键——NULL 是正确
+    // 语义（"没有分页信息"），不应该被 COALESCE 成 0 之类的伪造默认值。
+    repo.insert_banner_snapshot(&NewBannerSnapshot {
+        account_id,
+        banner_key: "nte:limited".to_string(),
+        captured_at: 1_754_800_000_000,
+        draw_count: Some(295),
+        rare_count: Some(5),
+        pity_current: None,
+        pity_max: Some(90),
+        origin: SnapshotOrigin::Authoritative,
+        source: "tajiduo".to_string(),
+        extra: None,
+    })
+    .expect("写入快照应当成功");
+
+    let rows = repo.integrity_report().expect("查询应当成功");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].page_size, None);
+    assert_eq!(rows[0].page_count, None);
+}
+
+#[test]
 fn integrity_view_defaults_precision_to_exact_when_absent() {
     let storage = Storage::open_in_memory().expect("应当成功打开内存数据库");
     let repo = storage.repository();

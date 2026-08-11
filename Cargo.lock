@@ -1236,7 +1236,10 @@ name = "gs-analysis"
 version = "0.1.0"
 dependencies = [
  "gs-core",
+ "gs-manifest-data",
  "gs-storage",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -1257,6 +1260,13 @@ dependencies = [
  "gs-core",
  "gs-storage",
  "ts-rs",
+]
+
+[[package]]
+name = "gs-manifest-data"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
 ]
 
 [[package]]
@@ -1281,6 +1291,7 @@ version = "0.1.0"
 name = "gs-plugin-runtime"
 version = "0.1.0"
 dependencies = [
+ "gs-manifest-data",
  "rquickjs",
  "serde_json",
  "sourcemap",

@@ -19,8 +19,11 @@ pub mod cache_scan;
 pub mod pipeline;
 pub mod rate_limit;
 
-pub use cache_scan::{scan_game_cache, InstalledGameLocator, StaticGameLocator};
-pub use pipeline::{AuthkeyApiPipeline, CollectOutcome, GameApiTransport, PipelineError, ReqwestTransport, StopReason};
+pub use cache_scan::{InstalledGameLocator, StaticGameLocator, scan_game_cache};
+pub use pipeline::{
+    AuthkeyApiPipeline, CollectOutcome, GameApiTransport, PipelineError, ReqwestTransport,
+    StopReason,
+};
 pub use rate_limit::RateLimitPolicy;
 
 /// 默认每页条数（插件 manifest 未声明 `pageSize` 时使用）。

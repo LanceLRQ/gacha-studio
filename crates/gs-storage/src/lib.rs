@@ -4,6 +4,7 @@
 //! `account`、`gacha_record`、`rare_event`、`banner_snapshot`、`item_catalog`、
 //! `banner_meta`、`collect_session`、`raw_payload`，以及 `v_integrity` /
 //! `v_unknown_banner` 两个视图。建表 SQL 见 `migrations/0001_initial.sql`，
+//! `v_integrity` 补 `page_size`/`page_count` 两列见 `migrations/0002_v_integrity_page_columns.sql`。
 //! 版本管理见 [`migrations`] 模块（`PRAGMA user_version` + 编译期内嵌 SQL）；
 //! 读写接口见 [`repository`] 模块。
 
@@ -16,7 +17,7 @@ use rusqlite::Connection;
 
 pub use repository::{
     Account, IntegrityRow, NewAccount, NewBannerMeta, NewBannerSnapshot, NewCollectSession,
-    NewRawPayload, Repository, SnapshotOrigin, UnknownBannerRow,
+    NewRareEvent, NewRawPayload, RareEventRow, Repository, SnapshotOrigin, UnknownBannerRow,
 };
 
 /// SQLite 连接的封装：负责开启连接、设置宿主要求的 pragma、把 schema
@@ -28,8 +29,7 @@ pub struct Storage {
 impl Storage {
     /// 打开一个仅存在于内存中的数据库，用于测试与本阶段的骨架验证。
     pub fn open_in_memory() -> Result<Self, GsError> {
-        let conn =
-            Connection::open_in_memory().map_err(|err| GsError::Storage(err.to_string()))?;
+        let conn = Connection::open_in_memory().map_err(|err| GsError::Storage(err.to_string()))?;
         Self::from_connection(conn)
     }
 

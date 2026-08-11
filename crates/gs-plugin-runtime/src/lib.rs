@@ -54,12 +54,13 @@ use serde_json::Value;
 /// 若这两个文件不存在，先跑一遍 `node scripts/gs-bundle-plugins.mjs`。
 const PLUGIN_BUNDLE_SOURCE: &str = include_str!("../generated/plugins.bundle.js");
 
-/// 各插件 manifest 的"纯数据子集"（函数字段已被打包脚本递归剥离，`RegExp`
-/// 转成了 `{ source, flags }`）。存在的意义见打包脚本顶部注释——L1 范式层
-/// 需要 `banners`/`rarity`/`pityGroups`/`request`/
-/// `credential.gameDir`/`itemIdSource` 这些纯数据时直接读这份 JSON，不必在
-/// Rust 里手抄一遍插件声明。
-const PLUGIN_MANIFEST_JSON: &str = include_str!("../generated/plugins.manifest.json");
+/// 各插件 manifest 的"纯数据子集"的读取函数 [`plugin_manifest_data`] 已经
+/// 拆到独立 crate `gs-manifest-data`（不需要 QuickJS 就能用，`gs-analysis`
+/// 这类纯 Rust 计算 crate 不必因为要读它而被迫依赖本 crate 的 `rquickjs`），
+/// 本 crate 只在下方转发它，保持既有调用方（如 `gs-p-authkey`）的调用路径
+/// `gs_plugin_runtime::plugin_manifest_data(...)` 不变。理由详见
+/// `crates/gs-manifest-data/src/lib.rs` 顶部说明。
+pub use gs_manifest_data::plugin_manifest_data;
 
 /// bundle 在 QuickJS 里对应的虚拟文件名，只用于 QuickJS 内部标识"当前正在
 /// 跑哪段脚本"（异常栈帧会带上这个名字）。与 sourcemap 的 `sources` 字段是
@@ -85,7 +86,14 @@ pub const INJECTED_GLOBALS: &[&str] = &[];
 /// 价值在于**持续验证**——依赖升级可能在未来某天悄悄改变这个事实，
 /// [`PluginRuntime::new`] 在启动时会主动断言一遍（而不只是写在测试里），
 /// 一旦有任何一个变得可见就拒绝启动，见 `assert_forbidden_globals_absent`。
-pub const FORBIDDEN_GLOBALS: &[&str] = &["invoke", "fetch", "fs", "require", "process", "XMLHttpRequest"];
+pub const FORBIDDEN_GLOBALS: &[&str] = &[
+    "invoke",
+    "fetch",
+    "fs",
+    "require",
+    "process",
+    "XMLHttpRequest",
+];
 
 /// 插件运行时启动失败：QuickJS 引擎/上下文创建失败，或 bundle 本身跑不通
 /// （比如刚手改过生成产物导致语法错误——理论上不该发生，因为它标了"禁止
@@ -157,7 +165,10 @@ pub struct OriginalLocation {
 impl std::fmt::Display for PluginCallError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match &self.kind {
-            PluginCallErrorKind::Exception { message, mapped_stack } => {
+            PluginCallErrorKind::Exception {
+                message,
+                mapped_stack,
+            } => {
                 writeln!(
                     f,
                     "插件 \"{}\" 调用 \"{}\" 时抛出异常：{message}",
@@ -166,7 +177,10 @@ impl std::fmt::Display for PluginCallError {
                 if mapped_stack.is_empty() {
                     return Ok(());
                 }
-                writeln!(f, "调用栈（已尽量映射回插件源码，映射不到的帧保留生成后位置）：")?;
+                writeln!(
+                    f,
+                    "调用栈（已尽量映射回插件源码，映射不到的帧保留生成后位置）："
+                )?;
                 for frame in mapped_stack {
                     match &frame.original {
                         Some(loc) => {
@@ -220,8 +234,8 @@ pub struct PluginRuntime {
 impl PluginRuntime {
     /// 启动运行时：创建 QuickJS 引擎、加载插件 bundle、执行 HC-2 自检。
     pub fn new() -> Result<Self, PluginRuntimeError> {
-        let runtime =
-            Runtime::new().map_err(|err| PluginRuntimeError(format!("创建 QuickJS Runtime 失败：{err}")))?;
+        let runtime = Runtime::new()
+            .map_err(|err| PluginRuntimeError(format!("创建 QuickJS Runtime 失败：{err}")))?;
         let context = Context::full(&runtime)
             .map_err(|err| PluginRuntimeError(format!("创建 QuickJS Context 失败：{err}")))?;
 
@@ -232,7 +246,9 @@ impl PluginRuntime {
             options.filename = Some(BUNDLE_MODULE_NAME.to_string());
             ctx.eval_with_options::<(), _>(PLUGIN_BUNDLE_SOURCE, options)
                 .catch(&ctx)
-                .map_err(|err| PluginRuntimeError(format!("加载插件 bundle 失败：{}", describe_caught(&err))))
+                .map_err(|err| {
+                    PluginRuntimeError(format!("加载插件 bundle 失败：{}", describe_caught(&err)))
+                })
         })?;
 
         let instance = Self {
@@ -252,7 +268,9 @@ impl PluginRuntime {
                 .context
                 .with(|ctx| ctx.eval(format!("typeof {name} === \"undefined\"")))
                 .map_err(|err| {
-                    PluginRuntimeError(format!("HC-2 自检执行失败（检查全局量 \"{name}\" 时）：{err}"))
+                    PluginRuntimeError(format!(
+                        "HC-2 自检执行失败（检查全局量 \"{name}\" 时）：{err}"
+                    ))
                 })?;
             if !is_undefined {
                 return Err(PluginRuntimeError(format!(
@@ -271,11 +289,14 @@ impl PluginRuntime {
     /// 不出现，因为那份 JSON 已经把函数字段整体剥离）。
     pub fn has(&self, plugin_id: &str, path: &str) -> Result<bool, PluginCallError> {
         self.context.with(|ctx| {
-            let func: Function = ctx.globals().get("__gs_has").map_err(|err| PluginCallError {
-                plugin_id: plugin_id.to_string(),
-                path: path.to_string(),
-                kind: PluginCallErrorKind::Engine(format!("取 __gs_has 失败：{err}")),
-            })?;
+            let func: Function = ctx
+                .globals()
+                .get("__gs_has")
+                .map_err(|err| PluginCallError {
+                    plugin_id: plugin_id.to_string(),
+                    path: path.to_string(),
+                    kind: PluginCallErrorKind::Engine(format!("取 __gs_has 失败：{err}")),
+                })?;
             func.call::<_, bool>((plugin_id, path))
                 .catch(&ctx)
                 .map_err(|caught| self.build_call_error(plugin_id, path, caught))
@@ -285,7 +306,12 @@ impl PluginRuntime {
     /// 调用插件的某个函数。`args` 是要传给该函数的参数数组（`extractRecord`
     /// 只有一个参数，`resolveTimezone` 有两个，以此类推），返回值经
     /// `JSON.parse`/`JSON.stringify` 往返，`undefined` 归一化为 `null`。
-    pub fn call(&self, plugin_id: &str, path: &str, args: &[Value]) -> Result<Value, PluginCallError> {
+    pub fn call(
+        &self,
+        plugin_id: &str,
+        path: &str,
+        args: &[Value],
+    ) -> Result<Value, PluginCallError> {
         let args_json = serde_json::to_string(args).map_err(|err| PluginCallError {
             plugin_id: plugin_id.to_string(),
             path: path.to_string(),
@@ -293,11 +319,14 @@ impl PluginRuntime {
         })?;
 
         let result_json = self.context.with(|ctx| {
-            let func: Function = ctx.globals().get("__gs_call").map_err(|err| PluginCallError {
-                plugin_id: plugin_id.to_string(),
-                path: path.to_string(),
-                kind: PluginCallErrorKind::Engine(format!("取 __gs_call 失败：{err}")),
-            })?;
+            let func: Function = ctx
+                .globals()
+                .get("__gs_call")
+                .map_err(|err| PluginCallError {
+                    plugin_id: plugin_id.to_string(),
+                    path: path.to_string(),
+                    kind: PluginCallErrorKind::Engine(format!("取 __gs_call 失败：{err}")),
+                })?;
             func.call::<_, String>((plugin_id, path, args_json.as_str()))
                 .catch(&ctx)
                 .map_err(|caught| self.build_call_error(plugin_id, path, caught))
@@ -306,20 +335,32 @@ impl PluginRuntime {
         serde_json::from_str(&result_json).map_err(|err| PluginCallError {
             plugin_id: plugin_id.to_string(),
             path: path.to_string(),
-            kind: PluginCallErrorKind::Json(format!("解析返回值 JSON 失败：{err}（原文：{result_json}）")),
+            kind: PluginCallErrorKind::Json(format!(
+                "解析返回值 JSON 失败：{err}（原文：{result_json}）"
+            )),
         })
     }
 
     /// 把 QuickJS 的 `CaughtError` 转换成带映射栈的 [`PluginCallError`]。
-    fn build_call_error(&self, plugin_id: &str, path: &str, caught: CaughtError<'_>) -> PluginCallError {
+    fn build_call_error(
+        &self,
+        plugin_id: &str,
+        path: &str,
+        caught: CaughtError<'_>,
+    ) -> PluginCallError {
         let kind = match caught {
             CaughtError::Exception(exc) => {
-                let message = exc.message().unwrap_or_else(|| "<没有 message 字段>".to_string());
+                let message = exc
+                    .message()
+                    .unwrap_or_else(|| "<没有 message 字段>".to_string());
                 let mapped_stack = exc
                     .stack()
                     .map(|stack| map_stack_trace(&stack))
                     .unwrap_or_default();
-                PluginCallErrorKind::Exception { message, mapped_stack }
+                PluginCallErrorKind::Exception {
+                    message,
+                    mapped_stack,
+                }
             }
             CaughtError::Value(value) => PluginCallErrorKind::ThrownValue {
                 debug: format!("{value:?}"),
@@ -348,28 +389,6 @@ fn describe_caught(caught: &CaughtError<'_>) -> String {
 }
 
 // ============================================================
-// manifest 纯数据 JSON 的访问入口
-// ============================================================
-
-/// 取某个插件 manifest 的纯数据子集（`scripts/gs-bundle-plugins.mjs` 的
-/// 产出）。返回 `serde_json::Value`——本 crate 不为它定义强类型结构体，
-/// 因为不同调用方（`gs-p-authkey` 只关心 `collect.params`，未来的分析引擎
-/// 关心 `pityGroups`/`rarity`）需要的子集不同，在这里定义一个大而全的结构体
-/// 反而会把"只关心自己需要的字段"这个自由度收走。
-pub fn plugin_manifest_data(plugin_id: &str) -> Option<&'static Value> {
-    static PARSED: OnceLock<Value> = OnceLock::new();
-    let root = PARSED.get_or_init(|| {
-        serde_json::from_str(PLUGIN_MANIFEST_JSON).unwrap_or_else(|err| {
-            panic!(
-                "crates/gs-plugin-runtime/generated/plugins.manifest.json 不是合法 JSON：{err}\
-                 ——这份文件禁止手改，若被手改过请重跑 node scripts/gs-bundle-plugins.mjs"
-            )
-        })
-    });
-    root.get(plugin_id)
-}
-
-// ============================================================
 // 栈帧映射
 // ============================================================
 
@@ -383,9 +402,8 @@ fn map_stack_trace(stack: &str) -> Vec<MappedFrame> {
         .lines()
         .filter(|line| !line.trim().is_empty())
         .map(|line| {
-            let original = parse_generated_location(line).and_then(|(gen_line, gen_col)| {
-                lookup_original_location(gen_line, gen_col)
-            });
+            let original = parse_generated_location(line)
+                .and_then(|(gen_line, gen_col)| lookup_original_location(gen_line, gen_col));
             MappedFrame {
                 generated: line.trim().to_string(),
                 original,
@@ -416,7 +434,10 @@ fn lookup_original_location(generated_line: u32, generated_col: u32) -> Option<O
     // sourcemap 规范里生成端位置是 0-based，QuickJS 栈帧给的是 1-based，
     // 因此这里各减一；两者若已经是 0（理论上不会，1-based 最小值是 1）用
     // saturating 兜底，不 panic。
-    let token = map.lookup_token(generated_line.saturating_sub(1), generated_col.saturating_sub(1))?;
+    let token = map.lookup_token(
+        generated_line.saturating_sub(1),
+        generated_col.saturating_sub(1),
+    )?;
     let file = token.get_source().map(normalize_source_path)?;
     Some(OriginalLocation {
         file,
@@ -513,14 +534,18 @@ mod tests {
         assert_eq!(decode_base64("Zm9vYmFy").unwrap(), b"foobar".to_vec());
     }
 
+    /// `plugin_manifest_data` 本身的通用行为（能读到纯数据、未知插件返回
+    /// `None`）已经在 `gs-manifest-data` 自己的测试里覆盖，不在这里重复。
+    /// 这里只验证两件与本 crate 的实际消费方（`gs-p-authkey`）密切相关、
+    /// `gs-manifest-data` 的测试不会去管的事：① 重导出确实能被
+    /// `gs_plugin_runtime::plugin_manifest_data` 这条既有调用路径用到；
+    /// ② `RegExp` 被打包脚本转换成 `{ source, flags }` 的契约仍然成立——
+    /// `gs-p-authkey` 的 `CredentialJson::ChromiumCache.url_pattern` 直接
+    /// 依赖这个形状，形状变了它会反序列化失败。
     #[test]
-    fn plugin_manifest_data_exposes_genshin_pure_data_fields() {
-        let manifest = plugin_manifest_data("genshin").expect("genshin 插件应当已被打包进 manifest JSON");
-        assert_eq!(manifest["id"], serde_json::json!("genshin"));
-        // 函数字段必须已被剥离——fields.extractRecord 是个函数，纯数据 JSON
-        // 里 fields 应当是空对象，而不是携带一个序列化失败的占位符。
-        assert_eq!(manifest["fields"], serde_json::json!({}));
-        // RegExp 转换成 { source, flags } 的契约必须保持。
+    fn reexported_plugin_manifest_data_preserves_regexp_shape_contract() {
+        let manifest =
+            plugin_manifest_data("genshin").expect("genshin 插件应当已被打包进 manifest JSON");
         assert!(manifest["collect"]["params"]["credential"]["urlPattern"]["source"].is_string());
     }
 
@@ -537,7 +562,10 @@ mod tests {
                 .context
                 .with(|ctx| ctx.eval(format!("typeof {name} === \"undefined\"")))
                 .unwrap_or_else(|_| panic!("检查全局量 \"{name}\" 时执行失败"));
-            assert!(is_undefined, "HC-2 违反：\"{name}\" 在 QuickJS 里不是 undefined");
+            assert!(
+                is_undefined,
+                "HC-2 违反：\"{name}\" 在 QuickJS 里不是 undefined"
+            );
         }
     }
 
@@ -574,18 +602,26 @@ mod tests {
     #[test]
     fn call_has_reports_hooks_presence_without_invoking() {
         let runtime = PluginRuntime::new().expect("插件运行时应当能正常启动");
-        assert!(runtime
-            .has("genshin", "hooks.deriveRecordKey")
-            .expect("has 调用不应失败"));
-        assert!(runtime
-            .has("genshin", "hooks.resolveTimezone")
-            .expect("has 调用不应失败"));
-        assert!(!runtime
-            .has("genshin", "hooks.countDraws")
-            .expect("has 调用不应失败"));
-        assert!(!runtime
-            .has("genshin", "hooks.doesNotExist")
-            .expect("has 调用不应失败"));
+        assert!(
+            runtime
+                .has("genshin", "hooks.deriveRecordKey")
+                .expect("has 调用不应失败")
+        );
+        assert!(
+            runtime
+                .has("genshin", "hooks.resolveTimezone")
+                .expect("has 调用不应失败")
+        );
+        assert!(
+            !runtime
+                .has("genshin", "hooks.countDraws")
+                .expect("has 调用不应失败")
+        );
+        assert!(
+            !runtime
+                .has("genshin", "hooks.doesNotExist")
+                .expect("has 调用不应失败")
+        );
     }
 
     /// 错误可读性是硬要求：插件函数抛错时，Rust 侧拿到的错误信息必须包含
@@ -603,13 +639,24 @@ mod tests {
             "count": 1,
         });
         let err = runtime
-            .call("genshin", "hooks.deriveRecordKey", &[record_without_stable_id])
+            .call(
+                "genshin",
+                "hooks.deriveRecordKey",
+                &[record_without_stable_id],
+            )
             .expect_err("缺少 stableId 应当触发插件抛出异常");
 
-        let PluginCallErrorKind::Exception { message, mapped_stack } = &err.kind else {
+        let PluginCallErrorKind::Exception {
+            message,
+            mapped_stack,
+        } = &err.kind
+        else {
             panic!("期望 Exception 变体，实际是 {err:?}");
         };
-        assert!(message.contains("stableId"), "错误信息应包含插件抛出的原始 message：{message}");
+        assert!(
+            message.contains("stableId"),
+            "错误信息应包含插件抛出的原始 message：{message}"
+        );
 
         let rendered = err.to_string();
         assert!(

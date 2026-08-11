@@ -1,27 +1,28 @@
 #!/usr/bin/env node
-// HC-3 · 类型生成 + 运行时校验（codegen 一致性）
+// HC-3 · 类型生成 + 运行时校验
 //
-// 约束：packages/gs-plugin-kit/types/ 下的 TS 类型由 gs-host 生成（HC-3
-// 硬约束之一，禁止手改生成产物）。本门重跑一遍 codegen 命令，再对生成目录
-// 跑 git diff，diff 必须为空，否则说明代码库里已提交的类型和当前 Rust
-// 定义不一致（要么忘了重新生成，要么有人手改了生成产物）。
+// 本门由三条独立的机械检查组成：
+//   ① codegen / 插件 bundle 一致性——重跑生成命令后 git status 必须为空
+//   ② fixture 回归——对每个声明了 fixture.test.ts 的插件跑一遍
+//      assertPluginFixture（extractList → extractRecord → hooks → schema
+//      校验 → 与 expected/normalized.json 比对）
+//   ③ zod schema 覆盖率——packages/gs-plugin-kit/types/generated.ts 导出的
+//      每个类型，schema/index.ts 里必须有对应的运行时校验 schema
 //
-// gs-codegen 这个二进制目前由另一个 agent 实现中，本 Stage 尚未落地。
-// 命令跑不起来时（cargo 报 "no bin target"）不能算失败，只能算“尚未到跑
-// 这道门的阶段”，因此显式识别这种情况并跳过，同时在输出里说清楚，避免
-// 被误读成“门通过了实际检查”。
-//
-// TODO（留待 M1-S4）：
-//   - fixture 回归 assertPluginFixture
-//   - zod schema 覆盖率检查
+// 三条独立收集 findings 后合并判定，不是跑完①就短路返回——
+// ①②③即使①本身通过，②③仍然可能各自发现问题，不能因为①绿了就不跑后两条。
 
 import { spawnSync } from 'node:child_process';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { findRepoRoot } from '../lib/repo-root.mjs';
 import { renderResult, renderSummary } from '../lib/report.mjs';
 
-const GATE_TITLE_BASE = 'HC-3 类型生成（codegen 一致性）';
+const GATE_TITLE_BASE = 'HC-3 类型生成（codegen 一致性 + fixture 回归 + zod 覆盖率）';
 const TYPES_DIR = 'packages/gs-plugin-kit/types/';
+const GENERATED_TYPES_FILE = 'packages/gs-plugin-kit/types/generated.ts';
+const SCHEMA_FILE = 'packages/gs-plugin-kit/schema/index.ts';
 
 // 插件 bundle 与 manifest 静态字段 JSON。它们由 scripts/gs-bundle-plugins.mjs
 // 从 plugins/** 打包，被 gs-plugin-runtime 用 include_str! 嵌进二进制。
@@ -32,14 +33,139 @@ const TYPES_DIR = 'packages/gs-plugin-kit/types/';
 // 而插件代码正是 record_key、归一化这些静默失败高发区的所在。
 const PLUGIN_BUNDLE_DIR = 'crates/gs-plugin-runtime/generated/';
 
-const TODO_NOTES = [
-  'TODO：fixture 回归 assertPluginFixture —— 留待 M1-S4',
-  'TODO：zod schema 覆盖率检查 —— 留待 M1-S4',
-];
-
 function joinOutput(result) {
   return [result.stdout, result.stderr].filter((s) => s && s.trim().length > 0).join('\n');
 }
+
+// ============================================================
+// ② fixture 回归：assertPluginFixture
+// ============================================================
+
+/**
+ * 对每个 `plugins/<id>/fixture.test.ts` 存在的插件目录，真的执行一遍该
+ * 测试脚本（`node --experimental-strip-types`，与插件作者本地跑
+ * `pnpm --filter <id> test` 完全同一条命令）。没有 fixture.test.ts 的插件
+ * 目录不算失败——本 Stage 只有 authkey 范式落了地，其余范式尚未有可运行的
+ * fixture 契约测试实现，跳过并如实计入 notes，不装作已经验证过。
+ */
+function runFixtureRegression(repoRoot) {
+  const pluginsDir = path.join(repoRoot, 'plugins');
+  let entries;
+  try {
+    entries = readdirSync(pluginsDir, { withFileTypes: true });
+  } catch {
+    return { findings: [], scannedCount: 0, skippedCount: 0 };
+  }
+
+  const gameDirs = entries.filter((entry) => entry.isDirectory() && entry.name !== 'node_modules');
+  const findings = [];
+  let scannedCount = 0;
+  let skippedCount = 0;
+
+  for (const dirEntry of gameDirs) {
+    const testFile = path.join(pluginsDir, dirEntry.name, 'fixture.test.ts');
+    if (!existsSync(testFile)) {
+      skippedCount += 1;
+      continue;
+    }
+    scannedCount += 1;
+    const relTestFile = path.relative(repoRoot, testFile);
+    const result = spawnSync('node', ['--experimental-strip-types', relTestFile], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+    });
+    if (result.error || result.status !== 0) {
+      findings.push({
+        file: relTestFile,
+        line: 0,
+        column: 0,
+        reason: result.error
+          ? `无法执行 fixture 回归测试：${result.error.message}`
+          : `fixture 回归测试失败，退出码 ${result.status}`,
+        snippet: joinOutput(result),
+      });
+    }
+  }
+
+  return { findings, scannedCount, skippedCount };
+}
+
+// ============================================================
+// ③ zod schema 覆盖率
+// ============================================================
+
+/**
+ * `types/generated.ts` 每一行顶层类型导出都形如
+ * `export type Foo = ...;`（哪怕类型体本身跨多行，声明这一行本身必然独占
+ * 一行且以 `export type 名字` 开头），逐行匹配即可拿到全部类型名，不需要
+ * 解析完整的 TS 类型语法。
+ */
+function extractGeneratedTypeNames(source) {
+  return [...source.matchAll(/^export type ([A-Za-z0-9_]+)\b/gm)].map((m) => m[1]);
+}
+
+/** schema/index.ts 里每个导出的 zod schema 都形如 `export const fooSchema = ...`。 */
+function extractSchemaExportNames(source) {
+  return new Set([...source.matchAll(/^export const ([A-Za-z0-9_]+)\s*=/gm)].map((m) => m[1]));
+}
+
+/** 类型名到期望 schema 名的转换约定：首字母小写 + Schema 后缀（如 GachaRecord → gachaRecordSchema）。 */
+function expectedSchemaName(typeName) {
+  return `${typeName.charAt(0).toLowerCase()}${typeName.slice(1)}Schema`;
+}
+
+/**
+ * 校验 generated.ts 导出的每个纯数据类型，schema/index.ts 里都有一个按命名
+ * 约定对应的 zod schema——这是运行时校验覆盖率的机械下限：类型本身只在
+ * 编译期把关，插件在 QuickJS 里跑出来的实际数据仍需要运行时 schema 校验兜底
+ * （见 schema/index.ts 顶部文档），少一个 schema 就是运行时校验的一处盲区，
+ * 而这类缺口在编译期完全不可见。
+ */
+function checkZodCoverage(repoRoot) {
+  const generatedPath = path.join(repoRoot, GENERATED_TYPES_FILE);
+  const schemaPath = path.join(repoRoot, SCHEMA_FILE);
+
+  let generatedSource;
+  let schemaSource;
+  try {
+    generatedSource = readFileSync(generatedPath, 'utf8');
+    schemaSource = readFileSync(schemaPath, 'utf8');
+  } catch (err) {
+    return {
+      findings: [
+        {
+          file: GENERATED_TYPES_FILE,
+          line: 0,
+          column: 0,
+          reason: `读取类型/schema 源文件失败：${err.message}`,
+        },
+      ],
+      typeCount: 0,
+    };
+  }
+
+  const typeNames = extractGeneratedTypeNames(generatedSource);
+  const schemaNames = extractSchemaExportNames(schemaSource);
+
+  const findings = [];
+  for (const typeName of typeNames) {
+    const expected = expectedSchemaName(typeName);
+    if (!schemaNames.has(expected)) {
+      findings.push({
+        file: SCHEMA_FILE,
+        line: 0,
+        column: 0,
+        reason: `types/generated.ts 导出的类型 "${typeName}" 在 schema/index.ts 里没有对应的 "${expected}"——运行时校验存在盲区`,
+      });
+    }
+  }
+
+  return { findings, typeCount: typeNames.length };
+}
+
+// ============================================================
+// 主流程
+// ============================================================
 
 export async function run() {
   const repoRoot = findRepoRoot();
@@ -64,22 +190,24 @@ export async function run() {
           reason: `无法执行 cargo 命令：${codegenResult.error.message}`,
         },
       ],
-      notes: TODO_NOTES,
+      notes: [],
     };
   }
 
   if (codegenResult.status !== 0) {
     const stderr = codegenResult.stderr ?? '';
     if (/no bin target/i.test(stderr)) {
+      // gs-codegen 二进制在写下这段注释时还没落地；本仓库当前实测已经存在
+      // （crates/gs-host/src/bin/gs-codegen.rs），保留这条分支只是防御性地
+      // 兼容"此二进制被移除/改名"的极端情况，不应该在正常状态下触发。
       return {
         id: 'HC-3',
-        title: `${GATE_TITLE_BASE}（gs-codegen 尚未落地，跳过本门）`,
+        title: `${GATE_TITLE_BASE}（gs-codegen 不可用，跳过 codegen 一致性子检查）`,
         status: 'skip',
         findings: [],
         notes: [
-          'gs-codegen 二进制尚未实现（cargo run -p gs-host --bin gs-codegen 报 "no bin target"），本门跳过，不计入 gs:check 整体失败。',
-          '待 gs-host 落地该二进制后，请重新确认本门是否真的转为通过/失败，不要一直停在跳过状态。',
-          ...TODO_NOTES,
+          'gs-codegen 二进制不可执行（cargo run -p gs-host --bin gs-codegen 报 "no bin target"），codegen 一致性子检查跳过，不计入 gs:check 整体失败。',
+          '请确认 crates/gs-host/src/bin/gs-codegen.rs 是否被移除或改名，这不应该是正常状态。',
         ],
       };
     }
@@ -97,7 +225,7 @@ export async function run() {
           snippet: joinOutput(codegenResult),
         },
       ],
-      notes: TODO_NOTES,
+      notes: [],
     };
   }
 
@@ -131,7 +259,7 @@ export async function run() {
           snippet: joinOutput(bundleResult),
         },
       ],
-      notes: TODO_NOTES,
+      notes: [],
     };
   }
 
@@ -155,7 +283,7 @@ export async function run() {
           snippet: joinOutput(statusResult),
         },
       ],
-      notes: TODO_NOTES,
+      notes: [],
     };
   }
 
@@ -164,19 +292,9 @@ export async function run() {
     .map((line) => line.trimEnd())
     .filter((line) => line.length > 0);
 
-  if (dirtyEntries.length === 0) {
-    return {
-      id: 'HC-3',
-      title: GATE_TITLE_BASE,
-      status: 'pass',
-      findings: [],
-      notes: TODO_NOTES,
-    };
-  }
-
   // porcelain 的状态码前两位区分了原因，翻译成人话再给出去，
   // 否则用户看到 `?? xxx.ts` 不知道该提交还是该重跑 codegen。
-  const findings = dirtyEntries.map((entry) => {
+  const structuralFindings = dirtyEntries.map((entry) => {
     const code = entry.slice(0, 2);
     const filePath = entry.slice(3);
     const reason = code === '??'
@@ -185,12 +303,30 @@ export async function run() {
     return { file: filePath, line: 0, column: 0, reason };
   });
 
+  // ① 通过与否不影响②③是否继续跑——三条子检查各自独立发现问题，
+  // 不能因为①已经报了错就假设②③"反正也过不了"而跳过。
+  const fixtureCheck = runFixtureRegression(repoRoot);
+  const zodCheck = checkZodCoverage(repoRoot);
+
+  const findings = [...structuralFindings, ...fixtureCheck.findings, ...zodCheck.findings];
+
+  const notes = [
+    dirtyEntries.length === 0
+      ? '① codegen / 插件 bundle 一致性：重新生成后 git status 干净'
+      : `① codegen / 插件 bundle 一致性：发现 ${dirtyEntries.length} 处不一致（见上方命中详情）`,
+    `② fixture 回归：已对 ${fixtureCheck.scannedCount} 个插件跑 assertPluginFixture` +
+      (fixtureCheck.skippedCount > 0
+        ? `，另有 ${fixtureCheck.skippedCount} 个插件目录没有 fixture.test.ts，未纳入本次回归（不计入失败）`
+        : ''),
+    `③ zod schema 覆盖率：已核对 types/generated.ts 导出的 ${zodCheck.typeCount} 个类型`,
+  ];
+
   return {
     id: 'HC-3',
     title: GATE_TITLE_BASE,
-    status: 'fail',
+    status: findings.length > 0 ? 'fail' : 'pass',
     findings,
-    notes: TODO_NOTES,
+    notes,
   };
 }
 

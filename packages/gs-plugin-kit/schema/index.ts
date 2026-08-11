@@ -50,6 +50,21 @@ function optionalNonEmptyString() {
   return z.string().min(1).optional();
 }
 
+/**
+ * 概率分数字段：取值域 `[0, 1]`。
+ *
+ * 依据 `crates/gs-core/src/pity.rs` 里 `ProbabilityCurve::SoftPity` 文档注释
+ * 记录的真实事故——`step` 曾被写成整数百分点（如 `6` 表示 6%），而 `base`
+ * 是概率分数（如 `0.006`），两者单位不一致；Rust 侧已经改成统一用 `f64`
+ * 分数修正，但生成的 TS 类型两者都只是裸 `number`，**类型本身没有能力
+ * 区分「0.06」和「6」哪个对**，插件作者两种写法都能通过编译期检查。
+ * 这正是"HC-3 结构检查的盲区，只能靠 schema 兜"的典型案例，因此这里补上
+ * 取值域约束——概率不可能小于 0 或大于 1，`6` 这种百分点整数写法会被拒绝。
+ */
+function probabilityFraction() {
+  return z.number().min(0).max(1);
+}
+
 /** 对应 MetadataEntry。字段语义与 UnifiedRecordFields 的同名字段一致，见上方 {@link optionalNonEmptyString}。 */
 export const metadataEntrySchema = z.object({
   name: optionalNonEmptyString(),
@@ -64,9 +79,10 @@ export const rareEventRefSchema = z.object({
 
 export const bannerBaselineSchema = z.object({
   bannerKey: z.string(),
-  drawCount: z.number().optional(),
+  // drawCount / pityMax 都是"抽数"，语义上不可能是负数或分数。
+  drawCount: z.number().int().nonnegative().optional(),
   rareEvents: z.array(rareEventRefSchema),
-  pityMax: z.number().optional(),
+  pityMax: z.number().int().nonnegative().optional(),
 });
 
 // ============================================================
@@ -83,25 +99,32 @@ export const recordKeySchema = z.string();
 
 /** 对应 GachaRecord——宿主归一化 + 入库后的记录形态，非插件直接产出的数据。 */
 export const gachaRecordSchema = z.object({
-  id: z.number(),
-  accountId: z.number(),
+  // id / accountId 是数据库主键与外键，恒为正整数。
+  id: z.number().int().positive(),
+  accountId: z.number().int().positive(),
   bannerKey: z.string(),
   pityGroup: z.string(),
   recordKey: recordKeySchema,
   lang: z.string().optional(),
-  occurredAt: z.number(),
+  // occurredAt / capturedAt 是 UTC 毫秒时间戳，恒为非负整数。
+  occurredAt: z.number().int().nonnegative(),
   occurredRaw: z.string(),
   tzOrigin: tzOriginSchema,
-  tzOffsetMin: z.number().optional(),
-  seqInBatch: z.number().optional(),
+  // 时区偏移分钟数——刻意不加 nonnegative：西半球时区偏移是负数
+  // （如美服 UTC-5 对应 -300），这与 drawCount 之类"抽数"字段不同。
+  tzOffsetMin: z.number().int().optional(),
+  seqInBatch: z.number().int().nonnegative().optional(),
   itemId: z.string(),
   itemType: optionalNonEmptyString(),
   rarity: optionalNonEmptyString(),
-  qty: z.number(),
+  // qty 是"数量"不是"抽数"，业务默认值为 1，但字段注释明确写"避免把未提供
+  // 数量和显式 0 混为一谈"，因此只约束非负整数，不额外要求 positive。
+  qty: z.number().int().nonnegative(),
   metaState: metaStateSchema,
   source: recordSourceSchema,
-  capturedAt: z.number(),
-  rawRef: z.number().optional(),
+  capturedAt: z.number().int().nonnegative(),
+  // rawRef 指向 raw_payload 表的行 id，若存在必为正整数。
+  rawRef: z.number().int().positive().optional(),
   extra: z.string().optional(),
 });
 
@@ -123,7 +146,9 @@ export const unifiedRecordFieldsSchema = z.object({
   itemId: z.string(),
   time: z.string(),
   bannerId: z.string(),
-  count: z.number(),
+  // count 是"本条获得的物品数量"，米哈游三游恒为 1，异环可为 1/4/5/16/30/50——
+  // 无论哪个游戏，都不可能是负数或分数，因此约束为正整数。
+  count: z.number().int().positive(),
   name: optionalNonEmptyString(),
   itemType: optionalNonEmptyString(),
   rarity: optionalNonEmptyString(),
@@ -134,14 +159,21 @@ export const unifiedRecordFieldsSchema = z.object({
 // 保底：ProbabilityCurve / GuaranteeRule / PityGroup
 // ============================================================
 
+// base / step / table 均为概率分数（见 probabilityFraction 文档注释的
+// SoftPity 单位事故）；start 是"第几抽起"，恒为非负整数。
 export const probabilityCurveSchema = z.discriminatedUnion("kind", [
-  z.object({ kind: z.literal("flat"), base: z.number() }),
-  z.object({ kind: z.literal("softPity"), base: z.number(), start: z.number(), step: z.number() }),
+  z.object({ kind: z.literal("flat"), base: probabilityFraction() }),
+  z.object({
+    kind: z.literal("softPity"),
+    base: probabilityFraction(),
+    start: z.number().int().nonnegative(),
+    step: probabilityFraction(),
+  }),
   z.object({
     kind: z.literal("progressive"),
-    base: z.number(),
-    start: z.number(),
-    table: z.array(z.number()),
+    base: probabilityFraction(),
+    start: z.number().int().nonnegative(),
+    table: z.array(probabilityFraction()),
   }),
   z.object({ kind: z.literal("custom"), id: z.string() }),
 ]);
@@ -149,14 +181,16 @@ export const probabilityCurveSchema = z.discriminatedUnion("kind", [
 export const guaranteeRuleSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("fiftyFifty") }),
   z.object({ kind: z.literal("alwaysRateUp") }),
-  z.object({ kind: z.literal("weighted"), rateUpChance: z.number() }),
+  // rateUpChance 同样是概率分数，同一单位约束。
+  z.object({ kind: z.literal("weighted"), rateUpChance: probabilityFraction() }),
   z.object({ kind: z.literal("none") }),
 ]);
 
 export const pityGroupSchema = z.object({
   key: z.string(),
   members: z.array(z.string()),
-  hardPity: z.number(),
+  // hardPity 是"多少抽内必出"，恒为正整数（0 抽保底没有意义）。
+  hardPity: z.number().int().positive(),
   curve: probabilityCurveSchema,
   guarantee: guaranteeRuleSchema,
 });
@@ -168,15 +202,15 @@ export const pityGroupSchema = z.object({
 export const backoffKindSchema = z.enum(["fixed", "exponential"]);
 
 export const retryConfigSchema = z.object({
-  maxAttempts: z.number().optional(),
+  maxAttempts: z.number().int().positive().optional(),
   backoff: backoffKindSchema.optional(),
-  delayMs: z.number().optional(),
+  delayMs: z.number().int().nonnegative().optional(),
 });
 
 export const rateLimitConfigSchema = z.object({
-  perPageDelayMs: z.number().optional(),
-  batchSize: z.number().optional(),
-  batchDelayMs: z.number().optional(),
+  perPageDelayMs: z.number().int().nonnegative().optional(),
+  batchSize: z.number().int().positive().optional(),
+  batchDelayMs: z.number().int().nonnegative().optional(),
   retry: retryConfigSchema.optional(),
 });
 
@@ -196,7 +230,7 @@ export const rawTimeConventionSchema = z.enum(["serverLocal", "clientLocalized"]
 
 export const timezoneSourceSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("apiField"), field: z.string() }),
-  z.object({ kind: z.literal("staticTable"), table: z.record(z.string(), z.number()) }),
+  z.object({ kind: z.literal("staticTable"), field: z.string(), table: z.record(z.string(), z.number()) }),
   z.object({ kind: z.literal("computed") }),
 ]);
 
@@ -218,8 +252,8 @@ export const preconditionStatusSchema = z.discriminatedUnion("kind", [
 ]);
 
 export const gameClientSizeSchema = z.object({
-  width: z.number(),
-  height: z.number(),
+  width: z.number().int().positive(),
+  height: z.number().int().positive(),
 });
 
 export const hostEnvSchema = z.object({
@@ -257,7 +291,12 @@ export const acquireErrorSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("credentialExpired"), expiredAt: z.string().optional() }),
   z.object({ kind: z.literal("missingDependency"), dependency: dependencySchema }),
   z.object({ kind: z.literal("elevationRequired") }),
-  z.object({ kind: z.literal("upstream"), status: z.number(), bodyExcerpt: z.string() }),
+  // status 是 HTTP 状态码，取值域被协议本身限定在 100~599。
+  z.object({
+    kind: z.literal("upstream"),
+    status: z.number().int().min(100).max(599),
+    bodyExcerpt: z.string(),
+  }),
   z.object({ kind: z.literal("network"), detail: networkErrorSchema }),
 ]);
 
@@ -272,7 +311,8 @@ export const raritySpecSchema = z.object({
 
 export const retentionPolicySchema = z.object({
   displayText: localizedTextSchema,
-  conservativeDays: z.number(),
+  // 保留期天数，恒为非负整数。
+  conservativeDays: z.number().int().nonnegative(),
 });
 
 export const drawCountingConfigSchema = z.discriminatedUnion("kind", [

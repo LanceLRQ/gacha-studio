@@ -105,9 +105,14 @@ pub enum RawTimeConvention {
     ClientLocalized,
 }
 
-/// 时区信息从哪里推断——三个米哈游参考工具时区可得性完全不一致
-/// （星铁有 `region` + `region_time_zone`，绝区零只有 `region_time_zone`，
-/// 原神两者都没有），因此不能假设只有一种来源，必须是判别联合。
+/// 时区信息从哪里推断——三个米哈游参考工具时区可得性完全不一致：星铁 API
+/// 直接返回 `region_time_zone`（对应 `ApiField`）；绝区零 API 只返回
+/// `region`，时区靠客户端静态表按 `region` 查出来（对应 `StaticTable`），
+/// `region_time_zone` 是查表算出来再写回导出存档的派生值，不是原始响应
+/// 字段（源码级核实：`research/04-同族工具三方源码对比.md` §4.4，
+/// `zzz-signal-search-export/src/main/getData.js:33-39,460`）；原神两者都
+/// 不返回，只能靠 `Computed` 按其他信号推断。因此不能假设只有一种来源，
+/// 必须是判别联合。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 #[ts(tag = "kind", rename_all = "camelCase")]
@@ -116,6 +121,13 @@ pub enum TimezoneSource {
     ApiField { field: String },
     /// 接口不返回时区，用静态表按区服/服务器标识查表。
     StaticTable {
+        /// 从响应体的哪个字段读取查表键（如绝区零的 `region`），语义与
+        /// `ApiField::field` 对称——`field` 决定去响应体里读哪个原始值，
+        /// 只是这里读到的不是最终偏移量，而是拿去 `table` 里再查一次。
+        /// 缺了这个字段，L1 执行层拿到 `table` 后不知道该用谁去查——是一处
+        /// 已被 M1-S7 纸面填表演练发现的类型不对称，见
+        /// `docs/_internal/audit/AUDIT-2026-08-11-S7纸面填表演练.md` §3.1。
+        field: String,
         #[ts(type = "Record<string, number>")]
         table: BTreeMap<String, i32>,
     },
@@ -219,10 +231,12 @@ mod tests {
     #[test]
     fn timezone_source_static_table_round_trips_with_camel_case_field() {
         let source = TimezoneSource::StaticTable {
+            field: "region".to_string(),
             table: BTreeMap::from([("os_usa".to_string(), -480), ("os_cht".to_string(), 480)]),
         };
         let json = serde_json::to_value(&source).unwrap();
         assert_eq!(json["kind"], serde_json::json!("staticTable"));
+        assert_eq!(json["field"], serde_json::json!("region"));
         assert_eq!(
             json["table"],
             serde_json::json!({ "os_usa": -480, "os_cht": 480 })

@@ -15,8 +15,17 @@
 //     经常就出现在 require("child_process") 这样的字符串参数里）
 //   - 参数为变量/表达式的动态 import(...)（字符串字面量或无插值模板
 //     字符串参数视为合法，因为那等价于静态可分析的编译期路径）
+//
+// 另一条检查：注册表一致性（双向）。
+// `scripts/gs-bundle-plugins.mjs:106` 的 `discoverPluginIds()` 明确不读
+// `plugins/index.ts`，而是直接扫 `plugins/<id>/manifest.ts` 是否存在——即
+// 「往 plugins/ 下扔一个目录、完全不碰 index.ts，代码照样会被打包进二进制」。
+// 这就让"显式注册表是 code review 唯一安全防线"这条 HC-1 的前提在打包环节
+// 失效：注册表本身不再是真正的闸门，只是一份可能过期的清单。
+// 因此这里校验 `plugins/` 下实际存在的插件目录集合与 `plugins/index.ts`
+// 注册的集合严格相等（多一个、少一个都报错），让注册表重新成为真实闸门。
 
-import { readdirSync, readFileSync } from 'node:fs';
+import { readdirSync, readFileSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { findRepoRoot } from '../lib/repo-root.mjs';
@@ -181,6 +190,111 @@ function scanFile(filePath, repoRoot) {
   return findings;
 }
 
+/**
+ * 发现 `plugins/` 下实际存在的插件目录（存在 manifest.ts 即算一个），
+ * 判定逻辑与 scripts/gs-bundle-plugins.mjs 的 discoverPluginIds() 保持一致——
+ * 两者刻意用同一条判据，否则这道检查本身就会与打包脚本的真实行为脱节。
+ */
+function discoverPluginDirIds(pluginsDir) {
+  let entries;
+  try {
+    entries = readdirSync(pluginsDir, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  return entries
+    .filter((entry) => entry.isDirectory() && entry.name !== 'node_modules')
+    .map((entry) => entry.name)
+    .filter((name) => {
+      try {
+        return statSync(path.join(pluginsDir, name, 'manifest.ts')).isFile();
+      } catch {
+        return false;
+      }
+    })
+    .sort();
+}
+
+/**
+ * 从 `plugins/index.ts` 里抠出注册表数组实际引用的插件 id 列表。
+ * 用 stripComments 剥离注释后再匹配——该文件顶部的 JSDoc 里就写着
+ * `() => import("./genshin/manifest")` 作为使用范例，不剥离注释会把示例
+ * 文字误判成一条真实注册项。
+ */
+function extractRegistryIds(repoRoot) {
+  const indexPath = path.join(repoRoot, 'plugins', 'index.ts');
+  let raw;
+  try {
+    raw = readFileSync(indexPath, 'utf8');
+  } catch {
+    return null;
+  }
+  const stripped = stripComments(raw);
+  const ids = [];
+  for (const m of stripped.matchAll(/import\(\s*["']\.\/([A-Za-z0-9_-]+)\/manifest(?:\.ts)?["']\s*\)/g)) {
+    ids.push(m[1]);
+  }
+  return { ids, relPath: path.relative(repoRoot, indexPath) };
+}
+
+/**
+ * 双向校验：`plugins/` 下的插件目录集合 与 `plugins/index.ts` 注册的集合
+ * 必须严格相等。任一方向的差集都判定为违规——多了说明注册表没跟上目录
+ * （打包脚本会悄悄把未经 review 关卡的代码带进二进制），少了说明注册表里
+ * 有指向不存在目录的残留项（打包脚本反而会因此在 discoverPluginIds 环节
+ * 找不到该项，属于文档与实际状态脱节）。
+ */
+function checkRegistryConsistency(repoRoot) {
+  const pluginsDir = path.join(repoRoot, 'plugins');
+  const directoryIds = discoverPluginDirIds(pluginsDir);
+  const registry = extractRegistryIds(repoRoot);
+
+  if (registry === null) {
+    return {
+      findings: [
+        {
+          file: 'plugins/index.ts',
+          line: 0,
+          column: 0,
+          reason: '插件显式注册表文件不存在，无法校验注册表与插件目录是否一致',
+        },
+      ],
+      directoryCount: directoryIds.length,
+      registryCount: 0,
+    };
+  }
+
+  const registrySet = new Set(registry.ids);
+  const directorySet = new Set(directoryIds);
+  const findings = [];
+
+  for (const id of directoryIds) {
+    if (!registrySet.has(id)) {
+      findings.push({
+        file: `plugins/${id}/manifest.ts`,
+        line: 0,
+        column: 0,
+        reason:
+          `插件目录 "plugins/${id}/" 存在 manifest.ts，但 "${registry.relPath}" 注册表未包含它——` +
+          'scripts/gs-bundle-plugins.mjs 按目录扫描打包，此目录会被打包进二进制却未经注册表这道 code review 关卡',
+      });
+    }
+  }
+
+  for (const id of registry.ids) {
+    if (!directorySet.has(id)) {
+      findings.push({
+        file: registry.relPath,
+        line: 0,
+        column: 0,
+        reason: `注册表引用了 "./${id}/manifest.ts"，但该目录或 manifest.ts 文件不存在（可能是残留的失效注册项）`,
+      });
+    }
+  }
+
+  return { findings, directoryCount: directoryIds.length, registryCount: registry.ids.length };
+}
+
 export async function run() {
   const repoRoot = findRepoRoot();
   const pluginsDir = path.join(repoRoot, 'plugins');
@@ -191,9 +305,13 @@ export async function run() {
     findings.push(...scanFile(file, repoRoot));
   }
 
+  const registryCheck = checkRegistryConsistency(repoRoot);
+  findings.push(...registryCheck.findings);
+
   const notes = [
     `已扫描 plugins/**/*.ts 共 ${files.length} 个文件（跳过 node_modules）`,
     'vm. 检查为启发式子串匹配，对偶然命名为 vm 的普通变量会产生误报，需要人工复核',
+    `注册表一致性（双向）：plugins/ 下 ${registryCheck.directoryCount} 个插件目录 vs plugins/index.ts 注册 ${registryCheck.registryCount} 项`,
   ];
 
   return {

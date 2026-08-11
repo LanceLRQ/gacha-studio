@@ -8,6 +8,10 @@ description = "插件 JS 运行时桥接：内嵌 QuickJS 引擎执行插件编�
 
 [dependencies]
 serde_json.workspace = true
+# manifest 纯数据 JSON 的读取能力已拆到 gs-manifest-data（不需要 QuickJS
+# 就能用），本 crate 只是转发它的 plugin_manifest_data，保持既有调用方
+# （如 gs-p-authkey）的调用路径不变。见该 crate 顶部说明。
+gs-manifest-data.workspace = true
 # 插件运行时：内嵌 JS 引擎，见 src/lib.rs 顶部说明。选 QuickJS（而非
 # V8/deno_core）是 M1-S3 的架构裁定——二进制体积增量以 KB 计，不是
 # V8/deno_core 那种几十 MB 级别，符合桌面应用分发的体积预算。

@@ -237,11 +237,14 @@ pub enum RecordSource {
 ///
 /// **时间三元组**（`occurred_at` + `occurred_raw` + `tz_origin` /
 /// `tz_offset_min`）不是冗余设计。三个米哈游参考工具的时间字段一律不带
-/// 时区，而时区可得性完全不一致：星铁同时有 `region` 和
-/// `region_time_zone`，绝区零只有 `region_time_zone`，原神两者都没有。
-/// 若只存换算后的 UTC 毫秒数，一旦某次换算推断错了，污染就是永久性的、
-/// 无从追溯——因为原始字符串已经丢了。保留 `occurred_raw` 与
-/// `tz_origin`，换算逻辑修 bug 后才有重新推导的依据。
+/// 时区，而时区可得性完全不一致：星铁 API 直接返回 `region` 与
+/// `region_time_zone`（可直接读取使用）；绝区零 API 只返回 `region`，
+/// `region_time_zone` 是客户端拿 `region` 查静态表算出来、再写回导出存档的
+/// 派生值，不是原始响应字段（源码级核实：`research/04-同族工具三方源码
+/// 对比.md` §4.4，`zzz-signal-search-export/src/main/getData.js:33-39,460`）；
+/// 原神两者都不返回。若只存换算后的 UTC 毫秒数，一旦某次换算推断错了，
+/// 污染就是永久性的、无从追溯——因为原始字符串已经丢了。保留
+/// `occurred_raw` 与 `tz_origin`，换算逻辑修 bug 后才有重新推导的依据。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct GachaRecord {

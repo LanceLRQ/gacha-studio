@@ -35,18 +35,13 @@ pub enum IntegrityGap {
     Range { missing: DrawCountRange },
 }
 
-/// 依据 `row.precision` 决定返回精确值还是区间。
-///
-/// `page_size` 由调用方显式传入，而不是从 `row` 里读——`v_integrity`
-/// 视图目前只从 `banner_snapshot.extra` 里提取了 `precision` 字段，没有
-/// 一并提取 `page_size`/`page_count`（迁移 SQL 里写入时两者都在，只是视图
-/// 没有 `json_extract` 出来），`gs_storage::Repository` 也没有暴露读取
-/// 原始 `extra` JSON 的查询方法。这是本 Stage 发现的一处真实接口缺口，
-/// 不在本 crate 里通过绕开 `gs-storage` 或伪造数据来"解决"——按任务边界，
-/// `gs-storage` 不是本 Stage 可改的范围，缺口原样记录，留给调用方在
-/// 缺口补上前自行提供 `page_size`（若确实拿不到，传 `None`，函数会给出
-/// 一个宽度为零、但类型上仍标注为 `Range` 的保守区间，不会伪装成精确值）。
-pub fn evaluate_draw_count_gap(row: &IntegrityRow, page_size: Option<u32>) -> IntegrityGap {
+/// 依据 `row.precision` 决定返回精确值还是区间；区间宽度直接从
+/// `row.page_size` 算，不再需要调用方额外传参——`v_integrity` 视图现在把
+/// `banner_snapshot.extra` 里的 `page_size`/`page_count` 一并 `json_extract`
+/// 出来了（迁移 `0002_v_integrity_page_columns`），`gs_storage::IntegrityRow`
+/// 随之带上这两个字段。调用方不再需要（也不应该）自己解一遍 `extra` JSON
+/// 才能拿到这两个值——视图对它自己的用途现在是自足的。
+pub fn evaluate_draw_count_gap(row: &IntegrityRow) -> IntegrityGap {
     let Some(official) = row.official_draws else {
         return IntegrityGap::NoBaseline;
     };
@@ -58,7 +53,11 @@ pub fn evaluate_draw_count_gap(row: &IntegrityRow, page_size: Option<u32>) -> In
 
     match row.precision.as_str() {
         "page" => {
-            let width = page_size.map_or(0, |size| i64::from(size.saturating_sub(1)));
+            // page_size 缺失（理论上不该发生在 precision="page" 的行上，
+            // 但防御性地按"宽度退化为 0"处理，不假设视图另一列一定齐全）
+            // 时不改变返回的分支——仍然是 `Range`，只是宽度为零，不会伪装成
+            // `Exact`，见下方 `page_precision_without_known_page_size_...` 测试。
+            let width = row.page_size.map_or(0, |size| (size - 1).max(0));
             IntegrityGap::Range {
                 missing: DrawCountRange {
                     min: missing,
@@ -75,7 +74,12 @@ pub fn evaluate_draw_count_gap(row: &IntegrityRow, page_size: Option<u32>) -> In
 mod tests {
     use super::*;
 
-    fn row(official_draws: Option<i64>, local_draws: i64, precision: &str) -> IntegrityRow {
+    fn row(
+        official_draws: Option<i64>,
+        local_draws: i64,
+        precision: &str,
+        page_size: Option<i64>,
+    ) -> IntegrityRow {
         IntegrityRow {
             account_id: 1,
             banner_key: "301".to_string(),
@@ -84,38 +88,37 @@ mod tests {
             official_rares: None,
             local_rares: 0,
             precision: precision.to_string(),
+            page_size,
+            page_count: None,
         }
     }
 
     #[test]
     fn returns_no_baseline_when_official_draws_is_absent() {
-        let row = row(None, 100, "exact");
-        assert_eq!(
-            evaluate_draw_count_gap(&row, None),
-            IntegrityGap::NoBaseline
-        );
+        let row = row(None, 100, "exact", None);
+        assert_eq!(evaluate_draw_count_gap(&row), IntegrityGap::NoBaseline);
     }
 
     #[test]
     fn returns_complete_when_local_meets_or_exceeds_official() {
-        let exact_match = row(Some(100), 100, "exact");
+        let exact_match = row(Some(100), 100, "exact", None);
         assert_eq!(
-            evaluate_draw_count_gap(&exact_match, None),
+            evaluate_draw_count_gap(&exact_match),
             IntegrityGap::Complete
         );
 
-        let local_ahead = row(Some(100), 105, "exact");
+        let local_ahead = row(Some(100), 105, "exact", None);
         assert_eq!(
-            evaluate_draw_count_gap(&local_ahead, None),
+            evaluate_draw_count_gap(&local_ahead),
             IntegrityGap::Complete
         );
     }
 
     #[test]
     fn returns_exact_missing_count_for_authoritative_precision() {
-        let row = row(Some(100), 93, "exact");
+        let row = row(Some(100), 93, "exact", None);
         assert_eq!(
-            evaluate_draw_count_gap(&row, None),
+            evaluate_draw_count_gap(&row),
             IntegrityGap::Exact { missing: 7 }
         );
     }
@@ -124,8 +127,8 @@ mod tests {
     fn returns_range_for_page_precision_matching_the_nte_calibration() {
         // 异环实证：official_draws 已经是页码下界 291（(59-1)*5+1），
         // page_size=5，本地 286 条 → 缺 5~9 条，而不是"缺 7 条"。
-        let row = row(Some(291), 286, "page");
-        let outcome = evaluate_draw_count_gap(&row, Some(5));
+        let row = row(Some(291), 286, "page", Some(5));
+        let outcome = evaluate_draw_count_gap(&row);
         assert_eq!(
             outcome,
             IntegrityGap::Range {
@@ -136,8 +139,8 @@ mod tests {
 
     #[test]
     fn range_outcome_cannot_be_read_as_a_single_number_without_destructuring() {
-        let row = row(Some(291), 286, "page");
-        let outcome = evaluate_draw_count_gap(&row, Some(5));
+        let row = row(Some(291), 286, "page", Some(5));
+        let outcome = evaluate_draw_count_gap(&row);
 
         // 唯一能从 Range 里拿到数字的路径是显式解构出 min/max 两个字段——
         // 不存在类似 Exact 分支 `missing: i64` 那样的单一数值字段，
@@ -156,10 +159,11 @@ mod tests {
 
     #[test]
     fn page_precision_without_known_page_size_still_signals_a_range_not_an_exact_value() {
-        // page_size 缺失时，接口形状依然返回 Range（宽度退化为 0），
-        // 而不是悄悄降级成 Exact——调用方仍然能从类型上看出"这是页码基准"。
-        let row = row(Some(291), 286, "page");
-        let outcome = evaluate_draw_count_gap(&row, None);
+        // page_size 缺失时（行上没有这一列的值），接口形状依然返回 Range
+        // （宽度退化为 0），而不是悄悄降级成 Exact——调用方仍然能从类型上
+        // 看出"这是页码基准"。
+        let row = row(Some(291), 286, "page", None);
+        let outcome = evaluate_draw_count_gap(&row);
         assert_eq!(
             outcome,
             IntegrityGap::Range {

@@ -82,7 +82,16 @@ export type ErrorSemantic = "authkeyExpired" | "rateLimited" | "unknown";
 export type StopCondition = { "kind": "emptyPage", } | { "kind": "cursorExhausted", } | { "kind": "reachedKnown", };
 export type TimeConfig = { rawTimeConvention?: RawTimeConvention, timezoneSource?: TimezoneSource, };
 export type RawTimeConvention = "serverLocal" | "clientLocalized";
-export type TimezoneSource = { "kind": "apiField", field: string, } | { "kind": "staticTable", table: Record<string, number>, } | { "kind": "computed", };
+export type TimezoneSource = { "kind": "apiField", field: string, } | { "kind": "staticTable", 
+/**
+ * 从响应体的哪个字段读取查表键（如绝区零的 `region`），语义与
+ * `ApiField::field` 对称——`field` 决定去响应体里读哪个原始值，
+ * 只是这里读到的不是最终偏移量，而是拿去 `table` 里再查一次。
+ * 缺了这个字段，L1 执行层拿到 `table` 后不知道该用谁去查——是一处
+ * 已被 M1-S7 纸面填表演练发现的类型不对称，见
+ * `docs/_internal/audit/AUDIT-2026-08-11-S7纸面填表演练.md` §3.1。
+ */
+field: string, table: Record<string, number>, } | { "kind": "computed", };
 export type PreconditionLevel = "required" | "recommended";
 export type PreconditionStatus = { "kind": "satisfied", } | { "kind": "unsatisfied", actual: string, } | { "kind": "unknown", };
 export type HostEnv = { gameClientSize?: GameClientSize, installedDependencies: Array<string>, };

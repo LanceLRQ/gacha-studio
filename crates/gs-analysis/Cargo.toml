@@ -15,3 +15,15 @@ gs-core.workspace = true
 # `v_integrity` 视图字段的精确映射，重新定义一份形状相同的结构体只会制造
 # "改一处忘改另一处"的同步负担；banner_meta_seed.rs 同理复用 `NewBannerMeta`。
 gs-storage.workspace = true
+# banner_meta_seed.rs 从插件 manifest 的纯数据 JSON 派生 PityGroup/RaritySpec/
+# BannerSpec，不再在 Rust 里手抄一份 plugins/genshin/manifest.ts 的声明值——
+# 手抄版本已经漂移过一次（step 从 u32 百分点改成 f64 分数后，旧注释没跟上）。
+# 依赖 gs-manifest-data 而不是 gs-plugin-runtime：后者要跑 QuickJS，
+# 本 crate 从不执行任何 JS，只读一份静态 JSON，不该被迫链接一个 JS 引擎。
+gs-manifest-data.workspace = true
+# 派生 rare_event 时（rare_event.rs）用它构造 extra 列的 JSON 载荷；
+# banner_meta_seed.rs 用它把 manifest JSON 的子树反序列化成 gs_core 类型。
+serde_json.workspace = true
+# banner_meta_seed.rs 的 deserialize_or_panic/serde_kind_tag 是泛型辅助函数，
+# 需要直接引用 serde::de::DeserializeOwned / serde::Serialize 这两个 trait。
+serde.workspace = true

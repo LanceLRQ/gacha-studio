@@ -3,6 +3,12 @@ packages:
   - packages/*
   - plugins
   - plugins/*
+  # M1-S7 纸面填表演练草稿（星铁/绝区零 manifest 草稿）。只有一份
+  # drills/package.json（星铁/绝区零草稿是同一个包内的两个子目录，不像
+  # plugins/<game> 那样各自独立成包，因此不需要 drills/* 这条 glob）。
+  # 刻意与 plugins* 分开声明——scripts/gs-bundle-plugins.mjs 只扫 plugins/
+  # 目录发现插件，drills/ 不会被打进构建产物，详见 drills/README.md。
+  - drills
 
 # 共享依赖的单一版本源。各包写 "catalog:" 引用，避免版本在多处漂移
 # —— 插件数量会随里程碑增长，每个插件一份 package.json，分散声明必然失同步。

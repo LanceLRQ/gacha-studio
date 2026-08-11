@@ -55,7 +55,11 @@ impl StaticGameLocator {
         Self::default()
     }
 
-    pub fn with_install_root(mut self, game_id: impl Into<String>, root: impl Into<PathBuf>) -> Self {
+    pub fn with_install_root(
+        mut self,
+        game_id: impl Into<String>,
+        root: impl Into<PathBuf>,
+    ) -> Self {
         self.0.insert(game_id.into(), root.into());
         self
     }
@@ -81,7 +85,9 @@ impl std::fmt::Display for CacheScanError {
             Self::GameNotInstalled { game_id } => {
                 write!(f, "游戏 \"{game_id}\" 尚未在宿主配置里登记安装目录")
             }
-            Self::Io { path, detail } => write!(f, "读取缓存文件 \"{}\" 失败：{detail}", path.display()),
+            Self::Io { path, detail } => {
+                write!(f, "读取缓存文件 \"{}\" 失败：{detail}", path.display())
+            }
         }
     }
 }
@@ -135,7 +141,11 @@ fn file_mtime(path: &Path) -> Option<SystemTime> {
 /// 字母数字 + 常见 query string 标点。用于 [`tighten_url_match`] 截断
 /// 正则贪婪匹配可能吞入的垃圾字节。
 fn is_url_safe_char(c: char) -> bool {
-    c.is_ascii_alphanumeric() || matches!(c, ':' | '/' | '?' | '&' | '=' | '.' | '_' | '%' | '~' | '+' | ',' | ';' | '-' | '#' | '@')
+    c.is_ascii_alphanumeric()
+        || matches!(
+            c,
+            ':' | '/' | '?' | '&' | '=' | '.' | '_' | '%' | '~' | '+' | ',' | ';' | '-' | '#' | '@'
+        )
 }
 
 /// ⚠️ **`urlPattern` 边界处理**：manifest 声明的 `urlPattern` 形如
@@ -149,7 +159,9 @@ fn is_url_safe_char(c: char) -> bool {
 /// 这不改变匹配的起点，只收紧终点——插件的模式仍然决定"从哪里开始算一个
 /// URL"，Rust 只负责不让它在没有天然终止符的输入上失控。
 fn tighten_url_match(raw: &str) -> &str {
-    let end = raw.find(|c: char| !is_url_safe_char(c)).unwrap_or(raw.len());
+    let end = raw
+        .find(|c: char| !is_url_safe_char(c))
+        .unwrap_or(raw.len());
     &raw[..end]
 }
 
@@ -251,7 +263,10 @@ mod tests {
     // 不引入 `filetime` crate——`std::fs::File::set_modified`（1.75 起稳定）
     // 已经足够设置测试用的 mtime。
     fn set_file_mtime(path: &Path, mtime: SystemTime) {
-        let file = fs::File::options().write(true).open(path).expect("应当能重新打开文件");
+        let file = fs::File::options()
+            .write(true)
+            .open(path)
+            .expect("应当能重新打开文件");
         file.set_modified(mtime).expect("应当能设置 mtime");
     }
 
@@ -262,7 +277,10 @@ mod tests {
             let unique = format!(
                 "gs-p-authkey-test-{label}-{}-{}",
                 std::process::id(),
-                SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_nanos()
+                SystemTime::now()
+                    .duration_since(SystemTime::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
             );
             path.push(unique);
             fs::create_dir_all(&path).expect("创建临时目录应当成功");
@@ -282,7 +300,9 @@ mod tests {
     fn locates_direct_and_one_level_nested_candidates() {
         let dir = TempDir::new("locate");
         let direct = dir.path().join("webCaches/Cache/Cache_Data/data_2");
-        let nested = dir.path().join("webCaches/2.3.0_abcdef/Cache/Cache_Data/data_2");
+        let nested = dir
+            .path()
+            .join("webCaches/2.3.0_abcdef/Cache/Cache_Data/data_2");
         let too_deep = dir
             .path()
             .join("webCaches/2.3.0/extra/Cache/Cache_Data/data_2");
@@ -292,7 +312,10 @@ mod tests {
 
         let candidates = locate_data2_candidates(dir.path(), "webCaches");
         assert!(candidates.contains(&direct), "应当发现直接一层的 data_2");
-        assert!(candidates.contains(&nested), "应当发现恰好一层子目录下的 data_2");
+        assert!(
+            candidates.contains(&nested),
+            "应当发现恰好一层子目录下的 data_2"
+        );
         assert!(
             !candidates.contains(&too_deep),
             "两层子目录的 data_2 超出契约声明的 glob 形态，不应被发现"
@@ -359,7 +382,10 @@ mod tests {
         let locator = StaticGameLocator::new();
         let pattern = genshin_url_pattern();
         let result = scan_game_cache("genshin", "webCaches", &pattern, &locator);
-        assert!(matches!(result, Err(CacheScanError::GameNotInstalled { .. })));
+        assert!(matches!(
+            result,
+            Err(CacheScanError::GameNotInstalled { .. })
+        ));
     }
 
     #[test]

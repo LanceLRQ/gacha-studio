@@ -5,6 +5,7 @@
 //! （"共享保底的卡池集合 + 概率曲线"），产出面向展示层的完整报告。
 
 use gs_core::{GachaRecord, GuaranteeRule, PityGroup, ProbabilityCurve, RaritySpec};
+use gs_storage::RareEventRow;
 
 /// 记录自上一次命中保底目标以来经过的抽数。
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -94,18 +95,41 @@ pub fn evaluate_curve(curve: &ProbabilityCurve, pull_index: u32) -> CurveEvaluat
 
 /// 单次保底命中的实际结果："歪"还是命中 UP。
 ///
-/// `Unknown` 不是多余的第三态：判断某次命中是否是 UP 需要知道当期 UP
-/// 物品列表，而这份数据目前既不在 [`GachaRecord`] 上（它只有 `item_id`/
-/// `rarity`，没有 `is_rate_up`），`gs_storage::Repository` 也没有暴露读取
-/// `rare_event.is_rate_up` 列的查询方法（该列本身是 1/0/NULL 三态设计，
-/// 见存储数据模型 §3.3）——本 Stage 无法从真实数据里稳定推导出这个值，
-/// 用 `false` 顶替"不知道"会把"确认歪了"和"不知道歪没歪"混为一谈，
-/// 污染下面的担保状态机。详见本 crate 报告里的"偏差与发现"。
+/// `Unknown` 不是多余的第三态：`rare_event.is_rate_up` 本身就是 1/0/NULL
+/// 三态设计（存储数据模型 §3.3），而写入路径（[`crate::derive_rare_events`]）
+/// 目前恒写 `NULL`——本 Stage 没有任何数据源能提供当期 UP 物品列表，无法从
+/// `gacha_record` 推出"这次命中是不是 UP"。[`hit_outcomes_from_rare_events`]
+/// 已经把读出 `is_rate_up` 列的路径接通了，但读出来的值本身仍然可能是
+/// `NULL`——用 `false` 顶替"不知道"会把"确认歪了"和"不知道歪没歪"混为
+/// 一谈，污染下面的担保状态机，所以这个三态在读写两端都要保留，不能收窄
+/// 成布尔。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HitOutcome {
     RateUp,
     Off,
     Unknown,
+}
+
+/// 把从 [`gs_storage::Repository::find_rare_events_by_pity_group`] 读出的
+/// 一段出金序列映射成 [`HitOutcome`] 序列，供 [`apply_guarantee_rule`] 消费。
+///
+/// 调用方须保证 `rows` 已经按 `occurred_at` 升序传入——
+/// `find_rare_events_by_pity_group` 的返回值天然满足这一点。担保状态机是
+/// 有状态的，顺序错了结果就是错的，这条约束与 [`analyze_pity_group`] 对
+/// `records` 参数的要求是同一件事。
+///
+/// `is_rate_up` 三态到 `HitOutcome` 的映射本身没有算法可言——`Some(true)`
+/// → `RateUp`，`Some(false)` → `Off`，`None` → `Unknown`——但值得写成独立
+/// 函数：它是"不知道不能伪装成已知"这条设计契约在读取路径上唯一的落点，
+/// 调用方不需要（也不应该）自己重新决定 `NULL` 该映射成什么。
+pub fn hit_outcomes_from_rare_events(rows: &[RareEventRow]) -> Vec<HitOutcome> {
+    rows.iter()
+        .map(|row| match row.is_rate_up {
+            Some(true) => HitOutcome::RateUp,
+            Some(false) => HitOutcome::Off,
+            None => HitOutcome::Unknown,
+        })
+        .collect()
 }
 
 /// 依次把 `rule` 应用到一串保底命中结果上，返回**每次命中发生时，
@@ -159,6 +183,28 @@ pub struct PityPull {
     pub pulls_since_last_hit: u32,
     /// 本次是否命中保底目标稀有度。
     pub is_pity_hit: bool,
+    /// 产生这条 pull 的原始 `gacha_record.account_id`。展示层不需要这个
+    /// 字段（一次分析调用天然只针对一个账号），但 [`crate::derive_rare_events`]
+    /// 要用它填 `rare_event.account_id`——不带上这个字段，派生逻辑就得在
+    /// 这里之外另外把 `records` 和 `pulls` 按顺序对齐，而 `pulls` 已经因为
+    /// 跳过 `rarity IS NULL` 的记录而与 `records` 的下标不再一一对应。
+    pub account_id: i64,
+    /// 产生这条 pull 的原始 `gacha_record.id`，供 [`crate::derive_rare_events`]
+    /// 填 `rare_event.record_id`——派生数据必须能指回它的 L1 来源
+    /// （存储数据模型设计文档 §3.3 "derived 时指回 L1"），原因同上，
+    /// 这里是这个约束唯一能拿到 id 的地方。
+    pub record_id: i64,
+    /// 自上一次命中（不含本次）以来，被跳过的 `rarity IS NULL` 记录数。
+    ///
+    /// 存在的理由：`unknown_rarity_count`（见 [`PityGroupReport`]）只是一个
+    /// 组维度的总数，不能反推"是哪一次命中的 `pulls_since_last_hit` 可能被
+    /// 低估了"。星铁真实存档里确有 `rank_type` 为空串的记录——如果这样一条
+    /// 记录恰好夹在两次出金之间，它既不计入 `pulls_since_last_hit`（未知
+    /// 稀有度不参与保底计数），也没有任何痕迹说明"这个数字可能比真实抽数
+    /// 少 1"。这个字段就是那个痕迹：[`crate::derive_rare_events`] 用它判断
+    /// 是否要在对应的 `rare_event.extra` 上标注"这条事件的 `pity_count`
+    /// 可能偏低"，不让一个不精确的整数看起来像精确值。
+    pub unknown_rarity_since_last_hit: u32,
 }
 
 /// 一个 [`PityGroup`] 维度的完整分析结果。
@@ -199,11 +245,16 @@ pub fn analyze_pity_group(
 ) -> PityGroupReport {
     let mut pulls = Vec::with_capacity(records.len());
     let mut unknown_rarity_count = 0u32;
+    // 自上一次命中以来累计跳过的未知稀有度记录数，与 `counter` 用同一套
+    // 重置节律（命中后清零、未命中/跳过时累加）——不是第二套计数逻辑，
+    // 只是在同一趟遍历里多记一个平行的计数值，理由见 `PityPull` 字段文档。
+    let mut unknown_rarity_since_last_hit = 0u32;
     let mut counter = PityCounter::new();
 
     for record in records {
         let Some(rarity_code) = record.rarity.as_ref() else {
             unknown_rarity_count += 1;
+            unknown_rarity_since_last_hit += 1;
             continue;
         };
         let is_hit = *rarity_code == rarity.pity_target;
@@ -214,7 +265,14 @@ pub fn analyze_pity_group(
         // 已经踩过一次（`analyze_pity_group_counts_hits_and_resets_on_target_rarity`
         // 一开始就是按错误顺序实现，被这条测试当场抓到）。
         let pulls_since_last_hit = counter.current() + 1;
+        // 同理：这条 pull 要带上的是"命中前累计跳过了多少条"，必须在
+        // 清零之前读出来——命中时这个值本身就是"这次命中前的未知记录数"，
+        // 清零是为了让下一段区间从 0 开始重新累计。
+        let unknown_rarity_before_this_pull = unknown_rarity_since_last_hit;
         counter.record_pull(is_hit);
+        if is_hit {
+            unknown_rarity_since_last_hit = 0;
+        }
         pulls.push(PityPull {
             banner_key: record.banner_key.clone(),
             occurred_at: record.occurred_at,
@@ -222,6 +280,9 @@ pub fn analyze_pity_group(
             rarity: record.rarity.clone(),
             pulls_since_last_hit,
             is_pity_hit: is_hit,
+            account_id: record.account_id,
+            record_id: record.id,
+            unknown_rarity_since_last_hit: unknown_rarity_before_this_pull,
         });
     }
 
@@ -238,18 +299,16 @@ pub fn analyze_pity_group(
     }
 }
 
-/// 米哈游三游软保底的取值来源：`base: 0.006, start: 74, step: 0.06`——与
-/// `gs_core::pity` 自身的 round-trip 测试用例一致，也是
-/// `plugins/genshin/manifest.ts` 公开说法"74 抽起每抽 +6%"对应的参数。
-/// 定义在 `pity` 模块作用域（而不是下面某一个 `mod tests` 内部），是因为
-/// [`soft_pity_boundary`] 与 [`tests`] 两个测试子模块都要用到它。
+/// 米哈游三游软保底的取值：直接取 [`crate::character_event_wish_pity_group`]
+/// 的 `curve`，即 manifest `pityGroups[0].curve`——不在这里重新手打一份
+/// `base: 0.006, start: 74, step: 0.06` 字面量。这曾经是手抄的（`step` 一度
+/// 从百分点整数改成分数小数，这份字面量的注释没跟上），现在改成直接引用
+/// 单一数据源，不会再漂移。定义在 `pity` 模块作用域（而不是下面某一个
+/// `mod tests` 内部），是因为 [`soft_pity_boundary`] 与 [`tests`] 两个测试
+/// 子模块都要用到它。
 #[cfg(test)]
 fn genshin_soft_pity_test_curve() -> ProbabilityCurve {
-    ProbabilityCurve::SoftPity {
-        base: 0.006,
-        start: 74,
-        step: 0.06,
-    }
+    crate::character_event_wish_pity_group().curve
 }
 
 /// 74 抽拐点专项测试，单独成模块是为了能用
@@ -369,27 +428,16 @@ mod tests {
         }
     }
 
-    fn genshin_character_event_wish() -> PityGroup {
-        PityGroup {
-            key: "characterEventWish".to_string(),
-            members: vec!["301".to_string(), "400".to_string()],
-            hard_pity: 90,
-            curve: genshin_soft_pity_test_curve(),
-            guarantee: GuaranteeRule::FiftyFifty {},
-        }
-    }
-
-    fn genshin_rarity_spec() -> RaritySpec {
-        RaritySpec {
-            ladder: vec!["3".to_string(), "4".to_string(), "5".to_string()],
-            pity_target: "5".to_string(),
-        }
-    }
+    // 不在本模块再手抄一份原神的 PityGroup/RaritySpec 测试 fixture——
+    // `crate::character_event_wish_pity_group`/`crate::genshin_rarity_spec`
+    // 已经是从 manifest 派生的单一数据源（`banner_meta_seed.rs`），这里
+    // 与 `rarity.rs`/`rare_event.rs`/集成测试统一调用它，不再各自维护一份
+    // 容易漂移的字面量拷贝。
 
     #[test]
     fn analyze_pity_group_counts_hits_and_resets_on_target_rarity() {
-        let group = genshin_character_event_wish();
-        let spec = genshin_rarity_spec();
+        let group = crate::character_event_wish_pity_group();
+        let spec = crate::genshin_rarity_spec();
         let records = vec![
             record("301", "characterEventWish", 1, "角色A", Some("4")),
             record("301", "characterEventWish", 2, "角色B", Some("4")),
@@ -414,8 +462,8 @@ mod tests {
     fn analyze_pity_group_merges_shared_members_while_retaining_original_banner_key() {
         // 301 与 400 混合出现，模拟原神真实响应里同一分组内 gacha_type
         // 混有 "301"/"400" 两种取值（research/03 §2.2）。
-        let group = genshin_character_event_wish();
-        let spec = genshin_rarity_spec();
+        let group = crate::character_event_wish_pity_group();
+        let spec = crate::genshin_rarity_spec();
         let records = vec![
             record("301", "characterEventWish", 1, "角色A", Some("4")),
             record("400", "characterEventWish", 2, "角色B", Some("4")),
@@ -446,8 +494,8 @@ mod tests {
 
     #[test]
     fn analyze_pity_group_excludes_null_rarity_from_counting_but_reports_it() {
-        let group = genshin_character_event_wish();
-        let spec = genshin_rarity_spec();
+        let group = crate::character_event_wish_pity_group();
+        let spec = crate::genshin_rarity_spec();
         let records = vec![
             record("301", "characterEventWish", 1, "角色A", Some("4")),
             // 字典未同步导致 rarity 为空串，落库时已被 gs-storage 规整为
@@ -534,5 +582,114 @@ mod tests {
         let hits = [HitOutcome::Off, HitOutcome::RateUp];
         let guaranteed = apply_guarantee_rule(&GuaranteeRule::None {}, &hits);
         assert_eq!(guaranteed, vec![false, false]);
+    }
+
+    #[test]
+    fn analyze_pity_group_pulls_carry_account_id_and_record_id_for_downstream_linkage() {
+        // `derive_rare_events`（rare_event.rs）需要从 pull 上直接拿到这两个
+        // 字段来填 `rare_event.account_id`/`record_id`——不这样做的话，
+        // 派生逻辑就得在 `pulls`（已经跳过了 unknown-rarity 的记录）与
+        // 原始 `records` 之间重新对齐下标，而这个对齐本身就是"再实现一套
+        // 计数逻辑"想要避免的那类重复工作。
+        let group = crate::character_event_wish_pity_group();
+        let spec = crate::genshin_rarity_spec();
+        let mut hit = record("301", "characterEventWish", 1, "角色A", Some("5"));
+        hit.id = 42;
+        hit.account_id = 7;
+
+        let report = analyze_pity_group(&group, &spec, &[hit]);
+
+        assert_eq!(report.pulls[0].record_id, 42);
+        assert_eq!(report.pulls[0].account_id, 7);
+    }
+
+    #[test]
+    fn analyze_pity_group_tracks_unknown_rarity_skipped_since_last_hit_per_pull() {
+        // 未知稀有度记录夹在两次命中之间：星铁真实存档里确有 rank_type
+        // 为空串的记录（落库后即 rarity IS NULL）。这条测试直接断言
+        // `PityPull.unknown_rarity_since_last_hit` 的逐条取值，是
+        // `derive_rare_events` 能在 rare_event.extra 上标注"pity_count
+        // 可能偏低"的前提——没有这条测试，那个标注功能改错了也不会有任何
+        // 测试失败。
+        let group = crate::character_event_wish_pity_group();
+        let spec = crate::genshin_rarity_spec();
+        let records = vec![
+            record("301", "characterEventWish", 1, "角色HitA", Some("5")), // 命中
+            record("301", "characterEventWish", 2, "角色Miss", Some("4")), // 未命中
+            record("301", "characterEventWish", 3, "神秘物品A", None),     // 未知，跳过
+            record("301", "characterEventWish", 4, "神秘物品B", None),     // 未知，跳过
+            record("301", "characterEventWish", 5, "角色HitB", Some("5")), // 命中
+            record("301", "characterEventWish", 6, "神秘物品C", None),     // 未知，跳过
+            record("301", "characterEventWish", 7, "角色HitC", Some("5")), // 命中
+        ];
+
+        let report = analyze_pity_group(&group, &spec, &records);
+
+        // pulls 只包含 4 条已知稀有度记录（HitA/Miss/HitB/HitC），
+        // 3 条未知记录（神秘物品 A/B/C）都被跳过，不占位。
+        assert_eq!(report.pulls.len(), 4);
+        assert_eq!(report.unknown_rarity_count, 3);
+
+        // HitA：命中前没有任何未知记录被跳过。
+        assert_eq!(report.pulls[0].unknown_rarity_since_last_hit, 0);
+        // Miss：HitA 之后、这条记录之前也没有未知记录。
+        assert_eq!(report.pulls[1].unknown_rarity_since_last_hit, 0);
+        // HitB：Miss 之后累计跳过了 2 条未知记录（神秘物品 A/B）。
+        assert_eq!(report.pulls[2].unknown_rarity_since_last_hit, 2);
+        assert_eq!(
+            report.pulls[2].pulls_since_last_hit, 2,
+            "已知计数不含被跳过的未知记录"
+        );
+        // HitC：HitB 之后又新累计了 1 条（神秘物品 C），不会带着 HitB 之前
+        // 的旧值——命中必须清零重新累计，这是本测试最容易漏掉的一条断言。
+        assert_eq!(report.pulls[3].unknown_rarity_since_last_hit, 1);
+    }
+
+    fn rare_event_row(occurred_at: i64, is_rate_up: Option<bool>) -> RareEventRow {
+        RareEventRow {
+            id: occurred_at,
+            account_id: 1,
+            banner_key: "301".to_string(),
+            pity_group: "characterEventWish".to_string(),
+            occurred_at,
+            item_id: "角色A".to_string(),
+            rarity: "5".to_string(),
+            pity_count: Some(74),
+            is_rate_up,
+            origin: "derived".to_string(),
+            source: "derived:pity".to_string(),
+            record_id: Some(1),
+            extra: None,
+        }
+    }
+
+    #[test]
+    fn hit_outcomes_from_rare_events_maps_tri_state_is_rate_up() {
+        let rows = vec![
+            rare_event_row(1, Some(true)),
+            rare_event_row(2, Some(false)),
+            rare_event_row(3, None),
+        ];
+
+        let outcomes = hit_outcomes_from_rare_events(&rows);
+
+        assert_eq!(
+            outcomes,
+            vec![HitOutcome::RateUp, HitOutcome::Off, HitOutcome::Unknown],
+            "None 必须映射成 Unknown，不能被当成 Off——那会把「不知道」伪装成「没歪」"
+        );
+    }
+
+    #[test]
+    fn hit_outcomes_from_rare_events_feeds_directly_into_apply_guarantee_rule() {
+        // 端到端地证明这条新增路径真的能喂给状态机，不只是类型对得上。
+        let rows = vec![
+            rare_event_row(1, Some(false)),
+            rare_event_row(2, None),
+            rare_event_row(3, Some(true)),
+        ];
+        let outcomes = hit_outcomes_from_rare_events(&rows);
+        let guaranteed = apply_guarantee_rule(&GuaranteeRule::FiftyFifty {}, &outcomes);
+        assert_eq!(guaranteed, vec![false, true, true]);
     }
 }

@@ -1,0 +1,12 @@
+{
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    // 与 plugins/genshin/tsconfig.json、packages/gs-plugin-kit/tsconfig.json
+    // 同款注释：`gs-plugin-kit` 的 `index.ts` 会一路 `export * from "./testkit"`，
+    // testkit 内部用带 `.ts` 扩展名的相对导入（Node ESM 解析要求显式扩展名，
+    // TS 的 Bundler 解析允许省略但仍需要这个 flag 才能类型检查进这条导入链）。
+    // 本目录同样没有构建产物发布环节，允许写 .ts 扩展名。
+    "allowImportingTsExtensions": true
+  },
+  "include": ["**/*.ts"]
+}
