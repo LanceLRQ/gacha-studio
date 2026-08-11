@@ -1,0 +1,15 @@
+{
+  "records": [
+    {
+      "fields": {
+        "itemId": "示例物品",
+        "time": "",
+        "bannerId": "default",
+        "count": 1,
+        "name": "示例物品",
+        "stableId": "1"
+      },
+      "recordKey": "default:1"
+    }
+  ]
+}

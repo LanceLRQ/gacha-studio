@@ -1,4 +1,11 @@
 {
   "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    // plugins/index.ts 的显式注册表用 `import("./genshin/manifest.ts")` 这类带
+    // 扩展名的相对路径动态引用各插件（Node ESM 解析要求相对导入带显式扩展名，
+    // 见 plugins/genshin/tsconfig.json 与 packages/gs-plugin-kit/tsconfig.json
+    // 的同款注释）。本目录同样没有构建产物发布环节，允许写 .ts 扩展名。
+    "allowImportingTsExtensions": true
+  },
   "include": ["**/*.ts"]
 }

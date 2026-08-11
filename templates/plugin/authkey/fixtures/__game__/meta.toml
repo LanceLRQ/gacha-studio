@@ -1,0 +1,20 @@
+# TODO：__GAME_ID__ 插件 fixture 元信息。
+#
+# 接入真实游戏后，把下面的占位信息换成真实情况，并同步更新
+# raw_response/ 与 expected/normalized.json 让测试反映真实字段形状。
+#
+# ⚠️ fixture 里绝不能出现真实 authkey、完整抽卡链接签名、玩家真实 UID、
+# 设备 ID、cookie、token。提交前务必跑一遍 `pnpm gs:sanitize fixtures/__GAME_ID__/`。
+
+[game]
+id = "__GAME_ID__"
+displayName = "TODO：游戏中文名"
+
+[account]
+# TODO：假 UID，一律用 100000000 这类明显假值，不要用真实账号 UID。
+uid = "100000000"
+
+[fixture]
+collectedAt = "TODO：采集/构造日期"
+sanitized = "true"
+note = "脚手架生成的示例样本，接入真实游戏后请替换成真实字段形状。"

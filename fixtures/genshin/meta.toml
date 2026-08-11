@@ -1,0 +1,24 @@
+# 原神插件 fixture 元信息。
+#
+# 本目录下的全部样本均为手工构造的脱敏数据，不来自任何真实账号或真实存档。
+# UID、authkey、雪花 ID 一律使用一眼可辨的假值，字段形状参照以下资料校准：
+#   - docs/_internal/research/03-真实导出数据格式实测.md §一、§二
+#   - docs/_internal/research/04-同族工具三方源码对比.md §4.1～§4.9
+#   - docs/example-projects/genshin-wish-export/src/main/getData.js
+#   - docs/example-projects/HoYo.Gacha/crates/url_scraper/src/types.rs
+
+[game]
+id = "genshin"
+displayName = "原神"
+apiVersionNote = "getGachaLog 字段形状，参照 HoYo.Gacha 6.6 前的 GachaLog 结构（不含 item_id）"
+
+[account]
+# 假 UID，首位数字 "1" 落在 resolveTimezone 的默认分支（非 6/7），期望时区偏移为 UTC+8。
+uid = "100000000"
+region = "cn_gf01"
+
+[fixture]
+collectedAt = "2026-08-10"
+sanitized = "true"
+sanitizedBy = "gs-sanitize（手工构造，未经过真实抓取，无需脱敏但仍过了一遍工具确认零命中）"
+note = "覆盖三个场景：301 分组混有 gacha_type=400 的记录、rank_type 为空字符串需归一化为 undefined、至少一条五星记录。全部样本数据由人工按研究文档记录的字段形状手写构造。"

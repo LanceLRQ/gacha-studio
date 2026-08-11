@@ -10,7 +10,11 @@
     "gs:check": "node scripts/gs-check/index.mjs",
     "gs:check:no-dynamic-import": "node scripts/gs-check/checks/no-dynamic-import.mjs",
     "gs:check:ipc-surface": "node scripts/gs-check/checks/ipc-surface.mjs",
-    "gs:check:codegen-diff": "node scripts/gs-check/checks/codegen-diff.mjs"
+    "gs:check:codegen-diff": "node scripts/gs-check/checks/codegen-diff.mjs",
+    "gs:sanitize": "node scripts/gs-sanitize.mjs",
+    "gs:new-plugin": "node scripts/gs-new-plugin.mjs",
+    "gs:test:genshin": "pnpm --filter genshin test",
+    "test": "pnpm -r --if-present run test"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.11.4"

@@ -9,4 +9,11 @@ description = "SQLite 存储引擎"
 [dependencies]
 gs-core.workspace = true
 # bundled：静态链接 SQLite，避免依赖系统库版本，保证构建可复现。
-rusqlite = { version = "0.40", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["bundled", "limits"] }
+# 复用 gs-core 已有的 Serialize/Deserialize 实现做「枚举 <-> SQL TEXT 列」的
+# 双向转换（见 src/repository.rs 的 enum_to_sql / enum_from_sql），不手写一份
+# 平行的字符串映射表——手写映射表会在 gs-core 的枚举变体改名时悄悄失配，
+# 而 serde 转换会随 derive 自动同步。extra JSON 列（banner_snapshot 的
+# page_count/precision 等游戏特有字段）的构造与解析同样需要 serde_json。
+serde.workspace = true
+serde_json.workspace = true

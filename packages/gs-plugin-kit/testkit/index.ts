@@ -2,31 +2,41 @@
  * fixture 契约测试助手 + 静态契约检查。
  *
  * 完整流程（`assertPluginFixture`）：每个插件在 `fixtures/<game>/` 下提供
- * 脱敏样本，CI 用这里的 `assertPluginFixture` 跑一遍完整流程：取样本响应 →
- * 跑插件的 `extractList` / `fields.extractRecord` / `hooks.*` → 运行时校验 →
- * 对比 `fixtures/<game>/expected/normalized.json`（见插件 SDK 文档第 6.3 节）。
- * `fixtures/` 目录本身要到 M1-S4 才建立，因此本 Stage 不实现这条真实流程，
- * 调用 `assertPluginFixture` 会抛出「尚未实现」错误。
+ * 脱敏样本，跑一遍完整流程：读取 `raw_response/` 下的样本响应 → 依次跑插件的
+ * `collect.params.extractList` / `fields.extractRecord` / 各 `hooks.*` →
+ * 过 `../schema` 的 `unifiedRecordFieldsSchema` 运行时校验 → 对比
+ * `fixtures/<game>/expected/normalized.json`（插件 SDK 文档第 6.3 节）。
  *
- * 但插件 SDK 文档反复强调「要在 fixture 契约测试阶段报错，而不是留到运行时
+ * 本文件是 `package.json` 对外导出的契约入口（`"./testkit"`），插件作者会
+ * import 它，因此刻意不做任何 IO——`assertPluginFixture` 需要读文件，但读取
+ * 动作通过注入的 `FixtureReader` 完成，本文件只认这个接口，不关心它背后是
+ * Node 的 `fs` 还是别的什么。真正的 Node 实现在同目录的 `node-reader.ts`
+ * （对外导出路径 `"gs-plugin-kit/testkit/node"`），该文件不在本文件的导出链
+ * 上，插件侧不会被动拉进任何 `fs` 相关类型。
+ *
+ * 插件 SDK 文档反复强调「要在 fixture 契约测试阶段报错，而不是留到运行时
  * 静默出错」的三条契约，其实**不依赖任何 fixture 文件**，只需要检查
- * manifest 与 hooks 的静态声明是否自洽，现在就能实现、现在就能跑：
+ * manifest 与 hooks 的静态声明是否自洽：
  *
  * 1. `manifest.time?.timezoneSource.kind === "computed"` 却没有 `hooks.resolveTimezone`
  * 2. `manifest.drawCounting?.kind === "custom"` 却没有 `hooks.countDraws`
- * 3. 既没有 `hooks.deriveRecordKey`，也无法静态证实 `UnifiedRecordFields.stableId`
+ * 3. 既没有 `hooks.deriveRecordKey`，也无法证实 `UnifiedRecordFields.stableId`
  *    会被填充
  *
- * 这三个检查函数已经落地在本文件里，用例覆盖在同目录的 `self-check.ts`
- * （`node --experimental-strip-types testkit/self-check.ts` 运行，不引入新的
- * 测试运行器依赖）。自检刻意不写在本文件里：本文件是 `package.json` 对外导出的
- * 契约入口，插件作者会 import 它，不该夹带测试用例与全局类型声明。
- *
- * `assertPluginFixture` 在抛出「尚未实现」之前会先跑这三条，让调用方即使在
- * fixture 尚未落地时也能拿到有意义的报错，而不是永远看到同一句「尚未实现」。
+ * 前两条不需要样本数据，`assertPluginFixture` 在触碰任何 fixture 文件之前就
+ * 先跑；第三条需要「样本记录是否都填充了 stableId」这个运行时事实，因此延后
+ * 到读完样本、跑过 `extractRecord` 之后再判定——用例覆盖在同目录的
+ * `self-check.ts`（`node --experimental-strip-types testkit/self-check.ts`
+ * 运行，不引入新的测试运行器依赖）。自检刻意不写在本文件里，理由同上。
  */
 
-import type { PluginHooks, PluginManifest } from "../manifest";
+import type { PluginHooks, PluginManifest, TimezoneContext, TransformContext } from "../manifest.ts";
+import type { UnifiedRecordFields } from "../types/index.ts";
+// 值导入（非 type-only）在 `node --experimental-strip-types` 下会保留成真实的
+// ESM import 语句，Node 的模块解析既不做目录索引解析也不补全扩展名，必须写
+// 显式的 "index.ts" 文件名，否则只在 tsc 类型检查阶段能过、实际运行会报
+// ERR_UNSUPPORTED_DIR_IMPORT。
+import { unifiedRecordFieldsSchema } from "../schema/index.ts";
 
 /** 待校验的插件产出，形状与真实用法 `import { manifest, hooks } from "../manifest"` 对应 */
 export interface PluginUnderTest {
@@ -78,16 +88,15 @@ export function checkCountDrawsContract(manifest: PluginManifest, hooks: PluginH
  * 契约检查 3/3：`hooks.deriveRecordKey` 缺省时，record_key 生成会退化为
  * 直接使用 `UnifiedRecordFields.stableId`；但「`extractRecord` 是否真的会
  * 填充 `stableId`」是一个**运行时事实**，只有跑过 fixture、检查过样本记录
- * 才能证实（见文件顶部说明，完整版留待 `assertPluginFixture` 在 M1-S4 落地）。
+ * 才能证实。
  *
- * 在 fixture 落地之前，本函数保守处理：缺少 `hooks.deriveRecordKey` 一律
- * 视为未满足契约，避免插件作者误以为「不写这个 hook 也行」，直到跑 fixture
- * 才发现 `stableId` 从未被填充过、record_key 早已在运行时静默退化。
+ * 保守处理：缺少 `hooks.deriveRecordKey` 一律视为未满足契约，避免插件作者
+ * 误以为「不写这个 hook 也行」，直到跑 fixture 才发现 `stableId` 从未被填充
+ * 过、record_key 早已在运行时静默退化。
  *
  * @param sampleHasStableId 可选。调用方若已经证实（例如跑过 fixture 后
  *   统计得出）`extractRecord` 对所有样本记录都填充了 `stableId`，可传 `true`
- *   放行。fixture 落地前留空即可，本函数按「未证实」处理——这个参数是为
- *   `assertPluginFixture` 的完整版本预留的接口，现在恒定按保守路径求值。
+ *   放行。`assertPluginFixture` 会在跑完样本后用真实统计结果调用本函数。
  */
 export function checkDeriveRecordKeyContract(hooks: PluginHooks | undefined, sampleHasStableId = false): void {
   if (hooks?.deriveRecordKey) return;
@@ -109,31 +118,240 @@ export function runStaticContractChecks(plugin: PluginUnderTest, sampleHasStable
 }
 
 // ============================================================
-// fixture 契约测试（骨架，真实流程留待 M1-S4）
+// fixture 契约测试：真实流程
 // ============================================================
+
+/** 注入式文件读取器，`assertPluginFixture` 本身不做任何 IO，只认这个接口。 */
+export interface FixtureReader {
+  /** 读取一个文本文件，`relativePath` 相对仓库根目录（如 "fixtures/genshin/meta.toml"）。 */
+  readText(relativePath: string): Promise<string>;
+  /** 列出一个目录下的文件名（不含路径前缀），`relativeDir` 同样相对仓库根目录。 */
+  list(relativeDir: string): Promise<string[]>;
+}
+
+/** `expected/normalized.json` 里单条记录的形状。 */
+interface NormalizedFixtureRecord {
+  /** `extractRecord`（可能再经 `hooks.transformRecord` 处理）之后的最终字段。 */
+  fields: UnifiedRecordFields;
+  /** `hooks.deriveRecordKey` 的输出，缺省时退化为 `fields.stableId`。 */
+  recordKey: string;
+  /** 仅当 `manifest.time?.timezoneSource.kind === "computed"` 时存在。 */
+  timezoneOffsetHours?: number;
+}
+
+interface NormalizedFixture {
+  records: NormalizedFixtureRecord[];
+}
+
+interface FixtureMeta {
+  account?: { uid?: string; region?: string };
+}
+
+/**
+ * `meta.toml` 的极简子集解析：只认 `[section]` 与 `key = "value"` 两种写法，
+ * 不支持数组、内联表、多行字符串——`meta.toml` 里其余字段（游戏版本、采集
+ * 日期、脱敏说明等）只是给人看的展示信息，`assertPluginFixture` 真正需要
+ * 程序读取的只有 `[account]` 小节（用来构造 `hooks.resolveTimezone` 的
+ * `TimezoneContext`）。
+ */
+function parseFixtureMeta(text: string): FixtureMeta {
+  const meta: FixtureMeta = {};
+  let section = "";
+  for (const rawLine of text.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith("#")) continue;
+    const sectionMatch = /^\[(.+)\]$/.exec(line);
+    if (sectionMatch) {
+      section = sectionMatch[1]?.trim() ?? "";
+      continue;
+    }
+    const kv = /^([\w.-]+)\s*=\s*(.+)$/.exec(line);
+    if (!kv) continue;
+    const key = kv[1];
+    let value = kv[2]?.trim() ?? "";
+    if (value.startsWith('"') && value.endsWith('"')) {
+      value = value.slice(1, -1);
+    }
+    if (section === "account" && key) {
+      meta.account ??= {};
+      if (key === "uid") meta.account.uid = value;
+      if (key === "region") meta.account.region = value;
+    }
+  }
+  return meta;
+}
+
+/**
+ * 结构相等比较：对象按键集合比较（缺失键与显式 `undefined` 视为等价——
+ * JSON 里没有 `undefined`，手写的 `expected/normalized.json` 会直接省略
+ * 可选字段，而运行时算出来的记录对象往往会显式带上 `key: undefined`），
+ * 数组按下标顺序比较，其余按 `Object.is`。
+ */
+function deepEqual(a: unknown, b: unknown): boolean {
+  if (Object.is(a, b)) return true;
+  const aUndef = a === undefined;
+  const bUndef = b === undefined;
+  if (aUndef || bUndef) return aUndef === bUndef;
+  if (typeof a !== typeof b) return false;
+  if (a === null || b === null) return a === b;
+  if (Array.isArray(a) || Array.isArray(b)) {
+    if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false;
+    return a.every((item, i) => deepEqual(item, b[i]));
+  }
+  if (typeof a === "object" && typeof b === "object") {
+    const aRecord = a as Record<string, unknown>;
+    const bRecord = b as Record<string, unknown>;
+    const keys = new Set([...Object.keys(aRecord), ...Object.keys(bRecord)]);
+    for (const key of keys) {
+      if (!deepEqual(aRecord[key], bRecord[key])) return false;
+    }
+    return true;
+  }
+  return a === b;
+}
 
 /**
  * 对指定插件跑一遍 fixture 契约测试。
  *
- * 本 Stage（M1-S1）只落地签名与静态契约检查，`fixtures/<game>/` 目录本身
- * 要到 M1-S4 才建立。调用本函数会先跑三条静态契约检查（不需要 fixture），
- * 全部通过后才抛出「真实流程尚未实现」错误——这样调用方在 fixture 落地前
- * 也能及时发现 manifest/hooks 声明本身的问题，而不是永远只看到同一句提示。
+ * 流程：
+ * 1. 先跑 `checkResolveTimezoneContract` / `checkCountDrawsContract`——这两条
+ *    不需要样本数据，manifest/hooks 声明本身有问题应当最先暴露。
+ * 2. 读取 `fixtureDir/meta.toml`（取 `[account]` 小节）与
+ *    `fixtureDir/raw_response/*.json`（按文件名排序，模拟分页顺序）。
+ * 3. 对每个响应文件：跑 `collect.params.extractList` 取出本页记录数组，
+ *    对每条记录跑 `fields.extractRecord` → schema 校验 → 可选的
+ *    `hooks.transformRecord` → 再次校验，再算出 `recordKey`
+ *    （`hooks.deriveRecordKey` 或退化到 `stableId`）与（若时区来源是
+ *    `computed`）`hooks.resolveTimezone`。
+ * 4. 用第 3 步统计出的「样本是否全部有 stableId」调用
+ *    `checkDeriveRecordKeyContract`——这一条必须等样本跑完才有意义。
+ * 5. 读取 `fixtureDir/expected/normalized.json`，与第 3 步的结果逐条深比较。
  *
- * 待 M1-S4 落地后，这里要补全的真实流程：
- * 1. 读取 `fixtureDir` 下 `raw_response/` 里的样本响应
- * 2. 依次跑插件的 `collect.params.extractList` → `fields.extractRecord` → 各 `hooks.*`
- * 3. 用 `../schema` 的 `unifiedRecordFieldsSchema` 做运行时校验
- * 4. 对比 `fixtureDir` 下 `expected/normalized.json`，逐字段断言一致
+ * 本 Stage 只支持 `authkey` 范式插件（当前仓库里唯一有真实 fixture 的范式）；
+ * 其余范式会明确报错而不是静默按 authkey 的假设处理。
  *
  * @param plugin 待测试的插件（manifest + 可选 hooks）
- * @param fixtureDir fixture 目录路径，如 "fixtures/genshin"
+ * @param fixtureDir fixture 目录路径，相对仓库根目录，如 "fixtures/genshin"
+ * @param reader 文件读取器，仓库内测试脚本用 `gs-plugin-kit/testkit/node` 的 `nodeFixtureReader`
  */
-export async function assertPluginFixture(plugin: PluginUnderTest, fixtureDir: string): Promise<void> {
-  runStaticContractChecks(plugin);
-  throw new Error(
-    `assertPluginFixture 的 fixture 回归流程尚未实现，随 M1-S4（fixtures/ 目录落地时）补全` +
-      `（插件 "${plugin.manifest.id}"，fixture 目录 "${fixtureDir}"）。` +
-      "本次调用已经跑过静态契约检查（resolveTimezone / countDraws / deriveRecordKey）且全部通过。",
-  );
+export async function assertPluginFixture(
+  plugin: PluginUnderTest,
+  fixtureDir: string,
+  reader: FixtureReader,
+): Promise<void> {
+  checkResolveTimezoneContract(plugin.manifest, plugin.hooks);
+  checkCountDrawsContract(plugin.manifest, plugin.hooks);
+
+  if (plugin.manifest.collect.paradigm !== "authkey") {
+    throw new Error(
+      `assertPluginFixture 目前只支持 authkey 范式插件，插件 "${plugin.manifest.id}" ` +
+        `声明的 paradigm 是 "${plugin.manifest.collect.paradigm}"`,
+    );
+  }
+  const { extractList } = plugin.manifest.collect.params;
+  const { extractRecord } = plugin.manifest.fields;
+
+  const metaText = await reader.readText(`${fixtureDir}/meta.toml`);
+  const meta = parseFixtureMeta(metaText);
+  const timezoneCtx: TimezoneContext = {
+    uid: meta.account?.uid ?? "",
+    region: meta.account?.region,
+  };
+
+  const responseFileNames = (await reader.list(`${fixtureDir}/raw_response`))
+    .filter((name) => name.endsWith(".json"))
+    .sort();
+  if (responseFileNames.length === 0) {
+    throw new Error(`fixture 目录 "${fixtureDir}/raw_response" 下没有任何样本响应文件`);
+  }
+
+  const normalizedRecords: NormalizedFixtureRecord[] = [];
+  let sampleCount = 0;
+  let sampleWithStableId = 0;
+  const timezoneRequired = plugin.manifest.time?.timezoneSource?.kind === "computed";
+
+  for (const fileName of responseFileNames) {
+    const rawText = await reader.readText(`${fixtureDir}/raw_response/${fileName}`);
+    let response: unknown;
+    try {
+      response = JSON.parse(rawText);
+    } catch (error) {
+      throw new Error(`解析样本响应 "${fileName}" 失败：${String(error)}`);
+    }
+
+    const list = extractList(response);
+    if (!Array.isArray(list)) {
+      throw new Error(`插件 "${plugin.manifest.id}" 的 extractList 在样本 "${fileName}" 上没有返回数组`);
+    }
+
+    for (const rawRecord of list) {
+      sampleCount += 1;
+
+      let fields = extractRecord(rawRecord);
+      const parsed = unifiedRecordFieldsSchema.safeParse(fields);
+      if (!parsed.success) {
+        throw new Error(
+          `样本 "${fileName}" 中的一条记录未通过 unifiedRecordFieldsSchema 校验：${parsed.error.message}`,
+        );
+      }
+      fields = parsed.data as UnifiedRecordFields;
+
+      if (plugin.hooks?.transformRecord) {
+        const transformCtx: TransformContext = { bannerId: fields.bannerId };
+        fields = plugin.hooks.transformRecord(fields, transformCtx);
+        const reparsed = unifiedRecordFieldsSchema.safeParse(fields);
+        if (!reparsed.success) {
+          throw new Error(
+            `样本 "${fileName}" 的记录经 hooks.transformRecord 处理后未通过校验：${reparsed.error.message}`,
+          );
+        }
+        fields = reparsed.data as UnifiedRecordFields;
+      }
+
+      if (fields.stableId) sampleWithStableId += 1;
+
+      const recordKey = plugin.hooks?.deriveRecordKey ? plugin.hooks.deriveRecordKey(fields) : fields.stableId;
+      if (!recordKey) {
+        throw new Error(
+          `样本 "${fileName}" 中的记录既没有 hooks.deriveRecordKey 也没有 stableId，无法得到 record_key` +
+            `（itemId="${fields.itemId}"）`,
+        );
+      }
+
+      const normalized: NormalizedFixtureRecord = { fields, recordKey };
+      if (timezoneRequired) {
+        // 上面的 checkResolveTimezoneContract 已经保证 hooks.resolveTimezone 存在。
+        normalized.timezoneOffsetHours = plugin.hooks?.resolveTimezone?.(fields, timezoneCtx);
+      }
+      normalizedRecords.push(normalized);
+    }
+  }
+
+  checkDeriveRecordKeyContract(plugin.hooks, sampleCount > 0 && sampleWithStableId === sampleCount);
+
+  const expectedText = await reader.readText(`${fixtureDir}/expected/normalized.json`);
+  let expected: NormalizedFixture;
+  try {
+    expected = JSON.parse(expectedText) as NormalizedFixture;
+  } catch (error) {
+    throw new Error(`解析 "${fixtureDir}/expected/normalized.json" 失败：${String(error)}`);
+  }
+
+  if (!Array.isArray(expected.records)) {
+    throw new Error(`"${fixtureDir}/expected/normalized.json" 缺少 records 数组`);
+  }
+  if (expected.records.length !== normalizedRecords.length) {
+    throw new Error(
+      `记录数不一致：expected/normalized.json 有 ${expected.records.length} 条，实际跑出 ${normalizedRecords.length} 条`,
+    );
+  }
+  for (let i = 0; i < expected.records.length; i++) {
+    const exp = expected.records[i];
+    const act = normalizedRecords[i];
+    if (!deepEqual(exp, act)) {
+      throw new Error(
+        `第 ${i + 1} 条记录与期望不一致：\n期望 ${JSON.stringify(exp)}\n实际 ${JSON.stringify(act)}`,
+      );
+    }
+  }
 }

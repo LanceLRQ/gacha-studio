@@ -1,0 +1,114 @@
+{
+  "records": [
+    {
+      "fields": {
+        "itemId": "测试五星角色A",
+        "time": "2026-06-18 21:15:32",
+        "bannerId": "301",
+        "count": 1,
+        "name": "测试五星角色A",
+        "itemType": "角色",
+        "rarity": "5",
+        "stableId": "1400000000000000010"
+      },
+      "recordKey": "301:1400000000000000010",
+      "timezoneOffsetHours": 8
+    },
+    {
+      "fields": {
+        "itemId": "测试四星武器B",
+        "time": "2026-06-15 10:02:11",
+        "bannerId": "301",
+        "count": 1,
+        "name": "测试四星武器B",
+        "itemType": "武器",
+        "rarity": "4",
+        "stableId": "1400000000000000009"
+      },
+      "recordKey": "301:1400000000000000009",
+      "timezoneOffsetHours": 8
+    },
+    {
+      "fields": {
+        "itemId": "测试五星角色C",
+        "time": "2026-06-10 08:44:02",
+        "bannerId": "400",
+        "count": 1,
+        "name": "测试五星角色C",
+        "itemType": "角色",
+        "rarity": "5",
+        "stableId": "1400000000000000008"
+      },
+      "recordKey": "400:1400000000000000008",
+      "timezoneOffsetHours": 8
+    },
+    {
+      "fields": {
+        "itemId": "测试四星角色D",
+        "time": "2026-06-05 19:30:00",
+        "bannerId": "301",
+        "count": 1,
+        "name": "测试四星角色D",
+        "stableId": "1400000000000000007"
+      },
+      "recordKey": "301:1400000000000000007",
+      "timezoneOffsetHours": 8
+    },
+    {
+      "fields": {
+        "itemId": "测试四星角色E",
+        "time": "2026-06-01 12:00:00",
+        "bannerId": "301",
+        "count": 1,
+        "name": "测试四星角色E",
+        "itemType": "角色",
+        "rarity": "4",
+        "stableId": "1400000000000000006"
+      },
+      "recordKey": "301:1400000000000000006",
+      "timezoneOffsetHours": 8
+    },
+    {
+      "fields": {
+        "itemId": "测试五星角色F",
+        "time": "2026-05-20 09:12:45",
+        "bannerId": "301",
+        "count": 1,
+        "name": "测试五星角色F",
+        "itemType": "角色",
+        "rarity": "5",
+        "stableId": "1400000000000000005"
+      },
+      "recordKey": "301:1400000000000000005",
+      "timezoneOffsetHours": 8
+    },
+    {
+      "fields": {
+        "itemId": "测试四星角色G",
+        "time": "2026-05-15 16:40:20",
+        "bannerId": "301",
+        "count": 1,
+        "name": "测试四星角色G",
+        "itemType": "角色",
+        "rarity": "4",
+        "stableId": "1400000000000000004"
+      },
+      "recordKey": "301:1400000000000000004",
+      "timezoneOffsetHours": 8
+    },
+    {
+      "fields": {
+        "itemId": "测试四星角色H",
+        "time": "2026-05-10 03:05:59",
+        "bannerId": "301",
+        "count": 1,
+        "name": "测试四星角色H",
+        "itemType": "角色",
+        "rarity": "4",
+        "stableId": "1400000000000000003"
+      },
+      "recordKey": "301:1400000000000000003",
+      "timezoneOffsetHours": 8
+    }
+  ]
+}

@@ -8,5 +8,6 @@
  *   () => import("./genshin/manifest"),
  */
 export const plugins: Array<() => Promise<unknown>> = [
+  () => import("./genshin/manifest.ts"),
   // 新插件在此追加一行
 ];
