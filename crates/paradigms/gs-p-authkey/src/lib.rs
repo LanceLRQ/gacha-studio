@@ -2,23 +2,29 @@
 //! （data_2 缓存扫描 + 分页拉取，对应插件 manifest 里
 //! `collect.paradigm == "authkey"` 的 `AuthkeyPipelineParams`）。
 //!
-//! 完整流程（凭据扫描、HTTP 分页、限速重试、错误码语义映射）需要结合
-//! 参考项目的真实响应校准字段与时序，本阶段先固化设计文档已定案、无需
-//! 校准的默认参数与判定逻辑，供后续实现直接复用，避免返工。
+//! 模块划分：
+//! - [`cache_scan`]——L0 原子：`data_2` 缓存扫描三步语义
+//! - [`pipeline`]——L1 流程：[`pipeline::AuthkeyApiPipeline`]
+//! - [`rate_limit`]——L0 原子：限速与重试策略
+//!
+//! 插件 TS 函数的执行位置见独立 crate `gs-plugin-runtime`——本 crate
+//! 通过它调用插件声明的纯函数，采集编排全程在这里（Rust），不在 TS 侧。
+//! `gs-plugin-runtime` 不放在 `gs-host` 里、也不放在本 crate 内部，是为了
+//! 避免 `gs-host`（未来的采集编排者）与 `gs-p-authkey`（编排的被调用方）
+//! 互相依赖成环，详见该 crate `src/lib.rs` 顶部说明。
 
 use gs_core::GsError;
 
+pub mod cache_scan;
+pub mod pipeline;
+pub mod rate_limit;
+
+pub use cache_scan::{scan_game_cache, InstalledGameLocator, StaticGameLocator};
+pub use pipeline::{AuthkeyApiPipeline, CollectOutcome, GameApiTransport, PipelineError, ReqwestTransport, StopReason};
+pub use rate_limit::RateLimitPolicy;
+
 /// 默认每页条数（插件 manifest 未声明 `pageSize` 时使用）。
 pub const DEFAULT_PAGE_SIZE: u32 = 20;
-
-/// 默认每页请求之间的等待时间（毫秒）。
-pub const DEFAULT_PER_PAGE_DELAY_MS: u64 = 300;
-
-/// 默认最大重试次数。
-pub const DEFAULT_RETRY_MAX_ATTEMPTS: u32 = 5;
-
-/// 默认重试等待时间（毫秒）。
-pub const DEFAULT_RETRY_DELAY_MS: u64 = 5000;
 
 /// 校验分页大小：`0` 不构成合法的分页请求。
 pub fn validate_page_size(page_size: u32) -> Result<u32, GsError> {

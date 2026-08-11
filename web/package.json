@@ -9,13 +9,26 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@fontsource/ibm-plex-sans": "catalog:",
+    "@fontsource/jetbrains-mono": "catalog:",
+    "class-variance-authority": "catalog:",
+    "clsx": "catalog:",
+    "gs-plugin-kit": "workspace:*",
+    "lucide-react": "catalog:",
+    "radix-ui": "catalog:",
     "react": "^19.2.8",
-    "react-dom": "^19.2.8"
+    "react-dom": "^19.2.8",
+    "react-router-dom": "catalog:",
+    "tailwind-merge": "catalog:"
   },
   "devDependencies": {
+    "@tailwindcss/vite": "catalog:",
+    "@types/node": "catalog:",
     "@types/react": "^19.2.18",
     "@types/react-dom": "^19.2.4",
     "@vitejs/plugin-react": "^6.0.5",
+    "tailwindcss": "catalog:",
+    "tw-animate-css": "catalog:",
     "typescript": "catalog:",
     "vite": "^8.2.1"
   }

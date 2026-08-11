@@ -280,6 +280,9 @@ export const drawCountingConfigSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("custom") }),
 ]);
 
+/** 对应 `PluginManifest.itemIdSource`，见该字段的文档注释。 */
+export const itemIdSourceSchema = z.enum(["native", "displayName"]);
+
 export const bannerSpecSchema = z.object({
   id: z.string(),
   displayName: localizedTextSchema,
@@ -316,4 +319,5 @@ export const pluginManifestSchema = z.object({
   time: timeConfigSchema.optional(),
   retention: retentionPolicySchema.optional(),
   drawCounting: drawCountingConfigSchema.optional(),
+  itemIdSource: itemIdSourceSchema.optional(),
 });

@@ -1,0 +1,129 @@
+{
+  "_generatedBy": "scripts/gs-bundle-plugins.mjs —— 禁止手改",
+  "genshin": {
+    "id": "genshin",
+    "displayName": {
+      "zh-CN": "原神"
+    },
+    "sdkVersion": "1.0.0",
+    "platforms": [
+      "windows"
+    ],
+    "maintainers": [
+      "gacha-studio"
+    ],
+    "exchangeFormats": [
+      "uigf-v4"
+    ],
+    "collect": {
+      "paradigm": "authkey",
+      "params": {
+        "credential": {
+          "kind": "chromiumCache",
+          "gameDir": "YuanShen_Data/webCaches",
+          "urlPattern": {
+            "source": "https:\\/\\/.+?getGachaLog[^\"]+",
+            "flags": ""
+          }
+        },
+        "request": {
+          "url": "{{credential}}&page={{page}}&gacha_type={{gachaType}}&size={{pageSize}}&end_id=0"
+        }
+      }
+    },
+    "fields": {},
+    "banners": [
+      {
+        "id": "301",
+        "displayName": {
+          "zh-CN": "角色活动祈愿"
+        }
+      },
+      {
+        "id": "302",
+        "displayName": {
+          "zh-CN": "武器活动祈愿"
+        }
+      },
+      {
+        "id": "200",
+        "displayName": {
+          "zh-CN": "常驻祈愿"
+        }
+      },
+      {
+        "id": "500",
+        "displayName": {
+          "zh-CN": "集录祈愿"
+        }
+      },
+      {
+        "id": "100",
+        "displayName": {
+          "zh-CN": "新手祈愿"
+        }
+      },
+      {
+        "id": "400",
+        "displayName": {
+          "zh-CN": "角色活动祈愿（400 子类型，随 301 一并返回）"
+        }
+      }
+    ],
+    "pityGroups": [
+      {
+        "key": "characterEventWish",
+        "members": [
+          "301",
+          "400"
+        ],
+        "hardPity": 90,
+        "curve": {
+          "kind": "softPity",
+          "base": 0.006,
+          "start": 74,
+          "step": 0.06
+        },
+        "guarantee": {
+          "kind": "fiftyFifty"
+        }
+      }
+    ],
+    "rarity": {
+      "ladder": [
+        "3",
+        "4",
+        "5"
+      ],
+      "pityTarget": "5"
+    },
+    "time": {
+      "timezoneSource": {
+        "kind": "computed"
+      }
+    },
+    "preconditions": [
+      {
+        "id": "genshin.credential.cacheDirExists",
+        "capability": "credential",
+        "level": "required",
+        "describe": {
+          "zh-CN": "自动获取抽卡链接要求游戏客户端至少运行过一次，缓存目录才会被创建"
+        },
+        "remedy": {
+          "zh-CN": "请先启动游戏并打开一次抽卡记录页，再回到本应用重试"
+        }
+      }
+    ],
+    "baseline": {
+      "kind": "inGamePageCount"
+    },
+    "retention": {
+      "displayText": {
+        "zh-CN": "6 个月"
+      },
+      "conservativeDays": 168
+    },
+    "itemIdSource": "displayName"
+  }
+}

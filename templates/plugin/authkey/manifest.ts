@@ -52,7 +52,6 @@ export const manifest = {
         url: "{{credential}}&page={{page}}",
       },
       // TODO：卡池类型参数名，如原神/星铁 "gacha_type"、绝区零 "real_gacha_type"。
-      typeParam: "TODO_TYPE_PARAM",
       extractList: extractRecordList,
     },
   },

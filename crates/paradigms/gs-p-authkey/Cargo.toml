@@ -8,3 +8,22 @@ description = "L1 范式层：authkey 采集流程（data_2 缓存扫描 + 分�
 
 [dependencies]
 gs-core.workspace = true
+# 存储层写入接口：insert_records 的返回值（实际新增行数）是 reachedKnown
+# 终止条件的判据来源；banner_snapshot 写入见 pipeline.rs。
+gs-storage.workspace = true
+# 插件 JS 运行时桥接与 manifest 纯数据 JSON 的访问入口
+# （plugin_manifest_data）。独立 crate 而不是依赖 gs-host——两者若相互
+# 依赖会成环（gs-host 迟早要编排 authkey 采集，届时会反过来依赖
+# gs-p-authkey），见 crates/gs-plugin-runtime/src/lib.rs 顶部的完整说明。
+gs-plugin-runtime.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+# 缓存扫描：从 data_2 缓存索引里用插件声明的 urlPattern 抠出凭据 URL。
+regex = "1"
+# 归一化记录时间：`fields.time` 是不带时区的 "YYYY-MM-DD HH:MM:SS" 字符串，
+# 需要按 hooks.resolveTimezone 给出的小时偏移换算成 UTC 毫秒时间戳。只用
+# NaiveDateTime 解析 + 手工时区平移，不需要 chrono 的时区数据库。
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+# 生产环境的 GameApiTransport 实现；测试用 fixture 驱动的实现见
+# pipeline.rs 的 tests 模块，不需要联网。
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "default-tls"] }

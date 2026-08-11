@@ -5,6 +5,7 @@ members = [
     "crates/gs-storage",
     "crates/gs-analysis",
     "crates/gs-host",
+    "crates/gs-plugin-runtime",
     "crates/paradigms/gs-p-authkey",
     "crates/paradigms/gs-p-uigf",
     "src-tauri",
@@ -25,6 +26,10 @@ gs-core = { path = "crates/gs-core" }
 gs-storage = { path = "crates/gs-storage" }
 gs-analysis = { path = "crates/gs-analysis" }
 gs-host = { path = "crates/gs-host" }
+# 插件 JS 运行时桥接：gs-host 与各 L1 范式层（如 gs-p-authkey）平级依赖它，
+# 它不反过来依赖任何一个消费者——理由见 crates/gs-plugin-runtime/src/lib.rs
+# 顶部「为什么是独立 crate」一节（破解 gs-host ⇄ gs-p-authkey 的必然环）。
+gs-plugin-runtime = { path = "crates/gs-plugin-runtime" }
 gs-p-authkey = { path = "crates/paradigms/gs-p-authkey" }
 gs-p-uigf = { path = "crates/paradigms/gs-p-uigf" }
 

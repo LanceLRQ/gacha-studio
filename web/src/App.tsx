@@ -1,10 +1,23 @@
-// 骨架阶段的占位页面：只用来证明 Vite + React + TypeScript 链路能跑通，
-// 不引入 UI 库、路由或状态管理——这些留给后续里程碑决定。
+import { Navigate, Route, Routes } from "react-router-dom";
+
+import { AppShell } from "@/layouts/AppShell";
+import { GameDetail } from "@/pages/GameDetail";
+import { Overview } from "@/pages/Overview";
+import { Records } from "@/pages/Records";
+import { Settings } from "@/pages/Settings";
+import { Welcome } from "@/pages/Welcome";
+
 export function App() {
   return (
-    <main>
-      <h1>Gacha Studio</h1>
-      <p>工程骨架已就绪，等待 M1 接入第一个插件。</p>
-    </main>
+    <Routes>
+      <Route path="/welcome" element={<Welcome />} />
+      <Route element={<AppShell />}>
+        <Route path="/" element={<Overview />} />
+        <Route path="/game/:gameId" element={<GameDetail />} />
+        <Route path="/game/:gameId/records" element={<Records />} />
+        <Route path="/settings" element={<Settings />} />
+      </Route>
+      <Route path="*" element={<Navigate to="/" replace />} />
+    </Routes>
   );
 }

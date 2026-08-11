@@ -20,7 +20,13 @@ pub enum ProbabilityCurve {
     /// 全程概率恒定，不随抽数变化。
     Flat { base: f64 },
     /// 米哈游三游形态：`start` 抽之前概率恒为 `base`，之后每抽按 `step` 递增。
-    SoftPity { base: f64, start: u32, step: u32 },
+    ///
+    /// ⚠️ `step` 与 `base` **同单位**，都是概率分数而非百分点——原神的软保底是
+    /// 0.6% 起、每抽 +6%，因此 `base: 0.006, step: 0.06`，不是 `step: 6`。
+    /// 这里曾把 `step` 写成 `u32`（百分点整数），与 `base`/`table` 的 `f64` 分数
+    /// 混了两种单位，而生成的 TS 两者都是 `number`，插件写 `0.06` 或 `6` 都能过
+    /// 类型检查——**类型本身在诱导这个错误**，故统一为 `f64`。
+    SoftPity { base: f64, start: u32, step: f64 },
     /// 鸣潮形态：`start` 抽之前概率恒为 `base`，之后按 `table` 里显式给出的
     /// 每一档概率取值——渐进概率不是等差递增，必须用查表而不是公式描述。
     Progressive {
@@ -82,12 +88,12 @@ mod tests {
         let curve = ProbabilityCurve::SoftPity {
             base: 0.006,
             start: 74,
-            step: 6,
+            step: 0.06,
         };
         let json = serde_json::to_value(&curve).unwrap();
         assert_eq!(
             json,
-            serde_json::json!({ "kind": "softPity", "base": 0.006, "start": 74, "step": 6 })
+            serde_json::json!({ "kind": "softPity", "base": 0.006, "start": 74, "step": 0.06 })
         );
         let round_tripped: ProbabilityCurve = serde_json::from_value(json).unwrap();
         assert_eq!(round_tripped, curve);
@@ -161,7 +167,7 @@ mod tests {
             curve: ProbabilityCurve::SoftPity {
                 base: 0.006,
                 start: 74,
-                step: 6,
+                step: 0.06,
             },
             guarantee: GuaranteeRule::FiftyFifty {},
         };

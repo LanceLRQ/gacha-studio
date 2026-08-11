@@ -23,6 +23,15 @@ import { renderResult, renderSummary } from '../lib/report.mjs';
 const GATE_TITLE_BASE = 'HC-3 类型生成（codegen 一致性）';
 const TYPES_DIR = 'packages/gs-plugin-kit/types/';
 
+// 插件 bundle 与 manifest 静态字段 JSON。它们由 scripts/gs-bundle-plugins.mjs
+// 从 plugins/** 打包，被 gs-plugin-runtime 用 include_str! 嵌进二进制。
+//
+// 为什么也要进这道门：它和 types/ 是同一类东西——生成产物且必须 committed
+// （否则新克隆 include_str! 直接编译失败）。更要紧的是，产物落后于 plugins/
+// 源码时**不会有任何报错**，只是二进制里跑的还是旧版插件代码，
+// 而插件代码正是 record_key、归一化这些静默失败高发区的所在。
+const PLUGIN_BUNDLE_DIR = 'crates/gs-plugin-runtime/generated/';
+
 const TODO_NOTES = [
   'TODO：fixture 回归 assertPluginFixture —— 留待 M1-S4',
   'TODO：zod schema 覆盖率检查 —— 留待 M1-S4',
@@ -101,10 +110,36 @@ export async function run() {
   // 手改 generated.ts 注入一行假类型，git diff 版本的检查一个字都没报。
   // 一道永远绿的门等于没有门，所以改用能同时看见 modified 与 untracked 的
   // porcelain 输出。
-  const statusResult = spawnSync('git', ['status', '--porcelain', '--', TYPES_DIR], {
+  // 插件 bundle 也要重打一遍再比对，理由同 TYPES_DIR 的注释。
+  const bundleResult = spawnSync('node', ['scripts/gs-bundle-plugins.mjs'], {
     cwd: repoRoot,
     encoding: 'utf8',
   });
+  if (bundleResult.error || bundleResult.status !== 0) {
+    return {
+      id: 'HC-3',
+      title: GATE_TITLE_BASE,
+      status: 'fail',
+      findings: [
+        {
+          file: '(node scripts/gs-bundle-plugins.mjs)',
+          line: 0,
+          column: 0,
+          reason: bundleResult.error
+            ? `无法执行插件打包脚本：${bundleResult.error.message}`
+            : `插件打包脚本执行失败，退出码 ${bundleResult.status}`,
+          snippet: joinOutput(bundleResult),
+        },
+      ],
+      notes: TODO_NOTES,
+    };
+  }
+
+  const statusResult = spawnSync(
+    'git',
+    ['status', '--porcelain', '--', TYPES_DIR, PLUGIN_BUNDLE_DIR],
+    { cwd: repoRoot, encoding: 'utf8' },
+  );
 
   if (statusResult.status !== 0) {
     return {

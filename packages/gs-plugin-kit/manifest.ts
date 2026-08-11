@@ -17,7 +17,7 @@
  *
  * | 级别 | 形态 | 适用 | 例子 |
  * |------|------|------|------|
- * | P1 值 | 字面量常量 | 差异是一个值 | `typeParam: "gacha_type"` |
+ * | P1 值 | 字面量常量 | 差异是一个值 | `pageSize: 20` |
  * | P2 表 | 映射表 / 枚举表 | 差异是有限枚举的分支 | `errorMap: { "-101": "authkeyExpired" }` |
  * | P3 函数 | TypeScript 纯函数 | 差异是计算 | `hooks.resolveTimezone` |
  *
@@ -129,6 +129,23 @@ export interface PluginManifest {
   retention?: RetentionPolicy;
   /** 抽数计算方式，省略默认 `perRecord`（米哈游三游适用）。 */
   drawCounting?: DrawCountingConfig;
+  /**
+   * `itemId` 的性质。`displayName` 表示 `fields.extractRecord` 产出的
+   * `itemId` 实际上是本地化物品名，不是真正的物品标识，需经 metadata
+   * 反查才能得到——宿主据此把这类记录的 `meta_state` 标成 `pending`，
+   * 而不是按"有 name/rarity 就是 complete"的默认规则误判成已完整。
+   *
+   * 典型场景：米哈游 `getGachaLog` 系接口不返回 `item_id`
+   * （`HoYo.Gacha/crates/url_scraper/src/types.rs:150` 的 doc comment 直书
+   * `Except for 'Genshin Impact'`），`extractRecord` 只能把本地化物品名
+   * 填进 `itemId`；`name`/`rarity` 却仍然都有值，若不显式声明这个信号，
+   * `idx_record_meta_pending` 那条部分索引永远扫不到这类记录——错的值
+   * 被标记为完整，没有任何机制会来纠正。
+   *
+   * 省略默认 `native`（`itemId` 本身就是稳定标识，米哈游三游之外的多数
+   * 游戏适用）。
+   */
+  itemIdSource?: "native" | "displayName";
 }
 
 // ============================================================
@@ -157,15 +174,20 @@ export interface AuthkeyPipelineParams {
   credential: CredentialSource;
   /** 分页请求模板，凭据位置用 `"{{credential}}"` 占位。 */
   request: RequestTemplate;
-  /** 卡池类型参数名，如原神/星铁 `"gacha_type"`、绝区零 `"real_gacha_type"`。 */
-  typeParam: string;
-  /** 分页参数名，默认 `"page"`。 */
-  pageParam?: string;
-  /** 每页条数，默认 20。 */
+  /**
+   * 每页条数，默认 20。填进 `request.url` 的 `{{pageSize}}` 占位符。
+   *
+   * > 这里曾有 `typeParam` / `pageParam` 两个字段（声明「卡池类型参数叫什么名」
+   * > 「分页参数叫什么名」）。M1-S3 实现后实测确认它们**从未被任何代码路径读取**：
+   * > 参数名已经由 `request.url` 模板自己写死（`&gacha_type=`、`&page=`），
+   * > 这两个声明只是把同一件事重复了一遍。注意与本字段的区别——`pageSize` 是
+   * > **值**，真的被消费；那两个是**参数名**，是死字段，已删除。
+   * > 绝区零的 `real_gacha_type` 差异照样只改自己那一行模板，不需要额外声明。
+   */
   pageSize?: number;
   /** 从响应体里取出本页记录数组；纯函数，不做 IO。 */
   extractList: (response: unknown) => unknown[];
-  /** 从响应体与已提取的列表里推导下一页游标；不提供则按 `pageParam` 递增翻页。 */
+  /** 从响应体与已提取的列表里推导下一页游标；不提供则按页码递增翻页。 */
   extractCursor?: (response: unknown, list: unknown[]) => string | undefined;
   /**
    * 限速策略，默认 `{ perPageDelayMs: 300, retry: { maxAttempts: 5, delayMs: 5000 } }`。

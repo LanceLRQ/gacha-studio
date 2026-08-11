@@ -13,3 +13,26 @@ catalog:
   # （禁 eval / new Function / 动态 import），属安全基础设施，不可缺。
   typescript: ^6.0.3
   zod: ^4.4.3
+
+  # M1-S6 界面层：版本与 docs/_internal/design/2026-08-10-界面设计方向.md §2
+  # 的实测记录一致（Tailwind 4.3.3 / lucide-react 1.31.0），仅 web/ 一个包
+  # 使用，但同样走 catalog——避免后续新增 web 子包（如独立组件库）时漂移。
+  tailwindcss: ^4.3.3
+  "@tailwindcss/vite": ^4.3.3
+  lucide-react: ^1.31.0
+  class-variance-authority: ^0.7.1
+  clsx: ^2.1.1
+  tailwind-merge: ^3.6.0
+  tw-animate-css: ^1.4.0
+  # 聚合包，按需具名导入各 Radix 原语（如 `import { Dialog } from "radix-ui"`），
+  # 免去逐个声明 @radix-ui/react-* 单独包版本——shadcn CLI 4.16.2 的
+  # nova 预设本身即采用这一方式（详见 web/src/components/ui/button.tsx）。
+  radix-ui: ^1.6.7
+  react-router-dom: ^7.18.2
+
+  # 西文字体自托管（拉丁子集，5 个字重实测 120KB）。中文不打包，
+  # 由 --font-ui 兜底链回落系统字体，见 web/src/styles/theme.css。
+  "@fontsource/ibm-plex-sans": ^5.3.0
+  "@fontsource/jetbrains-mono": ^5.3.0
+  # vite.config.ts 用 node:url 解析路径别名，是 Vite + TS 项目的标准写法。
+  "@types/node": ^22.20.1

@@ -57,7 +57,6 @@ const baseManifest: PluginManifest = {
     params: {
       credential: { kind: "manual" },
       request: { url: "https://example.invalid/{{credential}}" },
-      typeParam: "gacha_type",
       extractList: () => [],
     },
   },
@@ -122,7 +121,6 @@ const minimalFixturePlugin = {
       params: {
         credential: { kind: "manual" as const },
         request: { url: "https://example.invalid/{{credential}}" },
-        typeParam: "gacha_type",
         extractList: (response: unknown) => (response as { list: unknown[] }).list,
       },
     },

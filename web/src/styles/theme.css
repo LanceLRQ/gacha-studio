@@ -1,0 +1,222 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+/* ============================================================
+   Gacha Studio — 设计 token
+   依据：docs/_internal/design/2026-08-10-界面设计方向.md §2/§3
+   来源：docs/_internal/ui-demo/shell.css:9-46 —— oklch 数值原样迁移，
+   未重新取值。深色主题（.dark）为本次新增推导值，尚未经视觉稿验证
+   （设计方向 §3.3「两套主题从第一天就同等对待」+ §8 待验证项 2）。
+   ============================================================ */
+
+:root {
+  /* ---- 设计文档 §3.2 规定值，不得修改 ---- */
+  --background: oklch(0.985 0.003 85);
+  --primary: oklch(0.45 0.08 165);
+  --rarity-5: oklch(0.72 0.15 75);
+  --rarity-4: oklch(0.55 0.18 305);
+  --rarity-3: oklch(0.58 0.13 245);
+  --radius: 0.375rem;
+
+  /* ---- 前景三级 ---- */
+  --foreground: oklch(0.24 0.018 85);
+  --muted-foreground: oklch(0.5 0.014 85);
+  --faint-foreground: oklch(0.62 0.01 85);
+
+  /* ---- 表面阶梯：sidebar 最深 → card → background 最浅 ---- */
+  --card: oklch(0.975 0.004 85);
+  --sidebar-bg: oklch(0.96 0.005 85);
+  --border: oklch(0.885 0.006 85);
+  --border-strong: oklch(0.8 0.008 85);
+
+  --primary-foreground: oklch(0.98 0.006 165);
+  --primary-tint: oklch(0.93 0.02 165);
+
+  --warning: oklch(0.62 0.15 70);
+  --warning-bg: oklch(0.94 0.03 70);
+  --warning-foreground: oklch(0.34 0.09 55);
+
+  --destructive: oklch(0.53 0.19 25);
+  --destructive-bg: oklch(0.965 0.02 25);
+  --destructive-foreground: oklch(0.97 0.01 25);
+
+  /* ---- 身份标识层（§3.1）：仅用于侧栏圆点、图标 fallback 底色、跨游戏对比图
+     禁止出现在单游戏视图的任何图表内部——见组件层的代码审查检查点 ---- */
+  --game-genshin: oklch(0.7 0.12 80);
+  --game-starrail: oklch(0.55 0.15 300);
+  --game-zzz: oklch(0.68 0.16 55);
+
+  /*
+   * 字体：西文自托管，中文回落系统字体——两条约束各按各的量级取舍。
+   *
+   * 与 shell.css 的唯一差异是不再 @import fonts.googleapis.com：demo 网页可以
+   * 这么做，桌面客户端不行——本地优先意味着断网也要正常，运行时拉 CDN 字体会闪烁。
+   * 改为 npm 自托管（main.tsx 里只引拉丁子集的必要字重，实测 5 个字重共 120KB）。
+   *
+   * 字型本身**不换**：界面设计方向 §2.2 规定 4 把「display 字体不用 Inter /
+   * 系统默认」列在「不得放弃」的四条里，理由是本应用到处是需要对齐的数字。
+   * 而「依赖系统字体」那条决策针对的是**中文**（同文档 §345 原文即「中文字体方案」）
+   * ——中文字体 2~5MB 的体积代价在西文上差两个数量级，不该连坐。
+   *
+   * 兜底链的分工：IBM Plex Sans 没有 CJK 字形，中文字符自然落到后面的
+   * 微软雅黑 / 苹方，正好就是「西文用设计字体、中文用系统字体」。
+   */
+  --font-ui:
+    "IBM Plex Sans", "Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC",
+    system-ui, sans-serif;
+  --font-mono:
+    "JetBrains Mono", ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+    "Liberation Mono", monospace;
+}
+
+/* 深色主题：色相/彩度方向与浅色保持一致，仅重新调校明度，两者独立调校对比度
+   （§3.3），不是浅色简单反色。数值为推导值，视觉稿产出后需回来校准（§8-2）。 */
+.dark {
+  --background: oklch(0.19 0.008 85);
+  --primary: oklch(0.72 0.1 165);
+  --rarity-5: oklch(0.78 0.14 75);
+  --rarity-4: oklch(0.72 0.16 305);
+  --rarity-3: oklch(0.72 0.12 245);
+
+  --foreground: oklch(0.92 0.006 85);
+  --muted-foreground: oklch(0.68 0.01 85);
+  --faint-foreground: oklch(0.52 0.01 85);
+
+  --card: oklch(0.23 0.008 85);
+  --sidebar-bg: oklch(0.16 0.008 85);
+  --border: oklch(0.32 0.01 85);
+  --border-strong: oklch(0.4 0.012 85);
+
+  --primary-foreground: oklch(0.15 0.02 165);
+  --primary-tint: oklch(0.28 0.04 165);
+
+  --warning: oklch(0.75 0.15 70);
+  --warning-bg: oklch(0.28 0.05 70);
+  --warning-foreground: oklch(0.88 0.08 70);
+
+  --destructive: oklch(0.65 0.19 25);
+  --destructive-bg: oklch(0.28 0.06 25);
+  --destructive-foreground: oklch(0.95 0.02 25);
+
+  --game-genshin: oklch(0.75 0.11 80);
+  --game-starrail: oklch(0.68 0.14 300);
+  --game-zzz: oklch(0.72 0.15 55);
+}
+
+@custom-variant dark (&:is(.dark *));
+
+/* ============================================================
+   Tailwind 4 主题接管——shadcn CLI 初始化后的义务（设计方向 §2.1）。
+   :root/.dark 持有真实 oklch 数值，这里只做 --color-* 别名映射，
+   使暗色切换只需要切换 .dark 类、不需要重复编译两套工具类。
+   ============================================================ */
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-faint-foreground: var(--faint-foreground);
+
+  --color-card: var(--card);
+  --color-card-foreground: var(--foreground);
+  --color-sidebar: var(--sidebar-bg);
+  --color-sidebar-foreground: var(--foreground);
+
+  --color-border: var(--border);
+  --color-border-strong: var(--border-strong);
+  /* input / ring 是 shadcn 表单类组件的惯例别名，取值复用已有 token，不新引入色值 */
+  --color-input: var(--border-strong);
+  --color-ring: var(--primary-tint);
+
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary-tint: var(--primary-tint);
+
+  --color-warning: var(--warning);
+  --color-warning-bg: var(--warning-bg);
+  --color-warning-foreground: var(--warning-foreground);
+
+  --color-destructive: var(--destructive);
+  --color-destructive-bg: var(--destructive-bg);
+  --color-destructive-foreground: var(--destructive-foreground);
+
+  /* 数据语义层——稀有度色，§3.1，只允许出现在图表内部/记录条目/标签/保底进度条 */
+  --color-rarity-5: var(--rarity-5);
+  --color-rarity-4: var(--rarity-4);
+  --color-rarity-3: var(--rarity-3);
+
+  /* 身份标识层——游戏色，§3.1，只允许出现在侧栏圆点/图标 fallback/跨游戏对比图 */
+  --color-game-genshin: var(--game-genshin);
+  --color-game-starrail: var(--game-starrail);
+  --color-game-zzz: var(--game-zzz);
+
+  /* popover/secondary/muted/accent 同样是 shadcn 组件惯例别名，复用已有 token */
+  --color-popover: var(--card);
+  --color-popover-foreground: var(--foreground);
+  --color-secondary: var(--card);
+  --color-secondary-foreground: var(--foreground);
+  --color-muted: var(--card);
+  --color-accent: var(--primary-tint);
+  --color-accent-foreground: var(--primary);
+
+  /* 反默认值规定 3（§2.2）：圆角统一走小尺度，不做逐级放大的消费级 App 圆角阶梯 */
+  --radius-sm: calc(var(--radius) - 2px);
+  --radius-md: var(--radius);
+  --radius-lg: calc(var(--radius) * 1.5);
+  --radius-xl: calc(var(--radius) * 1.5);
+
+  --font-sans: var(--font-ui);
+  --font-mono: var(--font-mono);
+}
+
+/* ============================================================
+   App Shell 基础重置——设计方向 §4.8：外框架占满窗口，外层永不出现滚动条。
+   ============================================================ */
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  html,
+  body {
+    margin: 0;
+    padding: 0;
+    height: 100%;
+    width: 100%;
+    overflow: hidden;
+    background: var(--background);
+    color: var(--foreground);
+    font-family: var(--font-ui);
+    -webkit-font-smoothing: antialiased;
+    font-variant-numeric: tabular-nums;
+  }
+
+  #root {
+    height: 100%;
+    width: 100%;
+  }
+}
+
+/* ============================================================
+   滚动容器公共样式——App Shell 内唯一允许出现滚动条的地方复用这一份，
+   对应 shell.css 的 .scroll-area::-webkit-scrollbar 系列规则。
+   ============================================================ */
+@layer components {
+  .scroll-area {
+    scrollbar-width: thin;
+    scrollbar-color: var(--border-strong) transparent;
+  }
+
+  .scroll-area::-webkit-scrollbar {
+    width: 10px;
+  }
+
+  .scroll-area::-webkit-scrollbar-thumb {
+    background: var(--border-strong);
+    border-radius: 5px;
+    border: 3px solid var(--background);
+  }
+
+  .scroll-area::-webkit-scrollbar-track {
+    background: transparent;
+  }
+}

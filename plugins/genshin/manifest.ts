@@ -75,7 +75,6 @@ export const manifest = {
       request: {
         url: "{{credential}}&page={{page}}&gacha_type={{gachaType}}&size={{pageSize}}&end_id=0",
       },
-      typeParam: "gacha_type",
       extractList: extractGachaLogList,
     },
   },
@@ -136,7 +135,7 @@ export const manifest = {
     { id: "200", displayName: { "zh-CN": "常驻祈愿" } },
     { id: "500", displayName: { "zh-CN": "集录祈愿" } },
     { id: "100", displayName: { "zh-CN": "新手祈愿" } },
-    // 400 不是一个可单独查询的池子（typeParam 永远不会以 400 取值发起请求），
+    // 400 不是一个可单独查询的池子（不会以 400 作为卡池取值发起请求），
     // 但它是 301 响应里真实出现的 gacha_type 取值，必须声明为独立 BannerSpec，
     // pityGroups[].members 才能合法引用它——否则 bannerId="400" 的记录会指向
     // 一个不存在的 BannerSpec，见本文件末尾「偏差与发现」说明。
@@ -182,6 +181,12 @@ export const manifest = {
     displayText: { "zh-CN": "6 个月" },
     conservativeDays: 6 * 28,
   },
+
+  // ⚠️ 原神 API 不返回 item_id，extractRecord 的 itemId 是本地化物品名
+  // （见上方 extractRecord 内的详细说明与 M1-S3 阻塞项引用）。声明这个信号
+  // 后，宿主的归一化层会把这类记录标成 meta_state='pending'，而不是因为
+  // name/rarity 都有值就误判成 complete——错的 item_id 不该被标记为完整。
+  itemIdSource: "displayName",
 
   // metadata 字段本 Stage 刻意不声明，理由见文件末尾「偏差与发现」。
 } satisfies PluginManifest;

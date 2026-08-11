@@ -6,5 +6,12 @@ rust-version.workspace = true
 license.workspace = true
 description = "通用分析引擎：保底 / 欧非 / 时间线跨游戏聚合"
 
-# 本阶段的保底计数器是纯计数逻辑，尚不需要依赖 gs-core 的错误类型；
-# 待接入真实记录数据（含校验失败路径）时再引入。
+[dependencies]
+# 保底计数、稀有度分布、完整性区间核对全部基于插件声明的领域类型
+# （ProbabilityCurve / GuaranteeRule / PityGroup / RaritySpec / GachaRecord /
+# MetaState），不在本 crate 内重新定义一份平行结构。
+gs-core.workspace = true
+# baseline.rs 的完整性核对直接复用 gs-storage 暴露的 `IntegrityRow`——它已经是
+# `v_integrity` 视图字段的精确映射，重新定义一份形状相同的结构体只会制造
+# "改一处忘改另一处"的同步负担；banner_meta_seed.rs 同理复用 `NewBannerMeta`。
+gs-storage.workspace = true
