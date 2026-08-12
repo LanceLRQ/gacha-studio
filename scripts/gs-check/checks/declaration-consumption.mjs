@@ -87,6 +87,28 @@ const CONTRACT_SECTIONS = [
       },
     ],
   },
+  {
+    // CredentialSource 是手写契约类型（含 RegExp 字段，ts-rs 无法生成），
+    // 定义在 manifest.ts 而不是 types/generated.ts——这也是新增本区块前
+    // 必须先修 extractTsTypeFields/findTypeAliasEnd 的原因，见两个函数的
+    // 文档注释。
+    tsType: 'CredentialSource',
+    tsFile: 'packages/gs-plugin-kit/manifest.ts',
+    rustStruct: 'CredentialJson',
+    rustFile: 'crates/paradigms/gs-p-authkey/src/pipeline.rs',
+    knownUnconsumed: [
+      {
+        field: 'logPath',
+        reason:
+          'M2-S2（本次改动）只登记契约，真正的日志文件读取实现（鸣潮 Client.log 异或解混淆）' +
+          '要到 M2-S3 才落地——chromiumCache 分支的 gameDir/urlPattern 已有真实消费点' +
+          '（cache_scan.rs 的 scan_game_cache），logFile 分支目前还没有。HC-4 造出来就是为了拦' +
+          '这类"声明了但没消费"的分支，见 M2 纸面填表演练审计 §7.5 第 9 条。' +
+          '**M2-S3 接上 CredentialJson::LogFile 的真实读取逻辑后必须移除本条白名单**，' +
+          '不能让它变成长期摆设。',
+      },
+    ],
+  },
 ];
 
 function collectRustFiles(dir) {
@@ -114,20 +136,53 @@ function camelToSnakeCase(name) {
 }
 
 /**
- * 从 `types/generated.ts` 里抠出某个类型别名的字段名集合。
- * 见文件头「已知局限」第一条。
+ * 从类型别名 `=` 之后的位置开始，找到该类型声明在**顶层**（花括号已完全
+ * 平衡）结束的位置——即第一个不在任何 `{}` 内部的 `;`。
+ *
+ * 扫描前先把 `/** ... *\/` 形态的块注释替换成等长空白：JSDoc 里常见的
+ * `{@link Foo}`／`` `"{{credential}}"` `` 会包含花括号，不处理会打乱这里的
+ * 深度计数（好在这类写法本身总是成对出现，实测不会破坏平衡，但仍按最坏
+ * 情况防御）。只是为了给深度计数腾地方，不影响返回结果——调用方会在
+ * 原文（未替换注释）上再跑一次自己的注释剥离来提取字段。
+ */
+function findTypeAliasEnd(source, bodyStart) {
+  const masked = source.slice(bodyStart).replace(/\/\*\*[\s\S]*?\*\//g, (m) => ' '.repeat(m.length));
+  let depth = 0;
+  for (let i = 0; i < masked.length; i++) {
+    const ch = masked[i];
+    if (ch === '{') depth++;
+    else if (ch === '}') depth--;
+    else if (ch === ';' && depth === 0) return bodyStart + i;
+  }
+  return null;
+}
+
+/**
+ * 从某个 TS 源文件里抠出某个类型别名的字段名集合。
+ *
+ * 覆盖两种写法：
+ * - `types/generated.ts`（ts-rs 输出）：单行、字段用逗号分隔，如
+ *   `export type Foo = { a: T, b: U, };`。
+ * - `packages/gs-plugin-kit/manifest.ts`（手写契约）：多行、判别联合的每个
+ *   分支各自用**分号**分隔字段（TS 对象类型字面量的合法写法之一），如
+ *   `export type CredentialSource =\n  | { kind: "x"; a: T }\n  | { ... };`。
+ *   旧版实现假设「下一个 `export type` 就是边界」且只认逗号分隔，两条假设
+ *   对 ts-rs 输出成立，但套在手写契约上会失败——`export type X =` 后面
+ *   直接换行、不带尾随空格，`indexOf` 精确匹配不到；分号分隔的字段也不会
+ *   被逗号版的正则捕获到。改用 [`findTypeAliasEnd`] 的花括号深度计数
+ *   定位真正的类型别名结束点，字段正则同时接受 `{`/`,`/`;` 三种前导字符。
  */
 function extractTsTypeFields(tsSource, typeName) {
-  const startMarker = `export type ${typeName} = `;
-  const startIdx = tsSource.indexOf(startMarker);
-  if (startIdx === -1) return null;
-  const afterStart = tsSource.slice(startIdx + startMarker.length);
-  const nextExportIdx = afterStart.indexOf('\nexport type ');
-  const block = nextExportIdx === -1 ? afterStart : afterStart.slice(0, nextExportIdx);
+  const startPattern = new RegExp(`export type ${typeName}\\s*=\\s*`);
+  const startMatch = startPattern.exec(tsSource);
+  if (!startMatch) return null;
+  const bodyStart = startMatch.index + startMatch[0].length;
+  const bodyEnd = findTypeAliasEnd(tsSource, bodyStart);
+  const block = bodyEnd === null ? tsSource.slice(bodyStart) : tsSource.slice(bodyStart, bodyEnd);
   const withoutDocComments = block.replace(/\/\*\*[\s\S]*?\*\//g, ' ');
 
   const fields = new Set();
-  for (const m of withoutDocComments.matchAll(/[{,]\s*([A-Za-z_][A-Za-z0-9_]*)\??:\s/g)) {
+  for (const m of withoutDocComments.matchAll(/[{,;]\s*([A-Za-z_][A-Za-z0-9_]*)\??:\s/g)) {
     fields.add(m[1]);
   }
   fields.delete('kind'); // 判别键由 serde(tag = "kind") 机制本身消费，不需要单独找镜像字段。

@@ -15,7 +15,18 @@ id: string, displayName: LocalizedText,
  */
 endpointOverride?: string, };
 export type HttpMethod = "GET" | "POST";
-export type RequestTemplate = { url: string, method?: HttpMethod, headers?: Record<string, string>, };
+export type RequestTemplate = { url: string, method?: HttpMethod, headers?: Record<string, string>, 
+/**
+ * POST 请求体模板，占位符替换规则与 `url` 完全一致
+ * （`{{credential}}` / `{{page}}` / `{{gachaType}}` / `{{pageSize}}`）——
+ * L1 侧复用同一套替换函数，不为 `body` 另写一份。
+ *
+ * 新增动机：鸣潮 `POST /gacha/record/query` 要发 JSON body
+ * `{ cardPoolId, cardPoolType, languageCode, playerId, recordId, serverId }`，
+ * `cardPoolType` 随卡池变化，body 里同样需要占位符——纯 `url` 模板表达
+ * 不了 POST body，因此这里新增而不是复用 `url` 硬塞查询串。
+ */
+body?: string, };
 export type MetadataEntry = { name?: string, itemType?: string, rarity?: string, };
 export type RareEventRef = { time: string, itemId: string, };
 export type BannerBaseline = { bannerKey: string, drawCount?: number, rareEvents: Array<RareEventRef>, pityMax?: number, };
@@ -74,12 +85,26 @@ rawRef?: number,
 extra?: string, };
 export type ProbabilityCurve = { "kind": "flat", base: number, } | { "kind": "softPity", base: number, start: number, step: number, } | { "kind": "progressive", base: number, start: number, table: Array<number>, } | { "kind": "custom", id: string, };
 export type GuaranteeRule = { "kind": "fiftyFifty", } | { "kind": "alwaysRateUp", } | { "kind": "weighted", rateUpChance: number, } | { "kind": "none", };
-export type PityGroup = { key: string, members: Array<string>, hardPity: number, curve: ProbabilityCurve, guarantee: GuaranteeRule, };
+export type PityGroup = { key: string, members: Array<string>, hardPity: number, curve: ProbabilityCurve, guarantee: GuaranteeRule, 
+/**
+ * 本组保底命中判定的目标稀有度码。缺省时回落到
+ * [`crate::record::RaritySpec::pity_target`]（米哈游三游只有一档保底，
+ * 沿用这个缺省值即可，签名与行为都不变）。
+ *
+ * 新增动机：鸣潮每个卡池同时存在两套独立保底计数——5★ 硬保底（80/50/1
+ * 三种值，与 `rarity.pity_target` 一致）与 4★ 硬保底（恒为 10，需要一个
+ * **不同于**最高档的目标）。一个 `RaritySpec` 只能声明一个
+ * `pity_target`，装不下"同一游戏有两档独立保底"，因此在 `PityGroup`
+ * 这一层加可选覆盖——鸣潮为 5★/4★ 各声明一个 `PityGroup`（`members`
+ * 可以指向同一批卡池），4★ 那份显式填 `pityTarget: "4"`，5★ 那份省略、
+ * 继续回落到 `rarity.pity_target`。
+ */
+pityTarget?: string, };
 export type RateLimitConfig = { perPageDelayMs?: number, batchSize?: number, batchDelayMs?: number, retry?: RetryConfig, };
 export type RetryConfig = { maxAttempts?: number, backoff?: BackoffKind, delayMs?: number, };
 export type BackoffKind = "fixed" | "exponential";
 export type ErrorSemantic = "authkeyExpired" | "rateLimited" | "unknown";
-export type StopCondition = { "kind": "emptyPage", } | { "kind": "cursorExhausted", } | { "kind": "reachedKnown", };
+export type StopCondition = { "kind": "emptyPage", } | { "kind": "cursorExhausted", } | { "kind": "reachedKnown", } | { "kind": "singleRequest", };
 export type TimeConfig = { rawTimeConvention?: RawTimeConvention, timezoneSource?: TimezoneSource, };
 export type RawTimeConvention = "serverLocal" | "clientLocalized";
 export type TimezoneSource = { "kind": "apiField", field: string, } | { "kind": "staticTable", 

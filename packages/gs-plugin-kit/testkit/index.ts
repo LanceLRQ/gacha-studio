@@ -85,14 +85,14 @@ export function checkCountDrawsContract(manifest: PluginManifest, hooks: PluginH
 }
 
 /**
- * 契约检查 3/3：`hooks.deriveRecordKey` 缺省时，record_key 生成会退化为
- * 直接使用 `UnifiedRecordFields.stableId`；但「`extractRecord` 是否真的会
- * 填充 `stableId`」是一个**运行时事实**，只有跑过 fixture、检查过样本记录
- * 才能证实。
+ * 契约检查 3/4：`hooks.deriveRecordKey`/`hooks.deriveRecordKeys` 都缺省时，
+ * record_key 生成会退化为直接使用 `UnifiedRecordFields.stableId`；但
+ * 「`extractRecord` 是否真的会填充 `stableId`」是一个**运行时事实**，只有
+ * 跑过 fixture、检查过样本记录才能证实。
  *
- * 保守处理：缺少 `hooks.deriveRecordKey` 一律视为未满足契约，避免插件作者
- * 误以为「不写这个 hook 也行」，直到跑 fixture 才发现 `stableId` 从未被填充
- * 过、record_key 早已在运行时静默退化。
+ * 保守处理：两个 hook 都缺省时一律视为未满足契约，避免插件作者误以为
+ * 「不写 hook 也行」，直到跑 fixture 才发现 `stableId` 从未被填充过、
+ * record_key 早已在运行时静默退化。
  *
  * @param sampleHasStableId 可选。调用方若已经证实（例如跑过 fixture 后
  *   统计得出）`extractRecord` 对所有样本记录都填充了 `stableId`，可传 `true`
@@ -100,20 +100,39 @@ export function checkCountDrawsContract(manifest: PluginManifest, hooks: PluginH
  */
 export function checkDeriveRecordKeyContract(hooks: PluginHooks | undefined, sampleHasStableId = false): void {
   if (hooks?.deriveRecordKey) return;
+  if (hooks?.deriveRecordKeys) return;
   if (sampleHasStableId) return;
   throw new Error(
-    "插件既未提供 hooks.deriveRecordKey，也未证实 UnifiedRecordFields.stableId 会被填充" +
-      "——按契约二者必须满足其一，否则 record_key 在运行时可能退化为不稳定或直接缺失。" +
+    "插件既未提供 hooks.deriveRecordKey / hooks.deriveRecordKeys，也未证实 UnifiedRecordFields.stableId 会被填充" +
+      "——按契约三者必须满足其一，否则 record_key 在运行时可能退化为不稳定或直接缺失。" +
       "米哈游三游这类服务端雪花 ID 场景尤其禁止仅靠 stableId：跨端点（如星铁联动池 " +
       "getLdGachaLog）会与常规卡池的雪花 ID 撞键，必须实现 deriveRecordKey 把卡池维度" +
       "并进去，否则撞键记录会被 INSERT OR IGNORE 静默丢弃。",
   );
 }
 
-/** 依次跑完三条静态契约检查，任一不满足即抛出对应错误。 */
+/**
+ * 契约检查 4/4：`hooks.deriveRecordKey` 与 `hooks.deriveRecordKeys` 互斥，
+ * 不能同时声明——二者只能二选一，宿主不会替插件猜该信哪一个（与
+ * `crates/paradigms/gs-p-authkey/src/pipeline.rs` 的
+ * `validate_derive_record_key_hooks_not_both_declared` 是同一条约束，
+ * 这里在 fixture 测试阶段就先拦一次，不必等到真正跑采集才发现）。
+ */
+export function checkDeriveRecordKeyHooksAreMutuallyExclusive(hooks: PluginHooks | undefined): void {
+  if (hooks?.deriveRecordKey && hooks?.deriveRecordKeys) {
+    throw new Error(
+      "插件同时提供了 hooks.deriveRecordKey 与 hooks.deriveRecordKeys——二者只能二选一。" +
+        "前者逐条计算，后者批量计算（一次拿到整批记录），两者语义不兼容，" +
+        "宿主不会替插件决定该信哪一个的产出。",
+    );
+  }
+}
+
+/** 依次跑完四条静态契约检查，任一不满足即抛出对应错误。 */
 export function runStaticContractChecks(plugin: PluginUnderTest, sampleHasStableId = false): void {
   checkResolveTimezoneContract(plugin.manifest, plugin.hooks);
   checkCountDrawsContract(plugin.manifest, plugin.hooks);
+  checkDeriveRecordKeyHooksAreMutuallyExclusive(plugin.hooks);
   checkDeriveRecordKeyContract(plugin.hooks, sampleHasStableId);
 }
 
@@ -211,6 +230,40 @@ function deepEqual(a: unknown, b: unknown): boolean {
 }
 
 /**
+ * 批量算出一组样本记录的 record_key，三选一（与 `runStaticContractChecks`
+ * 已经保证的互斥性一致）：
+ * 1. `hooks.deriveRecordKeys`——整批一次调用，返回值长度必须与输入一致；
+ * 2. `hooks.deriveRecordKey`——逐条调用；
+ * 3. 都未声明——退化到每条记录自己的 `stableId`。
+ *
+ * 与 `crates/paradigms/gs-p-authkey/src/pipeline.rs` 的
+ * `derive_record_keys_for_page` 是同一套优先级，两处独立实现是因为
+ * 一个跑在 TS 侧（fixture 测试），一个跑在 Rust 侧（真实采集），但语义
+ * 必须一致——fixture 测出来"对"的批处理逻辑，采集时不能得出不同结果。
+ */
+function deriveFixtureRecordKeys(hooks: PluginHooks | undefined, allFields: UnifiedRecordFields[]): string[] {
+  if (hooks?.deriveRecordKeys) {
+    const keys = hooks.deriveRecordKeys(allFields);
+    if (keys.length !== allFields.length) {
+      throw new Error(
+        `hooks.deriveRecordKeys 返回了 ${keys.length} 个 key，但输入了 ${allFields.length} 条记录，长度必须一致`,
+      );
+    }
+    return keys;
+  }
+
+  return allFields.map((fields) => {
+    const recordKey = hooks?.deriveRecordKey ? hooks.deriveRecordKey(fields) : fields.stableId;
+    if (!recordKey) {
+      throw new Error(
+        `记录既没有 hooks.deriveRecordKey 也没有 stableId，无法得到 record_key（itemId="${fields.itemId}"）`,
+      );
+    }
+    return recordKey;
+  });
+}
+
+/**
  * 对指定插件跑一遍 fixture 契约测试。
  *
  * 流程：
@@ -220,15 +273,23 @@ function deepEqual(a: unknown, b: unknown): boolean {
  *    `fixtureDir/raw_response/*.json`（按文件名排序，模拟分页顺序）。
  * 3. 对每个响应文件：跑 `collect.params.extractList` 取出本页记录数组，
  *    对每条记录跑 `fields.extractRecord` → schema 校验 → 可选的
- *    `hooks.transformRecord` → 再次校验，再算出 `recordKey`
- *    （`hooks.deriveRecordKey` 或退化到 `stableId`）与（若时区来源是
- *    `computed`）`hooks.resolveTimezone`。
- * 4. 用第 3 步统计出的「样本是否全部有 stableId」调用
+ *    `hooks.transformRecord` → 再次校验，收集进跨全部响应文件的样本数组。
+ * 4. 全部样本收齐后，批量算出 `recordKey`：`hooks.deriveRecordKeys`
+ *    （整批一次调用）优先，其次 `hooks.deriveRecordKey`（逐条调用），
+ *    都未声明则退化到各自的 `stableId`——**不能逐条算**，`deriveRecordKeys`
+ *    需要同时看到"这一批里的其余记录"才能算出序位，理由见
+ *    `PluginHooks.deriveRecordKeys` 的文档。再算（若时区来源是 `computed`）
+ *    `hooks.resolveTimezone`。
+ * 5. 用第 3～4 步统计出的「样本是否全部有 stableId」调用
  *    `checkDeriveRecordKeyContract`——这一条必须等样本跑完才有意义。
- * 5. 读取 `fixtureDir/expected/normalized.json`，与第 3 步的结果逐条深比较。
+ * 6. 读取 `fixtureDir/expected/normalized.json`，与第 4 步的结果逐条深比较。
  *
- * 本 Stage 只支持 `authkey` 范式插件（当前仓库里唯一有真实 fixture 的范式）；
- * 其余范式会明确报错而不是静默按 authkey 的假设处理。
+ * 本 Stage 只支持声明了 `collect.params.extractList` 的范式（目前唯一实现
+ * 是 `credentialedApi`）——按**能力**（是否有 `extractList` 可跑）判断，
+ * 不写死具体的 `paradigm` 字符串，这样未来任何新范式只要复用同一套
+ * `extractList`/`extractRecord` 流程就能直接被本函数支持，不需要在这里
+ * 逐个加白名单。`packetCapture`/`ocr` 目前仍是 0 样本占位骨架，params 里
+ * 没有 `extractList`，会被明确拒绝，而不是假装能测。
  *
  * @param plugin 待测试的插件（manifest + 可选 hooks）
  * @param fixtureDir fixture 目录路径，相对仓库根目录，如 "fixtures/genshin"
@@ -241,11 +302,14 @@ export async function assertPluginFixture(
 ): Promise<void> {
   checkResolveTimezoneContract(plugin.manifest, plugin.hooks);
   checkCountDrawsContract(plugin.manifest, plugin.hooks);
+  checkDeriveRecordKeyHooksAreMutuallyExclusive(plugin.hooks);
 
-  if (plugin.manifest.collect.paradigm !== "authkey") {
+  if (!("extractList" in plugin.manifest.collect.params)) {
     throw new Error(
-      `assertPluginFixture 目前只支持 authkey 范式插件，插件 "${plugin.manifest.id}" ` +
-        `声明的 paradigm 是 "${plugin.manifest.collect.paradigm}"`,
+      `assertPluginFixture 目前只支持声明了 collect.params.extractList 的范式（当前唯一实现是 ` +
+        `credentialedApi）——插件 "${plugin.manifest.id}" 声明的 paradigm 是 ` +
+        `"${plugin.manifest.collect.paradigm}"，packetCapture/ocr 范式仍是 0 样本占位骨架，` +
+        "尚无可运行的 fixture 契约测试实现。",
     );
   }
   const { extractList } = plugin.manifest.collect.params;
@@ -265,10 +329,11 @@ export async function assertPluginFixture(
     throw new Error(`fixture 目录 "${fixtureDir}/raw_response" 下没有任何样本响应文件`);
   }
 
-  const normalizedRecords: NormalizedFixtureRecord[] = [];
-  let sampleCount = 0;
-  let sampleWithStableId = 0;
+  // 第一阶段：跑完 extractList/extractRecord/transformRecord，收齐跨全部
+  // 响应文件的样本 fields——deriveRecordKeys（批处理钩子）需要整批数据
+  // 一起传给插件，不能逐条调用。
   const timezoneRequired = plugin.manifest.time?.timezoneSource?.kind === "computed";
+  const allFields: UnifiedRecordFields[] = [];
 
   for (const fileName of responseFileNames) {
     const rawText = await reader.readText(`${fixtureDir}/raw_response/${fileName}`);
@@ -285,8 +350,6 @@ export async function assertPluginFixture(
     }
 
     for (const rawRecord of list) {
-      sampleCount += 1;
-
       let fields = extractRecord(rawRecord);
       const parsed = unifiedRecordFieldsSchema.safeParse(fields);
       if (!parsed.success) {
@@ -308,26 +371,31 @@ export async function assertPluginFixture(
         fields = reparsed.data as UnifiedRecordFields;
       }
 
-      if (fields.stableId) sampleWithStableId += 1;
-
-      const recordKey = plugin.hooks?.deriveRecordKey ? plugin.hooks.deriveRecordKey(fields) : fields.stableId;
-      if (!recordKey) {
-        throw new Error(
-          `样本 "${fileName}" 中的记录既没有 hooks.deriveRecordKey 也没有 stableId，无法得到 record_key` +
-            `（itemId="${fields.itemId}"）`,
-        );
-      }
-
-      const normalized: NormalizedFixtureRecord = { fields, recordKey };
-      if (timezoneRequired) {
-        // 上面的 checkResolveTimezoneContract 已经保证 hooks.resolveTimezone 存在。
-        normalized.timezoneOffsetHours = plugin.hooks?.resolveTimezone?.(fields, timezoneCtx);
-      }
-      normalizedRecords.push(normalized);
+      allFields.push(fields);
     }
   }
 
+  const sampleCount = allFields.length;
+  const sampleWithStableId = allFields.filter((fields) => Boolean(fields.stableId)).length;
   checkDeriveRecordKeyContract(plugin.hooks, sampleCount > 0 && sampleWithStableId === sampleCount);
+
+  // 第二阶段：批量算出全部样本记录的 record_key，再拼上（若需要）时区偏移。
+  const recordKeys = deriveFixtureRecordKeys(plugin.hooks, allFields);
+  const normalizedRecords: NormalizedFixtureRecord[] = allFields.map((fields, index) => {
+    const recordKey = recordKeys[index];
+    if (recordKey === undefined) {
+      // 不应发生：deriveFixtureRecordKeys 已经保证返回值与 allFields 等长；
+      // 这里只是让 noUncheckedIndexedAccess 下标访问的类型收窄成立，同时
+      // 留一道防线，而不是用非空断言假装"肯定不会错"。
+      throw new Error(`内部错误：record_key 数组在下标 ${index} 处缺失（itemId="${fields.itemId}"）`);
+    }
+    const normalized: NormalizedFixtureRecord = { fields, recordKey };
+    if (timezoneRequired) {
+      // 上面的 checkResolveTimezoneContract 已经保证 hooks.resolveTimezone 存在。
+      normalized.timezoneOffsetHours = plugin.hooks?.resolveTimezone?.(fields, timezoneCtx);
+    }
+    return normalized;
+  });
 
   const expectedText = await reader.readText(`${fixtureDir}/expected/normalized.json`);
   let expected: NormalizedFixture;

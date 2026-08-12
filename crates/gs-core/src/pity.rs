@@ -68,6 +68,20 @@ pub struct PityGroup {
     pub hard_pity: u32,
     pub curve: ProbabilityCurve,
     pub guarantee: GuaranteeRule,
+    /// 本组保底命中判定的目标稀有度码。缺省时回落到
+    /// [`crate::record::RaritySpec::pity_target`]（米哈游三游只有一档保底，
+    /// 沿用这个缺省值即可，签名与行为都不变）。
+    ///
+    /// 新增动机：鸣潮每个卡池同时存在两套独立保底计数——5★ 硬保底（80/50/1
+    /// 三种值，与 `rarity.pity_target` 一致）与 4★ 硬保底（恒为 10，需要一个
+    /// **不同于**最高档的目标）。一个 `RaritySpec` 只能声明一个
+    /// `pity_target`，装不下"同一游戏有两档独立保底"，因此在 `PityGroup`
+    /// 这一层加可选覆盖——鸣潮为 5★/4★ 各声明一个 `PityGroup`（`members`
+    /// 可以指向同一批卡池），4★ 那份显式填 `pityTarget: "4"`，5★ 那份省略、
+    /// 继续回落到 `rarity.pity_target`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub pity_target: Option<String>,
 }
 
 #[cfg(test)]
@@ -170,6 +184,7 @@ mod tests {
                 step: 0.06,
             },
             guarantee: GuaranteeRule::FiftyFifty {},
+            pity_target: None,
         };
         let json = serde_json::to_value(&group).unwrap();
         assert_eq!(json["hardPity"], serde_json::json!(90));
@@ -177,6 +192,29 @@ mod tests {
             json["guarantee"],
             serde_json::json!({ "kind": "fiftyFifty" })
         );
+        assert!(
+            json.get("pityTarget").is_none(),
+            "未提供时不应出现 pityTarget 键: {json}"
+        );
+
+        let round_tripped: PityGroup = serde_json::from_value(json).unwrap();
+        assert_eq!(round_tripped, group);
+    }
+
+    #[test]
+    fn pity_group_round_trips_with_explicit_pity_target_override() {
+        // 鸣潮形态：4★ 硬保底组显式声明 pityTarget，与 rarity.pityTarget（通常是
+        // 最高档 "5"）不同。
+        let group = PityGroup {
+            key: "wuwaResonator4Star".to_string(),
+            members: vec!["standard".to_string()],
+            hard_pity: 10,
+            curve: ProbabilityCurve::Flat { base: 0.06 },
+            guarantee: GuaranteeRule::None {},
+            pity_target: Some("4".to_string()),
+        };
+        let json = serde_json::to_value(&group).unwrap();
+        assert_eq!(json["pityTarget"], serde_json::json!("4"));
 
         let round_tripped: PityGroup = serde_json::from_value(json).unwrap();
         assert_eq!(round_tripped, group);

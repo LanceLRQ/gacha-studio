@@ -66,7 +66,10 @@ export const manifest = {
   // 不在本次演练范围内编造。
 
   collect: {
-    paradigm: "authkey",
+    // paradigm 随 M2-S2 契约改名同步更新："authkey" → "credentialedApi"，
+    // 见 packages/gs-plugin-kit/manifest.ts 对 CredentialedApiPipelineParams
+    // 的说明；本文件其余内容为 M1-S7 历史演练记录，不改动。
+    paradigm: "credentialedApi",
     params: {
       credential: {
         kind: "chromiumCache",

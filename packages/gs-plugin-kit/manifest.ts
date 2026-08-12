@@ -155,21 +155,44 @@ export interface PluginManifest {
 /**
  * `paradigm` 决定走哪条 L1 采集流程，`params` 是该流程接受的参数。
  *
- * 范式 A（authkey）现在就抽象，因为已有三个真实项目 + 五份真实存档的实证
- * 支撑，字段写全；范式 B/C/D 各自样本不足（1 个或 0 个），只保留判别联合的
- * 占位分支，详见各自类型定义上的说明。
+ * 范式 A（`credentialedApi`：先取凭据、再调 API）现在就抽象，因为已有
+ * HoYo.Gacha / genshin-wish-export / star-rail-warp-export 三个参考实现 +
+ * 五份真实存档支撑，字段写全；范式 C/D 各自样本不足（1 个或 0 个），只保留
+ * 判别联合的占位分支，详见各自类型定义上的说明。
+ *
+ * ⚠️ **本判别联合曾经还有第四个分支 `{ paradigm: "logScan"; params:
+ * LogScanPipelineParams }`，M2-S2 已删除**（同批把 `"authkey"` 改名为
+ * `"credentialedApi"`，详见下方 `CredentialedApiPipelineParams` 的说明）。
+ * 删除理由：M2 用鸣潮做纸面填表演练后发现，「日志扫描」描述的是**凭据从
+ * 哪来**，不是采集流程本身——鸣潮拿到凭据之后的分页拉取、归一化、去重
+ * 流程与原神完全同构，`credentialedApi` 直接可用。`logScan` 分支与
+ * {@link CredentialSource} 的 `kind: "logFile"` 是两套**从未互相引用、
+ * 也从未被任何代码路径跑过**的重复扩展点——M1 在样本不足时凭猜测同时留了
+ * 两个入口。保留 `logScan` 等于把卡池遍历/请求/解析/归一化/去重整套逻辑
+ * 在第二个分支里再实现一遍，是「N 个独立工具塞进一个壳」的退化路径，因此
+ * 直接删除，凭据来源统一收敛到 {@link CredentialSource} 的判别联合里。
+ * 完整裁定见
+ * `docs/_internal/audit/AUDIT-2026-08-12-M2鸣潮纸面填表演练.md` §七
+ * 7.1～7.2。`LogScanPipelineParams` 类型本身也已一并删除，不留占位骨架。
  */
 export type CollectConfig =
-  | { paradigm: "authkey"; params: AuthkeyPipelineParams }
-  | { paradigm: "logScan"; params: LogScanPipelineParams }
+  | { paradigm: "credentialedApi"; params: CredentialedApiPipelineParams }
   | { paradigm: "packetCapture"; params: PacketCapturePipelineParams }
   | { paradigm: "ocr"; params: OcrPipelineParams };
 
 /**
- * authkey 范式的采集参数。已有 HoYo.Gacha / genshin-wish-export /
- * star-rail-warp-export 三个参考实现 + 五份真实存档支撑，字段视为稳定。
+ * `credentialedApi`（先取凭据、再调 API）范式的采集参数。已有 HoYo.Gacha /
+ * genshin-wish-export / star-rail-warp-export 三个参考实现 + 五份真实存档
+ * 支撑，字段视为稳定。
+ *
+ * ⚠️ **本类型曾叫 `AuthkeyPipelineParams`，判别标签曾叫 `"authkey"`**，
+ * M2-S2 改名——鸣潮走同一条 L1 流程但**没有 authkey**，判别标签叫
+ * `authkey` 却用于一个没有 authkey 的游戏，直接违反防线六「类型即文档」。
+ * `credentialedApi` 准确描述了该范式的结构：先取凭据（来源可变，见
+ * {@link CredentialSource}），再调 API。理由与代价见
+ * `docs/_internal/audit/AUDIT-2026-08-12-M2鸣潮纸面填表演练.md` §7.2。
  */
-export interface AuthkeyPipelineParams {
+export interface CredentialedApiPipelineParams {
   /** 凭据来源，见 {@link CredentialSource}。 */
   credential: CredentialSource;
   /** 分页请求模板，凭据位置用 `"{{credential}}"` 占位。 */
@@ -201,24 +224,29 @@ export interface AuthkeyPipelineParams {
 }
 
 /**
- * 日志扫描范式的采集参数。
+ * ⚠️ **`LogScanPipelineParams`（日志扫描范式的采集参数）已于 M2-S2 删除。**
  *
- * ⚠️ **占位骨架**：鸣潮之外还没有第二个同范式样本，字段随时可能变化——
- * 这是三次法则的直接应用：范式 B 只有 1 个真实样本，样本不足时抽象正是
- * 三次法则要防的事，因此这里不追求「设计得漂亮」，只保证类型层面能表达
- * 鸣潮这一个实例，等第二个日志扫描类游戏出现再补全成稳定契约。
+ * 原设计：鸣潮之外还没有第二个同范式样本时，为它单独留一个 `CollectConfig`
+ * 判别联合分支（`{ paradigm: "logScan"; params: LogScanPipelineParams }`，
+ * 字段是 `logPathPattern` + `extractUrl`）。M2 纸面填表演练发现，这套字段
+ * 与 {@link CredentialSource} 的 `kind: "logFile"`（字段是 `logPath` +
+ * `urlPattern`）描述的是**同一件事**——凭据从日志文件里读——只是分别在
+ * 两个互不知情的地方各猜了一次，从未被任何代码路径统一或跑通过。删除
+ * `logScan` 分支后，鸣潮改用 `{ paradigm: "credentialedApi", params: {
+ * credential: { kind: "logFile", ... }, ... } }`：凭据来源单独用
+ * {@link CredentialSource} 表达，拿到凭据之后的采集流程与原神共用同一条
+ * `credentialedApi` 流水线，不再需要一整套并行的日志扫描流程。
+ * 完整裁定见
+ * `docs/_internal/audit/AUDIT-2026-08-12-M2鸣潮纸面填表演练.md` §七 7.1～7.2。
  */
-export interface LogScanPipelineParams {
-  logPathPattern: string;
-  /** 从单行日志文本里提取出目标 URL；纯函数，不做 IO。 */
-  extractUrl: (line: string) => string | undefined;
-}
 
 /**
  * 封包捕获范式的采集参数。
  *
- * ⚠️ **占位骨架**：异环之外还没有第二个同范式样本，字段随时可能变化，
- * 理由同 {@link LogScanPipelineParams} ——三次法则，样本不足不抽象。
+ * ⚠️ **占位骨架**：异环之外还没有第二个同范式样本，字段随时可能变化——
+ * 三次法则的直接应用，范式 C 只有 1 个真实样本，样本不足时抽象正是
+ * 三次法则要防的事，因此这里不追求「设计得漂亮」，只保证类型层面能表达
+ * 异环这一个实例，等第二个封包捕获类游戏出现再补全成稳定契约。
  */
 export interface PacketCapturePipelineParams {
   paradigmId: string;
@@ -243,7 +271,7 @@ export interface OcrPipelineParams {
  * 非法组合，是防线六「类型即文档」的直接应用。
  *
  * 凭据本身**永远不会作为参数传给插件代码**——插件只在
- * {@link AuthkeyPipelineParams.request} 的 `url` / `headers` 里用
+ * {@link CredentialedApiPipelineParams.request} 的 `url` / `headers` 里用
  * `"{{credential}}"` 占位符引用它，真正的替换发生在 Rust 侧，插件代码
  * 执行期间永远看不到占位符被替换后的明文。这是 HC-2「凭据不过 IPC」在
  * manifest 层的具体落地。
@@ -303,7 +331,7 @@ export type MetadataProviderConfig =
       kind: "online";
       /** 查询方向：原神是 name → itemId，因为米哈游 API 本身不返回 item_id，导出交换格式时才需要反查。 */
       direction: "nameToId" | "idToDetail";
-      /** 请求模板，机制与 {@link AuthkeyPipelineParams.request} 一致；纯查询场景通常不需要凭据占位符。 */
+      /** 请求模板，机制与 {@link CredentialedApiPipelineParams.request} 一致；纯查询场景通常不需要凭据占位符。 */
       request: RequestTemplate;
       /** 纯函数，解析宿主已经取回的响应体，不做 IO。 */
       parseResponse: (response: unknown) => MetadataEntry | undefined;
@@ -406,10 +434,40 @@ export interface PluginHooks {
    *
    * 三种参考实现：
    * - 米哈游三游：雪花 ID + 卡池维度，`` `${gachaType}:${id}` ``
-   * - 鸣潮：无稳定 ID，`hash(时间 + 物品 + 同秒内序位)`
+   * - 鸣潮：无稳定 ID，`hash(时间 + 物品 + 同批次内序位)`——⚠️ **本 hook 的
+   *   单记录签名结构上拿不到「同批次内序位」**，鸣潮必须改用下方的
+   *   {@link deriveRecordKeys}（批处理版本），不能用本 hook，见其文档。
    * - 异环：`SHA256(语义字段)`，同语义重复时用 `occurrence` 区分
+   *
+   * ⚠️ **与 {@link deriveRecordKeys} 互斥，不能同时声明**——宿主在插件
+   * 构造期发现两者都存在会直接拒绝启动，不做"批处理优先"之类的隐式选择。
    */
   deriveRecordKey?: (record: UnifiedRecordFields) => string;
+
+  /**
+   * 批量生成账号内稳定唯一的记录标识，稳定性要求与 {@link deriveRecordKey}
+   * 完全一致（同一条实际抽卡记录，任意时间、任意次采集都必须产出相同的
+   * key），区别只在**一次拿到整批记录**而不是逐条调用，返回值必须与输入
+   * 等长、按输入顺序一一对应。
+   *
+   * 新增动机：鸣潮无稳定 ID，`record_key` 策略是
+   * `hash(时间 + 物品 + 同批次内序位)`——「同批次内序位」这个信息**结构上
+   * 拿不到**，除非能同时看到"这一批里的其余记录"。{@link deriveRecordKey}
+   * 的单记录签名 `(record) => string` 做不到这件事：真实存档实测（591 条 /
+   * 17.53% 的记录）证实，用单记录签名能算出的最好结果是
+   * `hash(池, 时间, 物品 ID)`，同秒内的重复记录全部撞键，被 `INSERT OR
+   * IGNORE` 静默吞掉，见
+   * `docs/_internal/audit/AUDIT-2026-08-12-M2鸣潮真实存档实测.md` §一。
+   *
+   * ⚠️ **与 {@link deriveRecordKey} 互斥**，见该字段文档。米哈游三游继续用
+   * 单记录版本（`deriveRecordKey`），不受影响。
+   *
+   * ⚠️ **鸣潮插件同时必须搭配 `collect.params.stopCondition: { kind:
+   * "singleRequest" }`**（禁止分页/增量采集）——序位的安全性完全建立在
+   * "一次拉取整池全量"之上，见
+   * `docs/_internal/audit/AUDIT-2026-08-12-M2鸣潮真实存档实测.md` §1.7～1.8。
+   */
+  deriveRecordKeys?: (records: UnifiedRecordFields[]) => string[];
 
   /**
    * 归一化收尾的兜底出口，用于 `fields.extractRecord` 表达不了的收尾修正。

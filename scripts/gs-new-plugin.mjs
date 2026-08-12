@@ -1,11 +1,14 @@
 #!/usr/bin/env node
-// pnpm gs:new-plugin <game> --paradigm authkey
+// pnpm gs:new-plugin <game> --paradigm credentialedApi
 //
 // 插件脚手架：生成一个"开箱能跑通测试的最小可用插件"——带 TODO 注释、带示例
 // fixture、带一个必定通过的测试。贡献者从"能跑的东西"开始改，比从空文件
 // 开始强得多（插件 SDK 文档 §7.4）。
 //
-// 模板按范式分档，本 Stage 只有 authkey 一档（templates/plugin/authkey/）。
+// 模板按范式分档，本 Stage 只有 credentialedApi 一档
+// （templates/plugin/credentialedApi/）。范式名随 M2-S2 契约改名
+// （"authkey" → "credentialedApi"）同步更新，见
+// packages/gs-plugin-kit/manifest.ts 对 CredentialedApiPipelineParams 的说明。
 //
 // 生成物分两处：
 //   - templates/plugin/<paradigm>/ 下除 fixtures/__game__/ 之外的文件
@@ -23,7 +26,7 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { findRepoRoot } from './gs-check/lib/repo-root.mjs';
 
-const SUPPORTED_PARADIGMS = ['authkey'];
+const SUPPORTED_PARADIGMS = ['credentialedApi'];
 const GAME_ID_PATTERN = /^[a-z][a-z0-9-]*$/;
 
 function parseArgs(argv) {
@@ -31,7 +34,7 @@ function parseArgs(argv) {
   const positional = args.filter((a) => !a.startsWith('--'));
   const gameId = positional[0];
 
-  let paradigm = 'authkey';
+  let paradigm = 'credentialedApi';
   const paradigmFlagIndex = args.indexOf('--paradigm');
   if (paradigmFlagIndex !== -1) {
     paradigm = args[paradigmFlagIndex + 1];
@@ -71,7 +74,7 @@ function main(argv) {
   const { gameId, paradigm } = parseArgs(argv);
 
   if (!gameId) {
-    console.error('用法：pnpm gs:new-plugin <game> --paradigm authkey');
+    console.error('用法：pnpm gs:new-plugin <game> --paradigm credentialedApi');
     process.exitCode = 1;
     return;
   }
@@ -81,7 +84,7 @@ function main(argv) {
     return;
   }
   if (!SUPPORTED_PARADIGMS.includes(paradigm)) {
-    console.error(`不支持的范式 "${paradigm}"，当前只有 authkey 一档模板（其余范式样本不足，见三次法则）`);
+    console.error(`不支持的范式 "${paradigm}"，当前只有 credentialedApi 一档模板（其余范式样本不足，见三次法则）`);
     process.exitCode = 1;
     return;
   }
@@ -137,4 +140,4 @@ if (import.meta.url === pathToFileURL(process.argv[1]).href) {
   main(process.argv);
 }
 
-export { parseArgs, replaceGameId };
+export { parseArgs, replaceGameId, collectFilesRelative, copyTemplateFile, SUPPORTED_PARADIGMS };

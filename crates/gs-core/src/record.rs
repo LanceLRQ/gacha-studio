@@ -114,6 +114,17 @@ pub struct RequestTemplate {
     #[ts(optional)]
     #[ts(type = "Record<string, string>")]
     pub headers: Option<BTreeMap<String, String>>,
+    /// POST 请求体模板，占位符替换规则与 `url` 完全一致
+    /// （`{{credential}}` / `{{page}}` / `{{gachaType}}` / `{{pageSize}}`）——
+    /// L1 侧复用同一套替换函数，不为 `body` 另写一份。
+    ///
+    /// 新增动机：鸣潮 `POST /gacha/record/query` 要发 JSON body
+    /// `{ cardPoolId, cardPoolType, languageCode, playerId, recordId, serverId }`，
+    /// `cardPoolType` 随卡池变化，body 里同样需要占位符——纯 `url` 模板表达
+    /// 不了 POST body，因此这里新增而不是复用 `url` 硬塞查询串。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub body: Option<String>,
 }
 
 /// 物品元数据条目，全部字段可选——元数据字典可能滞后于抽卡记录本身
@@ -378,6 +389,7 @@ mod tests {
                 "X-Rpc-Client-Type".to_string(),
                 "2".to_string(),
             )])),
+            body: None,
         };
         let json = serde_json::to_value(&template).unwrap();
         assert_eq!(json["method"], serde_json::json!("POST"));
@@ -386,6 +398,43 @@ mod tests {
             serde_json::json!({ "X-Rpc-Client-Type": "2" })
         );
 
+        let round_tripped: RequestTemplate = serde_json::from_value(json).unwrap();
+        assert_eq!(round_tripped, template);
+    }
+
+    #[test]
+    fn request_template_omits_body_when_absent() {
+        let template = RequestTemplate {
+            url: "https://example.com/gacha".to_string(),
+            method: None,
+            headers: None,
+            body: None,
+        };
+        let json = serde_json::to_value(&template).unwrap();
+        assert!(
+            json.get("body").is_none(),
+            "未提供时不应出现 body 键: {json}"
+        );
+        let round_tripped: RequestTemplate = serde_json::from_value(json).unwrap();
+        assert_eq!(round_tripped, template);
+    }
+
+    #[test]
+    fn request_template_carries_body_template_with_placeholders() {
+        // 鸣潮形态：POST body 里同样需要 {{gachaType}} 占位符。
+        let template = RequestTemplate {
+            url: "https://gmserver-api.aki-game2.com/gacha/record/query".to_string(),
+            method: Some(HttpMethod::Post),
+            headers: None,
+            body: Some(
+                r#"{"cardPoolId":"{{gachaType}}","cardPoolType":"{{gachaType}}"}"#.to_string(),
+            ),
+        };
+        let json = serde_json::to_value(&template).unwrap();
+        assert_eq!(
+            json["body"],
+            serde_json::json!(r#"{"cardPoolId":"{{gachaType}}","cardPoolType":"{{gachaType}}"}"#)
+        );
         let round_tripped: RequestTemplate = serde_json::from_value(json).unwrap();
         assert_eq!(round_tripped, template);
     }

@@ -29,6 +29,7 @@ import {
   assertPluginFixture,
   checkCountDrawsContract,
   checkDeriveRecordKeyContract,
+  checkDeriveRecordKeyHooksAreMutuallyExclusive,
   checkResolveTimezoneContract,
   type FixtureReader,
 } from "./index.ts";
@@ -53,7 +54,7 @@ const baseManifest: PluginManifest = {
   platforms: ["windows"],
   maintainers: ["nobody"],
   collect: {
-    paradigm: "authkey",
+    paradigm: "credentialedApi",
     params: {
       credential: { kind: "manual" },
       request: { url: "https://example.invalid/{{credential}}" },
@@ -117,7 +118,7 @@ const minimalFixturePlugin = {
   manifest: {
     ...baseManifest,
     collect: {
-      paradigm: "authkey" as const,
+      paradigm: "credentialedApi" as const,
       params: {
         credential: { kind: "manual" as const },
         request: { url: "https://example.invalid/{{credential}}" },
@@ -237,6 +238,144 @@ const selfCheckCases: SelfCheckCase[] = [
       await expectThrows(
         () => assertPluginFixture(minimalFixturePlugin, "fixtures/self-test", reader),
         "不一致",
+      );
+    },
+  },
+
+  // ============================================================
+  // M2-S2 · deriveRecordKeys（批处理钩子）与范式无关的 fixture 支持
+  // ============================================================
+
+  {
+    name: "deriveRecordKey 互斥契约：同时声明 deriveRecordKey 与 deriveRecordKeys 应报错",
+    run: async () => {
+      const hooks: PluginHooks = {
+        deriveRecordKey: (r) => r.itemId,
+        deriveRecordKeys: (records) => records.map((r) => r.itemId),
+      };
+      await expectThrows(() => checkDeriveRecordKeyHooksAreMutuallyExclusive(hooks), "deriveRecordKeys");
+    },
+  },
+  {
+    name: "deriveRecordKey 互斥契约：只声明其一或都不声明时放行",
+    run: async () => {
+      await expectNotThrows(() => checkDeriveRecordKeyHooksAreMutuallyExclusive({ deriveRecordKey: (r) => r.itemId }));
+      await expectNotThrows(() =>
+        checkDeriveRecordKeyHooksAreMutuallyExclusive({ deriveRecordKeys: (records) => records.map((r) => r.itemId) }),
+      );
+      await expectNotThrows(() => checkDeriveRecordKeyHooksAreMutuallyExclusive(undefined));
+    },
+  },
+  {
+    name: "deriveRecordKey 契约：只声明批处理版本 deriveRecordKeys 也放行",
+    run: async () => {
+      await expectNotThrows(() =>
+        checkDeriveRecordKeyContract({ deriveRecordKeys: (records) => records.map((r) => r.itemId) }),
+      );
+    },
+  },
+  {
+    name: "assertPluginFixture：不支持 extractList 的范式（如 ocr）应明确报错，且不再提及已删除的 authkey 字样",
+    run: async () => {
+      const manifest: PluginManifest = {
+        ...baseManifest,
+        collect: { paradigm: "ocr", params: { paradigmId: "wuwa-ocr-v0" } },
+      };
+      await expectThrows(
+        () => assertPluginFixture({ manifest }, "fixtures/self-test", explodingReader),
+        "credentialedApi",
+      );
+    },
+  },
+  {
+    name: "assertPluginFixture：deriveRecordKeys 整批调用，鸣潮同秒多条记录靠批内序位区分",
+    run: async () => {
+      // 模拟鸣潮真实场景的缩小版：extractRecord 产出的两条记录 time 完全
+      // 相同、也没有 stableId（鸣潮没有稳定 ID），只有靠"这一批里的第几条"
+      // 才能算出不同的 key——这正是本 hook 存在的理由，用单记录版本
+      // deriveRecordKey 结构上做不到。
+      const batchPlugin = {
+        manifest: {
+          ...baseManifest,
+          collect: {
+            paradigm: "credentialedApi" as const,
+            params: {
+              credential: { kind: "manual" as const },
+              request: { url: "https://example.invalid/{{credential}}" },
+              extractList: (response: unknown) => (response as { list: unknown[] }).list,
+            },
+          },
+          fields: {
+            extractRecord: (raw: unknown) => {
+              const record = raw as { name: string };
+              return { itemId: record.name, time: "2026-06-18 21:15:00", bannerId: "standard", count: 1 };
+            },
+          },
+        },
+        hooks: {
+          deriveRecordKeys: (records) =>
+            records.map((record, index) => `${record.bannerId}:${record.time}:${index}`),
+        } satisfies PluginHooks,
+      };
+
+      const batchFixtureFiles = {
+        "fixtures/self-test-batch/meta.toml": '[account]\nuid = "100000000"\n',
+        "fixtures/self-test-batch/raw_response/page_1.json": JSON.stringify({
+          list: [{ name: "共鸣者A" }, { name: "共鸣者B" }],
+        }),
+        "fixtures/self-test-batch/expected/normalized.json": JSON.stringify({
+          records: [
+            {
+              fields: { itemId: "共鸣者A", time: "2026-06-18 21:15:00", bannerId: "standard", count: 1 },
+              recordKey: "standard:2026-06-18 21:15:00:0",
+            },
+            {
+              fields: { itemId: "共鸣者B", time: "2026-06-18 21:15:00", bannerId: "standard", count: 1 },
+              recordKey: "standard:2026-06-18 21:15:00:1",
+            },
+          ],
+        }),
+      };
+      const reader = makeInMemoryReader(batchFixtureFiles);
+      await expectNotThrows(() => assertPluginFixture(batchPlugin, "fixtures/self-test-batch", reader));
+    },
+  },
+  {
+    name: "assertPluginFixture：deriveRecordKeys 返回长度与记录数不一致时应报错",
+    run: async () => {
+      const brokenBatchPlugin = {
+        manifest: {
+          ...baseManifest,
+          collect: {
+            paradigm: "credentialedApi" as const,
+            params: {
+              credential: { kind: "manual" as const },
+              request: { url: "https://example.invalid/{{credential}}" },
+              extractList: (response: unknown) => (response as { list: unknown[] }).list,
+            },
+          },
+          fields: {
+            extractRecord: (raw: unknown) => {
+              const record = raw as { name: string };
+              return { itemId: record.name, time: "2026-06-18 21:15:00", bannerId: "standard", count: 1 };
+            },
+          },
+        },
+        hooks: {
+          // 反例：漏算了一条，返回的 key 数组比输入记录数少一个。
+          deriveRecordKeys: (records) => records.slice(1).map((r) => r.itemId),
+        } satisfies PluginHooks,
+      };
+      const files = {
+        "fixtures/self-test-batch-broken/meta.toml": '[account]\nuid = "100000000"\n',
+        "fixtures/self-test-batch-broken/raw_response/page_1.json": JSON.stringify({
+          list: [{ name: "共鸣者A" }, { name: "共鸣者B" }],
+        }),
+      };
+      const reader = makeInMemoryReader(files);
+      await expectThrows(
+        () => assertPluginFixture(brokenBatchPlugin, "fixtures/self-test-batch-broken", reader),
+        "长度必须一致",
       );
     },
   },

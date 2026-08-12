@@ -64,7 +64,7 @@ export const manifest = {
   exchangeFormats: ["uigf-v4"],
 
   collect: {
-    paradigm: "authkey",
+    paradigm: "credentialedApi",
     params: {
       credential: {
         kind: "chromiumCache",

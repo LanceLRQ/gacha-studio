@@ -1,7 +1,7 @@
 /**
  * TODO：__GAME_ID__ 插件 manifest。
  *
- * 本文件由 `pnpm gs:new-plugin __GAME_ID__ --paradigm authkey` 生成，是一个
+ * 本文件由 `pnpm gs:new-plugin __GAME_ID__ --paradigm credentialedApi` 生成，是一个
  * "开箱即可跑通测试" 的最小骨架——`pnpm --filter __GAME_ID__ test` 现在就能
  * 通过，因为示例 fixture（`fixtures/__GAME_ID__/`）与下面的字段映射是互相
  *匹配的占位实现。开始接入真实游戏时，请按下面的 TODO 逐项替换，并同步更新
@@ -38,7 +38,7 @@ export const manifest = {
   maintainers: ["TODO"],
 
   collect: {
-    paradigm: "authkey",
+    paradigm: "credentialedApi",
     params: {
       credential: {
         kind: "chromiumCache",

@@ -1,6 +1,19 @@
-//! `gs-p-authkey`：L1 范式层，authkey 采集流程
+//! `gs-p-authkey`：L1 范式层，"先取凭据、再调 API"的采集流程
 //! （data_2 缓存扫描 + 分页拉取，对应插件 manifest 里
-//! `collect.paradigm == "authkey"` 的 `AuthkeyPipelineParams`）。
+//! `collect.paradigm == "credentialedApi"` 的 `CredentialedApiPipelineParams`）。
+//!
+//! ⚠️ **crate 名 / 结构体名 `AuthkeyApiPipeline` 是历史遗留，不代表当前语义**。
+//! M2 裁定（`docs/_internal/audit/AUDIT-2026-08-12-M2鸣潮纸面填表演练.md`
+//! §7.2）把契约层的 `paradigm` 标签从 `"authkey"` 改名为 `"credentialedApi"`
+//! ——鸣潮走同一条 L1 流程但**没有 authkey**，判别标签叫 `authkey` 却用于
+//! 一个没有 authkey 的游戏，直接违反防线六「类型即文档」。crate 名与结构体名
+//! 本应一并改，但改名会牵动一批与本 crate 语义无关的文件（workspace 根
+//! `Cargo.toml`、`gs-plugin-runtime`/`gs-manifest-data`/`gs-analysis`/
+//! `gs-p-uigf` 里纯粹提及 crate 名的说明性注释、`scripts/gs-bundle-plugins.mjs`
+//! 与 `scripts/gs-check/checks/ipc-surface.mjs` 的路径引用），这些改动对
+//! "鸣潮 M2-S2 契约回改"这个任务没有增量价值，只有改名本身的噪音，因此保留
+//! crate 名与结构体名不变。**判断这个范式到底是什么，以 `CollectConfig`
+//! 判别联合里的 `"credentialedApi"` 字符串为准，不要以 crate 名为准。**
 //!
 //! 模块划分：
 //! - [`cache_scan`]——L0 原子：`data_2` 缓存扫描三步语义

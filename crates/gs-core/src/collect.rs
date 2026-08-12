@@ -77,6 +77,16 @@ pub enum StopCondition {
     CursorExhausted {},
     /// 拉到了已经采集过的记录——增量同步场景下的正常停止点。
     ReachedKnown {},
+    /// 接口本身不分页：一次请求即返回全部记录，没有下一页的概念。
+    ///
+    /// 新增动机：鸣潮 `gacha/record/query` 接口一次返回整池全量记录，不接受
+    /// 也不需要 `page`/`size` 参数——前三个变体全部预设"存在下一页，直到
+    /// 满足某个条件才停"，套在鸣潮上没有意义（第一次请求后就没有"下一页"
+    /// 可翻）。也正因为「一次请求 = 整池全量」，鸣潮的 `record_key` 序位安全性
+    /// 才成立（详见 `docs/_internal/audit/AUDIT-2026-08-12-M2鸣潮真实存档实测.md`
+    /// §1.7～§1.8）——增量采集会破坏这个前提，因此鸣潮插件必须声明本变体，
+    /// 不能声明前三种分页语义的任何一种。
+    SingleRequest {},
 }
 
 /// 原始时间字符串的换算相关配置。
@@ -224,6 +234,15 @@ mod tests {
         let condition = StopCondition::CursorExhausted {};
         let json = serde_json::to_value(condition).unwrap();
         assert_eq!(json, serde_json::json!({ "kind": "cursorExhausted" }));
+        let round_tripped: StopCondition = serde_json::from_value(json).unwrap();
+        assert_eq!(round_tripped, condition);
+    }
+
+    #[test]
+    fn stop_condition_single_request_round_trips_with_kind_tag() {
+        let condition = StopCondition::SingleRequest {};
+        let json = serde_json::to_value(condition).unwrap();
+        assert_eq!(json, serde_json::json!({ "kind": "singleRequest" }));
         let round_tripped: StopCondition = serde_json::from_value(json).unwrap();
         assert_eq!(round_tripped, condition);
     }

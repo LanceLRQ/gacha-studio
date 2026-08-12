@@ -243,6 +243,12 @@ pub fn analyze_pity_group(
     rarity: &RaritySpec,
     records: &[GachaRecord],
 ) -> PityGroupReport {
+    // 命中判定目标：`group.pity_target` 显式声明时优先生效，缺省回落到
+    // `rarity.pity_target`——米哈游三游只有一档保底，从不声明这个字段，
+    // 行为与改动前完全一致。鸣潮的 4★ 硬保底组会显式填 "4"，与该卡池
+    // `rarity.pity_target`（通常是 "5"）不同，两套独立计数靠这里区分。
+    let pity_target = group.pity_target.as_deref().unwrap_or(&rarity.pity_target);
+
     let mut pulls = Vec::with_capacity(records.len());
     let mut unknown_rarity_count = 0u32;
     // 自上一次命中以来累计跳过的未知稀有度记录数，与 `counter` 用同一套
@@ -257,7 +263,7 @@ pub fn analyze_pity_group(
             unknown_rarity_since_last_hit += 1;
             continue;
         };
-        let is_hit = *rarity_code == rarity.pity_target;
+        let is_hit = rarity_code.as_str() == pity_target;
         // 先读出"这是自上次命中以来的第几抽"（含本次），再更新计数器状态——
         // 顺序不能反：`PityCounter::record_pull` 命中时会立即把状态清零，
         // 若先更新再读，命中的那一抽会显示成 0（"清零后的状态"），而不是
@@ -529,6 +535,7 @@ mod tests {
                 step: 0.08,
             },
             guarantee: GuaranteeRule::FiftyFifty {},
+            pity_target: None,
         };
         let spec = RaritySpec {
             ladder: vec!["2".to_string(), "3".to_string(), "4".to_string()],
@@ -544,6 +551,52 @@ mod tests {
 
         assert!(report.pulls[2].is_pity_hit);
         assert_eq!(report.current_pity, 0);
+    }
+
+    #[test]
+    fn analyze_pity_group_uses_group_pity_target_override_instead_of_rarity_spec() {
+        // 鸣潮形态：卡池同时有 5★（rarity.pity_target）与 4★（group.pity_target
+        // 显式覆盖）两套独立保底计数。用同一份 records 分别跑两个 PityGroup，
+        // 命中判定必须各自按自己的 pity_target 走，互不影响。
+        let spec = RaritySpec {
+            ladder: vec!["3".to_string(), "4".to_string(), "5".to_string()],
+            pity_target: "5".to_string(),
+        };
+        let records = vec![
+            record("standard", "wuwaStandard", 1, "武器A", Some("3")),
+            record("standard", "wuwaStandard", 2, "四星角色B", Some("4")),
+            record("standard", "wuwaStandard", 3, "武器C", Some("3")),
+        ];
+
+        let group_5star = PityGroup {
+            key: "wuwaStandard5Star".to_string(),
+            members: vec!["standard".to_string()],
+            hard_pity: 80,
+            curve: ProbabilityCurve::Flat { base: 0.008 },
+            guarantee: GuaranteeRule::None {},
+            pity_target: None, // 缺省回落到 rarity.pity_target == "5"
+        };
+        let report_5star = analyze_pity_group(&group_5star, &spec, &records);
+        assert!(
+            report_5star.pulls.iter().all(|p| !p.is_pity_hit),
+            "这份记录里没有 5★，回落到 rarity.pity_target 时不应命中"
+        );
+        assert_eq!(report_5star.current_pity, 3);
+
+        let group_4star = PityGroup {
+            key: "wuwaStandard4Star".to_string(),
+            members: vec!["standard".to_string()],
+            hard_pity: 10,
+            curve: ProbabilityCurve::Flat { base: 0.06 },
+            guarantee: GuaranteeRule::None {},
+            pity_target: Some("4".to_string()), // 显式覆盖，与 rarity.pity_target 不同
+        };
+        let report_4star = analyze_pity_group(&group_4star, &spec, &records);
+        assert!(
+            report_4star.pulls[1].is_pity_hit,
+            "group.pity_target 显式声明为 \"4\" 时，第 2 条 4★ 记录应当命中"
+        );
+        assert_eq!(report_4star.current_pity, 1);
     }
 
     #[test]

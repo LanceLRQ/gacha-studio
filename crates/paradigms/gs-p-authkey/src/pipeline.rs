@@ -201,6 +201,12 @@ pub enum StopConditionJson {
     CursorExhausted {},
     #[serde(rename = "reachedKnown")]
     ReachedKnown {},
+    /// 镜像 `gs_core::StopCondition::SingleRequest`——只是为了让声明了这个
+    /// 变体的 manifest（如未来的鸣潮插件）能被正常反序列化，不落入
+    /// "unknown variant" 报错。**本 Stage 没有消费点**：`collect_banner`
+    /// 的分页循环行为不变，鸣潮真正的一次性请求流程在 M2-S3 落地时再接线。
+    #[serde(rename = "singleRequest")]
+    SingleRequest {},
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -264,6 +270,16 @@ impl RegexJson {
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct RequestTemplateJson {
     pub url: String,
+    /// POST 请求体模板，占位符替换规则与 `url` 完全一致，见
+    /// [`AuthkeyApiPipeline::substitute_placeholders`]。
+    ///
+    /// ⚠️ **本 Stage 只提供替换能力（[`AuthkeyApiPipeline::build_page_body`]
+    /// 有直接的单元测试验证），未接入 `collect_banner` 的实际发送路径**——
+    /// 把 body 真正发出去需要 `GameApiTransport` 支持 POST + body，这是
+    /// M2-S3 落地鸣潮采集实现时的范围，此处不提前改动已经跑通的 GET 分页
+    /// 传输层。
+    #[serde(default)]
+    pub body: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -460,6 +476,49 @@ fn validate_endpoint_override_segment(segment: &str) -> Result<(), &'static str>
     Ok(())
 }
 
+/// `hooks.deriveRecordKey`（逐条）与 `hooks.deriveRecordKeys`（批处理）互斥：
+/// 两者只能声明其一。拒绝同时声明，而不是隐式约定"批处理优先"之类的规则——
+/// 一份 manifest 该走哪种 record_key 生成方式应当只有一个答案，写出两个只会
+/// 让读者猜宿主到底信谁。校验放在 pipeline 构造期（同
+/// [`validate_endpoint_override_segment`] 的理由：声明不合法直接拒绝启动，
+/// 不留到采集跑起来才发现）。
+///
+/// 抽成独立的纯函数（不直接内联在 `from_manifest_value` 里）是为了能脱离
+/// 真实插件运行时单独测试这条判断本身——`has_derive_record_key`/
+/// `has_derive_record_keys` 两个布尔量本身来自查询 QuickJS 里编译好的插件
+/// JS（`PluginRuntime::has`），本仓库目前唯一打包的插件（genshin）的 JS
+/// 是固定的、无法在测试里临时"声明"或"取消声明"某个 hook，因此这里把判断
+/// 逻辑从"两个布尔量从哪来"里剥离出来，用合成的布尔值直接验证。
+fn validate_derive_record_key_hooks_not_both_declared(
+    plugin_id: &str,
+    has_derive_record_key: bool,
+    has_derive_record_keys: bool,
+) -> Result<(), PipelineError> {
+    if has_derive_record_key && has_derive_record_keys {
+        return Err(PipelineError::Config(format!(
+            "插件 \"{plugin_id}\" 同时声明了 hooks.deriveRecordKey 与 hooks.deriveRecordKeys——\
+             二者只能二选一，宿主不会替插件猜该信哪一个"
+        )));
+    }
+    Ok(())
+}
+
+/// `hooks.deriveRecordKeys` 返回的字符串数组长度必须与输入的记录数一致——
+/// 长度不等说明插件的批处理钩子实现有 bug（漏算/多算了某条记录），宿主
+/// 没有办法猜哪个 key 对应哪条记录，必须直接拒绝而不是按下标硬凑。
+/// 抽成纯函数的理由同 [`validate_derive_record_key_hooks_not_both_declared`]。
+fn validate_batch_record_keys_length(
+    input_len: usize,
+    output_len: usize,
+) -> Result<(), PipelineError> {
+    if input_len != output_len {
+        return Err(PipelineError::Config(format!(
+            "hooks.deriveRecordKeys 返回了 {output_len} 个 key，但输入了 {input_len} 条记录，长度必须一致"
+        )));
+    }
+    Ok(())
+}
+
 /// 把 `url` 路径部分的最后一段替换成 `new_segment`，查询串（含明文
 /// authkey）原样保留。
 ///
@@ -538,7 +597,18 @@ pub struct AuthkeyApiPipeline<'rt> {
     /// 校验一次并缓存，避免"manifest 声明 `pageSize: 0`"这类配置错误
     /// 拖到分页循环跑起来、甚至陷入死循环才暴露。
     page_size: u32,
-    pity_group_by_banner: HashMap<String, String>,
+    /// banner id -> 该 banner 所属的**全部**保底组 key，按 manifest
+    /// `pityGroups` 声明顺序排列。一个 banner 可能同时属于多个组——鸣潮同一
+    /// 卡池的 5★/4★ 硬保底是两套独立计数，manifest 会为它们各声明一个
+    /// `PityGroup`，`members` 都指向同一批 banner。
+    ///
+    /// ⚠️ **修复前的实现是 `HashMap<String, String>`**，`insert` 的返回值被
+    /// 丢弃：同一 banner 被两个 `PityGroup` 声明为成员时，后声明的组会
+    /// **静默覆盖**前一个——前一个组从此再也查不到属于它的任何 banner。
+    /// 这个 bug 在 M1 阶段不会触发（genshin 的两个 banner 都只属于唯一一个
+    /// 组），但会让 `PityGroup.pity_target`（鸣潮 5★/4★ 双计数）看起来接上了
+    /// 却实际半数失效，因此改成一对多，不丢失任何一次声明。
+    pity_group_by_banner: HashMap<String, Vec<String>>,
     item_id_source: Option<String>,
     /// `time.timezoneSource` 的完整声明——不只是"是不是 computed"这一个
     /// 布尔量，`apiField`/`staticTable` 分支需要 `field`/`table` 的具体内容
@@ -560,6 +630,12 @@ pub struct AuthkeyApiPipeline<'rt> {
     /// 默认端点。
     endpoint_override_by_banner: HashMap<String, String>,
     has_derive_record_key: bool,
+    /// `hooks.deriveRecordKeys` 是否已声明——批处理版本，一次拿整页全部
+    /// 记录、返回等长字符串数组。与 `has_derive_record_key` **互斥**：两者
+    /// 同时声明视为配置错误（构造期直接拒绝，见 `from_manifest_value`），
+    /// 不做"批处理优先"这类隐式的优先级选择——类型即文档，一份 manifest
+    /// 该用哪种 hook 应当只有一个答案，写出两个只会让读者猜宿主到底信谁。
+    has_derive_record_keys: bool,
     has_resolve_timezone: bool,
     /// `stopCondition` 省略时默认 `emptyPage`（`list.is_empty()` 已经在
     /// 循环里处理）；只有插件显式声明 `{ kind: "reachedKnown" }` 时，
@@ -608,17 +684,21 @@ impl<'rt> AuthkeyApiPipeline<'rt> {
                 ))
             })?;
 
-        if parsed.collect.paradigm != "authkey" {
+        if parsed.collect.paradigm != "credentialedApi" {
             return Err(PipelineError::Config(format!(
-                "插件 \"{plugin_id}\" 声明的采集范式是 \"{}\"，AuthkeyApiPipeline 只支持 \"authkey\"",
+                "插件 \"{plugin_id}\" 声明的采集范式是 \"{}\"，AuthkeyApiPipeline 只支持 \"credentialedApi\"\
+                 （历史上曾叫 \"authkey\"，M2 已改名，见 crate 顶部说明）",
                 parsed.collect.paradigm
             )));
         }
 
-        let mut pity_group_by_banner = HashMap::new();
+        let mut pity_group_by_banner: HashMap<String, Vec<String>> = HashMap::new();
         for group in &parsed.pity_groups {
             for member in &group.members {
-                pity_group_by_banner.insert(member.clone(), group.key.clone());
+                pity_group_by_banner
+                    .entry(member.clone())
+                    .or_default()
+                    .push(group.key.clone());
             }
         }
 
@@ -639,6 +719,12 @@ impl<'rt> AuthkeyApiPipeline<'rt> {
         let raw_time_convention = parsed.time.as_ref().and_then(|t| t.raw_time_convention);
 
         let has_derive_record_key = plugin_runtime.has(plugin_id, "hooks.deriveRecordKey")?;
+        let has_derive_record_keys = plugin_runtime.has(plugin_id, "hooks.deriveRecordKeys")?;
+        validate_derive_record_key_hooks_not_both_declared(
+            plugin_id,
+            has_derive_record_key,
+            has_derive_record_keys,
+        )?;
         let has_resolve_timezone = plugin_runtime.has(plugin_id, "hooks.resolveTimezone")?;
 
         let page_size = match parsed.collect.params.page_size {
@@ -672,6 +758,7 @@ impl<'rt> AuthkeyApiPipeline<'rt> {
             raw_time_convention,
             endpoint_override_by_banner,
             has_derive_record_key,
+            has_derive_record_keys,
             has_resolve_timezone,
             is_reached_known_stop_condition,
             error_map,
@@ -702,11 +789,48 @@ impl<'rt> AuthkeyApiPipeline<'rt> {
         &self.params.credential
     }
 
+    /// 单个 banner 落库时使用的**主**保底组 key。`GachaRecord.pity_group` 是
+    /// 单值列，一个 banner 若同时属于多个组（鸣潮 5★/4★），只能落一个——
+    /// 这里取声明顺序中的**第一个**（genshin 现有行为不变：它的每个 banner
+    /// 只声明过一个组）。其余组仍然完整保留在 [`Self::pity_groups_for`]，
+    /// 不是"选一个就把其余的丢了"。
     fn pity_group_for(&self, banner_id: &str) -> String {
         self.pity_group_by_banner
             .get(banner_id)
+            .and_then(|groups| groups.first())
             .cloned()
             .unwrap_or_else(|| banner_id.to_string())
+    }
+
+    /// banner 声明所属的**全部**保底组 key，按 manifest 声明顺序排列；未声明
+    /// 任何组时返回空切片。供需要感知"这个 banner 同时属于哪些组"的调用方
+    /// 使用（如鸣潮 5★/4★ 双计数的编排逻辑——对同一份记录分别用两个
+    /// `PityGroup` 声明各跑一遍 `analyze_pity_group`）；本 Stage 没有这样的
+    /// 调用方，暴露这个方法只是为了不让一对多的信息在 `pity_group_for`
+    /// 单值化之后又一次悄悄丢掉。
+    pub fn pity_groups_for(&self, banner_id: &str) -> &[String] {
+        self.pity_group_by_banner
+            .get(banner_id)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+
+    /// 对模板字符串做四个占位符的替换——`build_page_url`（`request.url`）与
+    /// `build_page_body`（`request.body`）共用同一套规则，不各写一份。
+    /// `credential_url` 由调用方传入**已经**套用过 `endpointOverride` 的值
+    /// （见 `build_page_url` 里的处理），本方法本身不关心端点覆盖。
+    fn substitute_placeholders(
+        &self,
+        template: &str,
+        credential_url: &str,
+        banner_id: &str,
+        page: u32,
+    ) -> String {
+        template
+            .replace("{{credential}}", credential_url)
+            .replace("{{page}}", &page.to_string())
+            .replace("{{gachaType}}", banner_id)
+            .replace("{{pageSize}}", &self.page_size.to_string())
     }
 
     /// 构造某一页请求的完整 URL。`{{credential}}` 的替换发生在这里——替换后
@@ -722,13 +846,30 @@ impl<'rt> AuthkeyApiPipeline<'rt> {
             Some(segment) => override_url_path_segment(credential_url, segment),
             None => credential_url.to_string(),
         };
-        self.params
-            .request
-            .url
-            .replace("{{credential}}", &credential_url)
-            .replace("{{page}}", &page.to_string())
-            .replace("{{gachaType}}", banner_id)
-            .replace("{{pageSize}}", &self.page_size.to_string())
+        self.substitute_placeholders(&self.params.request.url, &credential_url, banner_id, page)
+    }
+
+    /// 构造某一页请求的 POST body（若 `request.body` 已声明），占位符替换
+    /// 规则与 [`Self::build_page_url`] 完全一致，复用同一个
+    /// [`Self::substitute_placeholders`]。`request.body` 未声明时返回
+    /// `None`——多数插件（如原神）走 GET 分页，没有 body 可言。
+    ///
+    /// ⚠️ 未接入 `collect_banner` 的实际发送路径，见
+    /// [`RequestTemplateJson::body`] 字段文档；本方法只提供占位符替换能力，
+    /// 由下方单元测试验证正确性。
+    pub fn build_page_body(
+        &self,
+        credential_url: &str,
+        banner_id: &str,
+        page: u32,
+    ) -> Option<String> {
+        let credential_url = match self.endpoint_override_by_banner.get(banner_id) {
+            Some(segment) => override_url_path_segment(credential_url, segment),
+            None => credential_url.to_string(),
+        };
+        self.params.request.body.as_ref().map(|template| {
+            self.substitute_placeholders(template, &credential_url, banner_id, page)
+        })
     }
 
     /// 根据 `time.timezoneSource` 的声明，从**本页**响应体计算时区偏移
@@ -951,6 +1092,66 @@ impl<'rt> AuthkeyApiPipeline<'rt> {
         MetaState::Complete
     }
 
+    /// 为一整页记录批量计算 record_key。`fields_values`/`fields_list` 是同一次
+    /// `extractRecord` 遍历的两种表示（前者是 JS 侧原始返回值，后者是反序列化
+    /// 后的 Rust 结构），长度必须一致，调用方（`collect_banner`）保证这一点。
+    ///
+    /// 三选一，构造期 `from_manifest_value` 已经保证 `has_derive_record_key`
+    /// 与 `has_derive_record_keys` 不会同时为真：
+    /// 1. `hooks.deriveRecordKeys`——**整页一次调用**，输入是本页全部
+    ///    `UnifiedRecordFields`，返回等长字符串数组。鸣潮同秒多条记录的序位
+    ///    只有在能看到"同一秒内的其余记录"时才算得出来，逐条调用做不到——
+    ///    这正是新增本 hook 的原因，见 `manifest.ts` 的 `PluginHooks.deriveRecordKeys`
+    ///    文档。
+    /// 2. `hooks.deriveRecordKey`——逐条调用，原神现有行为，不变。
+    /// 3. 都未声明——退化到每条记录自己的 `stableId`，不变。
+    fn derive_record_keys_for_page(
+        &self,
+        fields_values: &[Value],
+        fields_list: &[UnifiedRecordFieldsJson],
+    ) -> Result<Vec<String>, PipelineError> {
+        if self.has_derive_record_keys {
+            let batch_input = Value::Array(fields_values.to_vec());
+            let keys_value = self.plugin_runtime.call(
+                &self.plugin_id,
+                "hooks.deriveRecordKeys",
+                std::slice::from_ref(&batch_input),
+            )?;
+            let keys: Vec<String> = serde_json::from_value(keys_value).map_err(|err| {
+                PipelineError::Json(format!(
+                    "hooks.deriveRecordKeys 返回值不满足契约（应为字符串数组）：{err}"
+                ))
+            })?;
+            validate_batch_record_keys_length(fields_values.len(), keys.len())?;
+            return Ok(keys);
+        }
+
+        fields_values
+            .iter()
+            .zip(fields_list.iter())
+            .map(|(fields_value, fields)| {
+                if self.has_derive_record_key {
+                    let key_value = self.plugin_runtime.call(
+                        &self.plugin_id,
+                        "hooks.deriveRecordKey",
+                        std::slice::from_ref(fields_value),
+                    )?;
+                    Ok(key_value.as_str().map(str::to_string))
+                } else {
+                    Ok(fields.stable_id.clone())
+                }
+                .and_then(|maybe_key| {
+                    maybe_key.ok_or_else(|| {
+                        PipelineError::Config(format!(
+                            "记录 itemId=\"{}\" 既没有 hooks.deriveRecordKey 的产出也没有 stableId，无法确定 record_key",
+                            fields.item_id
+                        ))
+                    })
+                })
+            })
+            .collect()
+    }
+
     /// 采集单个卡池（`banner_id`，即填进 `{{gachaType}}` 占位符的取值，如原神的
     /// `"301"`）的全部记录，分页直至终止条件，写入 `repo` 并落一条
     /// `banner_snapshot`。
@@ -1008,7 +1209,11 @@ impl<'rt> AuthkeyApiPipeline<'rt> {
             let page_tz_offset_hours =
                 self.resolve_page_level_timezone_offset_hours(&response_json)?;
 
-            let mut batch = Vec::with_capacity(list.len());
+            // 第一阶段：先跑完整页的 extractRecord，收齐 fields_values/
+            // fields_list——deriveRecordKeys（批处理钩子）需要整页数据一起
+            // 传给插件，不能逐条调用，见 Self::derive_record_keys_for_page。
+            let mut fields_values: Vec<Value> = Vec::with_capacity(list.len());
+            let mut fields_list: Vec<UnifiedRecordFieldsJson> = Vec::with_capacity(list.len());
             for raw in &list {
                 let fields_value = self.plugin_runtime.call(
                     &self.plugin_id,
@@ -1019,22 +1224,20 @@ impl<'rt> AuthkeyApiPipeline<'rt> {
                     .map_err(|err| {
                         PipelineError::Json(format!("extractRecord 返回值不满足契约：{err}"))
                     })?;
+                fields_values.push(fields_value);
+                fields_list.push(fields);
+            }
 
-                let record_key_text = if self.has_derive_record_key {
-                    let key_value = self
-                        .plugin_runtime
-                        .call(&self.plugin_id, "hooks.deriveRecordKey", std::slice::from_ref(&fields_value))?;
-                    key_value.as_str().map(str::to_string)
-                } else {
-                    fields.stable_id.clone()
-                }
-                .ok_or_else(|| {
-                    PipelineError::Config(format!(
-                        "记录 itemId=\"{}\" 既没有 hooks.deriveRecordKey 的产出也没有 stableId，无法确定 record_key",
-                        fields.item_id
-                    ))
-                })?;
+            // 第二阶段：批量算出这一页全部记录的 record_key。
+            let record_keys = self.derive_record_keys_for_page(&fields_values, &fields_list)?;
 
+            // 第三阶段：逐条补上时区换算等剩余字段，拼出可落库的 GachaRecord。
+            let mut batch = Vec::with_capacity(list.len());
+            for ((fields_value, fields), record_key_text) in fields_values
+                .iter()
+                .zip(fields_list.iter())
+                .zip(record_keys.into_iter())
+            {
                 // computed 分支逐条记录调用 hook（历史行为不变，签名允许按
                 // 记录定制，即使目前唯一实现——原神的 uid 首位数字推断——
                 // 只用了账号级信息）；apiField/staticTable 已经在页级算好，
@@ -1071,7 +1274,7 @@ impl<'rt> AuthkeyApiPipeline<'rt> {
                     item_type: fields.item_type.clone(),
                     rarity: fields.rarity.clone(),
                     qty: fields.count,
-                    meta_state: self.determine_meta_state(&fields),
+                    meta_state: self.determine_meta_state(fields),
                     source: RecordSource::OfficialApi,
                     captured_at,
                     raw_ref: None,
@@ -1611,6 +1814,132 @@ mod tests {
             .expect("应当能构造 pipeline");
         let url = pipeline.build_page_url("CREDENTIAL", "301", 3);
         assert_eq!(url, "CREDENTIAL&page=3&gacha_type=301&size=20&end_id=0");
+    }
+
+    #[test]
+    fn build_page_body_returns_none_when_request_body_not_declared() {
+        // genshin 走 GET 分页，没有声明 request.body。
+        let runtime = PluginRuntime::new().expect("插件运行时应当能正常启动");
+        let pipeline = AuthkeyApiPipeline::new("genshin", &runtime, RateLimitPolicy::default())
+            .expect("应当能构造 pipeline");
+        assert_eq!(pipeline.build_page_body("CREDENTIAL", "301", 1), None);
+    }
+
+    #[test]
+    fn build_page_body_substitutes_same_placeholders_as_url() {
+        // 鸣潮形态：POST body 需要 {{gachaType}} 占位符，与 url 共用同一套替换。
+        let runtime = PluginRuntime::new().expect("插件运行时应当能正常启动");
+        let manifest_value = genshin_manifest_with(|v| {
+            v["collect"]["params"]["request"]["body"] = serde_json::json!(
+                r#"{"cardPoolId":"{{gachaType}}","cardPoolType":"{{gachaType}}","recordId":"{{credential}}"}"#
+            );
+        });
+        let pipeline =
+            AuthkeyApiPipeline::from_manifest_json_for_test("genshin", &runtime, manifest_value)
+                .expect("应当能构造 pipeline");
+
+        let body = pipeline
+            .build_page_body("PLAYER_TOKEN", "1", 1)
+            .expect("声明了 request.body 时应当返回 Some");
+        assert_eq!(
+            body,
+            r#"{"cardPoolId":"1","cardPoolType":"1","recordId":"PLAYER_TOKEN"}"#
+        );
+    }
+
+    // ============================================================
+    // S2 · deriveRecordKeys 批处理钩子（M2-S2）
+    // ============================================================
+
+    #[test]
+    fn validate_derive_record_key_hooks_not_both_declared_rejects_both_present() {
+        let result = validate_derive_record_key_hooks_not_both_declared("wuwa", true, true);
+        assert!(
+            result.is_err(),
+            "同时声明 deriveRecordKey 与 deriveRecordKeys 应当被拒绝"
+        );
+        let message = result.unwrap_err().to_string();
+        assert!(message.contains("deriveRecordKey"));
+        assert!(message.contains("deriveRecordKeys"));
+    }
+
+    #[test]
+    fn validate_derive_record_key_hooks_not_both_declared_accepts_either_alone_or_neither() {
+        assert!(validate_derive_record_key_hooks_not_both_declared("genshin", true, false).is_ok());
+        assert!(validate_derive_record_key_hooks_not_both_declared("wuwa", false, true).is_ok());
+        assert!(validate_derive_record_key_hooks_not_both_declared("x", false, false).is_ok());
+    }
+
+    #[test]
+    fn validate_batch_record_keys_length_rejects_mismatched_length() {
+        // 反例：插件的 deriveRecordKeys 实现漏算了一条记录（10 条输入只返回
+        // 9 个 key），必须被拒绝而不是按下标硬凑——那样只会把第 10 条记录的
+        // key 错配给别的记录。
+        let result = validate_batch_record_keys_length(10, 9);
+        assert!(result.is_err());
+        let message = result.unwrap_err().to_string();
+        assert!(message.contains("10"));
+        assert!(message.contains('9'));
+    }
+
+    #[test]
+    fn validate_batch_record_keys_length_accepts_equal_length() {
+        assert!(validate_batch_record_keys_length(0, 0).is_ok());
+        assert!(validate_batch_record_keys_length(5, 5).is_ok());
+    }
+
+    #[test]
+    fn pity_group_by_banner_retains_all_groups_when_banner_belongs_to_multiple() {
+        // 鸣潮形态：同一 banner 同时属于 5★ 组与 4★ 组。修复前的实现（单值
+        // HashMap）会让后声明的组静默覆盖前一个；这里验证两个都被保留。
+        let runtime = PluginRuntime::new().expect("插件运行时应当能正常启动");
+        let manifest_value = genshin_manifest_with(|v| {
+            v["pityGroups"] = serde_json::json!([
+                {
+                    "key": "wuwaStandard5Star",
+                    "members": ["standard"],
+                    "hardPity": 80,
+                    "curve": { "kind": "flat", "base": 0.008 },
+                    "guarantee": { "kind": "none" },
+                },
+                {
+                    "key": "wuwaStandard4Star",
+                    "members": ["standard"],
+                    "hardPity": 10,
+                    "curve": { "kind": "flat", "base": 0.06 },
+                    "guarantee": { "kind": "none" },
+                    "pityTarget": "4",
+                },
+            ]);
+        });
+        let pipeline =
+            AuthkeyApiPipeline::from_manifest_json_for_test("genshin", &runtime, manifest_value)
+                .expect("应当能构造 pipeline");
+
+        assert_eq!(
+            pipeline.pity_groups_for("standard"),
+            &[
+                "wuwaStandard5Star".to_string(),
+                "wuwaStandard4Star".to_string()
+            ],
+            "两个组都应当被保留，不能只剩最后声明的那个"
+        );
+        assert_eq!(
+            pipeline.pity_group_for("standard"),
+            "wuwaStandard5Star",
+            "落库主键取声明顺序中的第一个"
+        );
+    }
+
+    #[test]
+    fn pity_group_for_falls_back_to_banner_id_when_undeclared() {
+        // genshin 现有行为不变：banner 不在任何 pityGroups 声明里时，
+        // 落库的 pity_group 就是 banner_id 本身。
+        let runtime = PluginRuntime::new().expect("插件运行时应当能正常启动");
+        let pipeline = AuthkeyApiPipeline::new("genshin", &runtime, RateLimitPolicy::default())
+            .expect("应当能构造 pipeline");
+        assert_eq!(pipeline.pity_group_for("200"), "200");
+        assert!(pipeline.pity_groups_for("200").is_empty());
     }
 
     // ============================================================

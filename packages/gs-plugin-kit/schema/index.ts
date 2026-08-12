@@ -34,6 +34,8 @@ export const requestTemplateSchema = z.object({
   url: z.string(),
   method: httpMethodSchema.optional(),
   headers: z.record(z.string(), z.string()).optional(),
+  // POST 请求体模板，占位符替换规则与 url 一致，见 RequestTemplate.body 的文档。
+  body: z.string().optional(),
 });
 
 /**
@@ -193,6 +195,9 @@ export const pityGroupSchema = z.object({
   hardPity: z.number().int().positive(),
   curve: probabilityCurveSchema,
   guarantee: guaranteeRuleSchema,
+  // 命中判定目标稀有度码，缺省回落到 RaritySpec.pityTarget，见 PityGroup.pityTarget 的文档
+  // （鸣潮 5★/4★ 双保底计数场景）。稀有度码是字符串，同 raritySpecSchema.pityTarget，不做枚举约束。
+  pityTarget: z.string().optional(),
 });
 
 // ============================================================
@@ -220,6 +225,8 @@ export const stopConditionSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("emptyPage") }),
   z.object({ kind: z.literal("cursorExhausted") }),
   z.object({ kind: z.literal("reachedKnown") }),
+  // 接口本身不分页，一次请求即拿到全部记录——鸣潮 gacha/record/query 形态。
+  z.object({ kind: z.literal("singleRequest") }),
 ]);
 
 // ============================================================
