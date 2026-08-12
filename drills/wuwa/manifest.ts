@@ -284,6 +284,14 @@ export const manifest = {
         }),
       },
 
+      // 两个 host 都要收录：上面 request.url 固定写死 .com（见其上方注释
+      // "svr_area 决定走 .net 还是 .com——依旧没有整体切换根域名的表达
+      // 方式"），但那条空白只影响"请求发去哪一个"，不代表 .net 这个域名
+      // 不存在——真实存在的两个候选都要出现在白名单里，否则国际服玩家的
+      // 请求会被误判为投毒而拒绝，与 plugins/genshin/manifest.ts 处理
+      // 国服/国际服 host 的方式同理。
+      allowedHosts: ["gmserver-api.aki-game2.com", "gmserver-api.aki-game2.net"],
+
       extractList: extractGachaRecordList,
 
       /**

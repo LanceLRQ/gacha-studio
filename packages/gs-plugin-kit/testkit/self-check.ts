@@ -58,6 +58,7 @@ const baseManifest: PluginManifest = {
     params: {
       credential: { kind: "manual" },
       request: { url: "https://example.invalid/{{credential}}" },
+      allowedHosts: ["example.invalid"],
       extractList: () => [],
     },
   },
@@ -122,6 +123,7 @@ const minimalFixturePlugin = {
       params: {
         credential: { kind: "manual" as const },
         request: { url: "https://example.invalid/{{credential}}" },
+        allowedHosts: ["example.invalid"],
         extractList: (response: unknown) => (response as { list: unknown[] }).list,
       },
     },
@@ -302,6 +304,7 @@ const selfCheckCases: SelfCheckCase[] = [
             params: {
               credential: { kind: "manual" as const },
               request: { url: "https://example.invalid/{{credential}}" },
+              allowedHosts: ["example.invalid"],
               extractList: (response: unknown) => (response as { list: unknown[] }).list,
             },
           },
@@ -351,6 +354,7 @@ const selfCheckCases: SelfCheckCase[] = [
             params: {
               credential: { kind: "manual" as const },
               request: { url: "https://example.invalid/{{credential}}" },
+              allowedHosts: ["example.invalid"],
               extractList: (response: unknown) => (response as { list: unknown[] }).list,
             },
           },

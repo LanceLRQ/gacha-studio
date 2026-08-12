@@ -112,6 +112,12 @@ export const manifest = {
         // 未独立实测。
         url: "{{credential}}&page={{page}}&real_gacha_type={{gachaType}}&size={{pageSize}}&end_id=0",
       },
+      // ⚠️ 研究未覆盖，需要实测：理由同 drills/starrail/manifest.ts 同名
+      // 字段的注释——本文件的数据来源严格限定于 research/01、03、04，三者
+      // 均未给出绝区零官方 API 的真实 host，不临时扩大引用范围去比照
+      // HoYo.Gacha，这里用明显的占位域名代替，不编造真实域名。真正接入
+      // 插件时必须先实测确认。
+      allowedHosts: ["TODO-NEEDS-VERIFICATION.zzz.invalid"],
       extractList: extractGachaLogList,
     },
   },

@@ -27,3 +27,9 @@ chrono = { version = "0.4", default-features = false, features = ["std", "clock"
 # 生产环境的 GameApiTransport 实现；测试用 fixture 驱动的实现见
 # pipeline.rs 的 tests 模块，不需要联网。
 reqwest = { version = "0.13", default-features = false, features = ["blocking", "default-tls"] }
+# host 白名单校验：解析占位符替换完成之后的最终请求 URL，取出 host 与
+# allowedHosts 精确比对（§7.8.3）。已经是 reqwest 的传递依赖
+# （Cargo.lock 锁定 2.5.8），这里升级为直接依赖——用官方 URL 解析器而不是
+# 手写字符串切分，解析失败一律 fail closed（拒绝该次请求），不做"大概能对"
+# 的猜测式解析。
+url = "2"

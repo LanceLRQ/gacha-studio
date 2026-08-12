@@ -39,6 +39,22 @@ export const requestTemplateSchema = z.object({
 });
 
 /**
+ * 对应 `CredentialedApiPipelineParams.allowedHosts`——非空数组，且每一项
+ * 都是非空字符串。约束仅覆盖"非空"这一层：真正的合法性（不含 scheme /
+ * 路径 / query / 通配符 / 端口以外的冒号）由 Rust 侧
+ * `validate_allowed_host_entry`（`crates/paradigms/gs-p-authkey/src/
+ * pipeline.rs`）在插件构造期校验，这里不重复实现同一套字符规则——zod 在
+ * 这一层只负责"字段确实存在且不是空壳"，与该字段本身文档注释里
+ * "必填、不可为空数组"这条约束对齐。
+ *
+ * 与 `requestTemplateSchema` 同样的定位：`collect` 整体不在
+ * `pluginManifestSchema` 的覆盖范围内（见文件顶部说明，含函数字段），
+ * 这里单独导出，是为了让"必填、非空"这条约束本身有一个可复用、可独立
+ * 测试的运行时校验单元。
+ */
+export const allowedHostsSchema = z.array(z.string().min(1)).min(1);
+
+/**
  * 可选但不接受空串的字符串字段。用于 `name` / `itemType` / `rarity` /
  * `stableId` 这类「元数据可能缺失」的字段。
  *

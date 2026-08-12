@@ -28,7 +28,11 @@
         },
         "request": {
           "url": "{{credential}}&page={{page}}&gacha_type={{gachaType}}&size={{pageSize}}&end_id=0"
-        }
+        },
+        "allowedHosts": [
+          "public-operation-hk4e.mihoyo.com",
+          "public-operation-hk4e-sg.hoyoverse.com"
+        ]
       }
     },
     "fields": {},

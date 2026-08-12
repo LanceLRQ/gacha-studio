@@ -12,6 +12,7 @@
     "gs:check:ipc-surface": "node scripts/gs-check/checks/ipc-surface.mjs",
     "gs:check:codegen-diff": "node scripts/gs-check/checks/codegen-diff.mjs",
     "gs:sanitize": "node scripts/gs-sanitize.mjs",
+    "gs:sanitize:self-check": "node scripts/gs-sanitize.self-check.mjs",
     "gs:new-plugin": "node scripts/gs-new-plugin.mjs",
     "gs:test:genshin": "pnpm --filter genshin test",
     "test": "pnpm -r --if-present run test"

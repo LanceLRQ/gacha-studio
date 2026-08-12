@@ -89,6 +89,13 @@ export const manifest = {
         // real_gacha_type 对照才被提及）。这里如实标注为类比而非独立实测。
         url: "{{credential}}&page={{page}}&gacha_type={{gachaType}}&size={{pageSize}}&end_id=0",
       },
+      // ⚠️ 研究未覆盖，需要实测：本文件的数据来源严格限定于 research/01、
+      // research/03、research/04（见文件头「数据来源」），三者均未给出星铁
+      // 官方 API 的真实 host。不比照 plugins/genshin/manifest.ts 去引用
+      // docs/example-projects/HoYo.Gacha（该目录未被列入本文件的数据来源
+      // 清单，临时扩大引用范围不在本次演练授权内），因此这里用明显的占位
+      // 域名代替，不编造真实域名。真正接入插件时必须先实测确认。
+      allowedHosts: ["TODO-NEEDS-VERIFICATION.starrail.invalid"],
       extractList: extractGachaLogList,
     },
   },

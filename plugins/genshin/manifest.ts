@@ -75,6 +75,18 @@ export const manifest = {
       request: {
         url: "{{credential}}&page={{page}}&gacha_type={{gachaType}}&size={{pageSize}}&end_id=0",
       },
+      // 国服 + 国际服两个 host 都要收录：urlPattern（上方）本身不区分域名，
+      // 只要 URL 里出现 "getGachaLog" 就会匹配——也就是说，同一份插件既会
+      // 从国服客户端也会从国际服客户端的缓存里扫出凭据 URL，若只声明国服
+      // host，国际服玩家的正常请求会被这里新加的白名单误判为投毒而拒绝。
+      // 两个域名已用 HoYo.Gacha 源码核实（非本插件独立实测，仅作事实引用）：
+      // docs/example-projects/HoYo.Gacha/crates/game_biz/src/api.rs:35-36
+      //   ((Hk4e, Official), Standard) -> "https://public-operation-hk4e.mihoyo.com/..."
+      //   ((Hk4e, Oversea),  Standard) -> "https://public-operation-hk4e-sg.hoyoverse.com/..."
+      // 与 fixtures/genshin/credential/data_2.sample 里的示例 URL（国服，
+      // public-operation-hk4e.mihoyo.com）互相印证，data_2.sample 本身只
+      // 覆盖了国服这一种，国际服 host 补充自上面这份源码引用。
+      allowedHosts: ["public-operation-hk4e.mihoyo.com", "public-operation-hk4e-sg.hoyoverse.com"],
       extractList: extractGachaLogList,
     },
   },

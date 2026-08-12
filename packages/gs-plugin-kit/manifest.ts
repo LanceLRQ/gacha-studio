@@ -198,6 +198,41 @@ export interface CredentialedApiPipelineParams {
   /** 分页请求模板，凭据位置用 `"{{credential}}"` 占位。 */
   request: RequestTemplate;
   /**
+   * 请求目标 host 白名单，**必填、不可为空数组**，精确匹配（不支持通配符）。
+   *
+   * ⚠️ **校验发生在占位符替换完成之后的最终 URL 上，不是校验这里的模板**。
+   * `request.url` 的 host 常常整个来自 `"{{credential}}"`（如原神：
+   * `"{{credential}}&page={{page}}&..."`），而凭据是用插件声明的
+   * {@link CredentialSource.urlPattern} 正则去扫描游戏缓存/日志匹配出来的
+   * ——校验模板挡不住"能往游戏日志/缓存里写内容的攻击者，种一个匹配该正则、
+   * 但指向自己域名的 URL"这种凭据投毒场景（模板字符串里根本不含 host，
+   * 无从校验）。只有校验替换后的最终 URL，才能同时挡住恶意插件与被投毒的
+   * 凭据源。宿主会在真正发起请求前解析最终 URL 的 host 并与本字段逐项精确
+   * 比对（大小写不敏感——host 本身大小写不敏感），不在白名单内直接拒绝
+   * 该次请求，不会静默降级或跳过。
+   *
+   * 为什么必填而非可选：可选的安全字段等于默认关闭——所有人都会忘了填，
+   * 代价只是加一行，且这一行本身是有价值的文档（这个插件到底会往哪些
+   * 服务器发请求），与 Tauri `capabilities`、浏览器扩展 `host_permissions`
+   * 是同一模式。
+   *
+   * 为什么精确匹配、不支持 `*.example.com` 这类通配符：通配符会重新引入
+   * `banners[].endpointOverride` 校验早已拒绝过的同一类风险——"`.` 能匹配
+   * 到哪"的解释空间，见 `validate_endpoint_override_segment`
+   * （`crates/paradigms/gs-p-authkey/src/pipeline.rs`）只允许 ASCII 字母
+   * 数字、不接受任何通配写法的同款理由。
+   *
+   * `endpointOverride` 现有的严格校验**保留不动**，不因为本字段的引入而
+   * 放宽——两者分工不同、互为纵深防御：本字段管"允许把请求发去哪些
+   * host"，`endpointOverride` 管"在允许的 host 内，不能借路径段改写去打
+   * 同域的其它接口"，不是重复校验。
+   *
+   * 完整裁定见
+   * `docs/_internal/audit/AUDIT-2026-08-12-M2鸣潮纸面填表演练.md` §7.7～7.8
+   * （尤其 §7.8.3："为什么校验必须在替换之后"）。
+   */
+  allowedHosts: string[];
+  /**
    * 每页条数，默认 20。填进 `request.url` 的 `{{pageSize}}` 占位符。
    *
    * > 这里曾有 `typeParam` / `pageParam` 两个字段（声明「卡池类型参数叫什么名」

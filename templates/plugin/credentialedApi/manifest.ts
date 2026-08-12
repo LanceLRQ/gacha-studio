@@ -51,6 +51,16 @@ export const manifest = {
         // TODO：分页请求模板，"{{credential}}" 是凭据占位符。
         url: "{{credential}}&page={{page}}",
       },
+      // TODO：必填、不可为空数组——请求目标 host 白名单，精确匹配、不支持
+      // 通配符。宿主会在占位符替换完成之后的最终 URL 上解析 host 并与这里
+      // 逐项比对，不在白名单内的请求会被拒绝，不会静默发出。之所以必填：
+      // 上面 request.url 的 host 通常整个来自 "{{credential}}"，而凭据是
+      // 从游戏缓存/日志里用正则扫出来的——能写入游戏缓存/日志的攻击者可以
+      // 伪造一个匹配正则、但指向自己域名的凭据 URL，只有校验替换后的最终
+      // host 才挡得住这种投毒。请把这个游戏真实会请求到的域名（可能不止
+      // 一个，比如国服 + 国际服）填在这里，完整裁定见
+      // docs/_internal/audit/AUDIT-2026-08-12-M2鸣潮纸面填表演练.md §7.8。
+      allowedHosts: ["TODO_API_HOST"],
       // TODO：卡池类型参数名，如原神/星铁 "gacha_type"、绝区零 "real_gacha_type"。
       extractList: extractRecordList,
     },

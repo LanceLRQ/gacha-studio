@@ -12,10 +12,21 @@
 //   - authkey=<值>            → authkey=FAKE_AUTHKEY_FOR_FIXTURE_ONLY
 //   - authkey_ver=<值>        → authkey_ver=1
 //   - sign_type=<值>          → sign_type=2
-//   - 19 位及以上纯数字串     → 固定占位值（覆盖雪花 ID / 长数字 UID 等）
+//   - 19 位及以上纯数字串     → 固定占位值（覆盖雪花 ID）
+//   - uid/player_id 字段的数字值（4 位及以上，不限位数）→ 固定占位值
+//     （覆盖米哈游/库洛的玩家 UID；按字段名锚定，位数不设上限——见该规则
+//     定义处的复核订正记录）
+//   - ServerID 字段的十六进制串（16 位及以上，不限位数）→ 固定占位值
 //   - accessToken 字段        → 占位值
 //   - Authorization 头        → 占位值
 //   - cookie 字段             → 占位值
+//
+// ⚠️ AUDIT-2026-08-12-M2鸣潮真实存档实测.md §四：early 版本的 long-numeric-id
+// 规则下限定在 19 位，完全覆盖不到米哈游/库洛的 9 位玩家 UID 与鸣潮 ServerID
+// 这类 32 位十六进制标识符——合成样本实测「已扫描 1 个文件，命中 0 处」，
+// 是假阴性不是安全证明。uid-field / server-id-hex 两条规则就是补这个洞，
+// 详见各自规则定义处的注释。首版曾把这两条规则的取值宽度也写死（恰好 9 位 /
+// 恰好 32 位），复核指出这是同一个洞换了个数字——已改为只设下限、不设上限。
 //
 // 零新增 npm 依赖，只用 node:fs / node:path，风格照 scripts/gs-check/ ：
 // 全中文输出、命中位置精确到「文件:行号」。
@@ -60,6 +71,80 @@ const RULES = [
     wholeMatchIsSensitive: true,
   },
   {
+    id: 'uid-field',
+    // 米哈游三游与库洛鸣潮的玩家 UID 均为 9 位数字（AUDIT-2026-08-12-
+    // M2鸣潮真实存档实测.md §2.1、§4.1），但这条规则按**字段名**锚定
+    // （uid / UID / player_id / playerId / PLAYER_ID 等大小写与下划线变体，
+    // `\b` 词边界防止命中 "gameUid" 这类复合字段名的子串，也防止命中
+    // "uid2" 这类后缀变体）——字段名已经把语义锁定为"玩家/账号标识"，与
+    // 具体位数无关，因此取值宽度只设下限（防误伤 `"uid": 0` / `"uid": 1`
+    // 这类哨兵值）、不设上限。
+    //
+    // ⚠️ 复核订正记录（保留过程，不静默改掉）：初版把宽度写死成"恰好 9 位"
+    // （`\d{9}`），复核指出这就是本次要修的那个缺口本身换了个数字——
+    // `long-numeric-id` 用宽度做判别依据是因为它没有字段名锚定，宽度是它
+    // 唯一的防线；这条规则有字段名锚定，靠宽度兜底不提供任何额外保护，
+    // 只会在下一个 UID 不是 9 位的游戏接入时重演"新规则静默漏掉"的原始问题。
+    //
+    // 同时覆盖三种真实会出现的形态：
+    //   - JSON 数字形式：`"UID": 123456789`（鸣潮存档顶层实测就是 int，
+    //     不是字符串——research/03 §三的字符串标注已被实测证伪）
+    //   - JSON 字符串形式：`"uid": "123456789"`
+    //   - TOML 无引号键形式：`uid = "123456789"`（fixture 的 meta.toml 用
+    //     这种写法——贡献者最可能在这一行手填真实 UID，覆盖它比覆盖 JSON
+    //     存档本身更要紧）
+    //
+    // 占位值沿用仓库既有约定（fixtures/genshin/meta.toml 的假 UID 就是
+    // "100000000"），保持跨 fixture 一致。占位值本身是 9 位（≥ 4 位下限），
+    // 对已脱敏文件重复运行时会被规则再次匹配、替换为自身，字节不变，见
+    // 自检脚本的幂等性测试。
+    //
+    // 会漏掉什么（如实列出，不假装覆盖一切）：
+    //   - 复合字段名：gameUid / roleId / openId / accountId 等不含独立
+    //     "uid"/"player_id" 词边界的变体——按字段名锚定的代价就是要求字段名
+    //     在贡献者登记表里，本规则登记表里没有的名字统统漏
+    //   - 3 位及以下的纯数字值（下限 4 位是刻意的，见上）
+    //   - 字段名与数值被换行分隔的罕见格式化风格（本规则按单行文本匹配，
+    //     不做跨行结构解析）
+    //
+    // 不加"已是占位值就跳过"的负向先行断言：与下面 access-token /
+    // authorization-header / cookie 三条规则同样的理由——前缀里的可选引号
+    // `"?` 在有回溯空间时会让负向断言产生"伪命中"，那三条规则的注释已经
+    // 记录了这个坑，这里不重踩。本规则对已脱敏文件重复 --write 仍然幂等
+    // （前缀 + 占位值精确复现已有文本，见自检脚本的幂等性测试），只是
+    // dry-run 会持续报告命中，这是可接受的噪音，不是数据损坏。
+    pattern: /(\b(?:uid|player_?id)\b"?\s*[:=]\s*"?)(?<!\d)\d{4,}(?!\d)/gi,
+    reason: '命中 uid/player_id 字段的数字 UID',
+    placeholder: '100000000',
+  },
+  {
+    id: 'server-id-hex',
+    // 鸣潮存档的 ServerID 是 32 位十六进制字符串（research/03-真实导出数据
+    // 格式实测.md §3.1），但这条规则按**字段名**锚定而非裸匹配"32 位
+    // 十六进制"，因为 CardPoolId 同样是 32 位十六进制（AUDIT-2026-08-12-
+    // M2鸣潮真实存档实测.md §2.2）却是跨账号共享的卡池标识（全库非空取值
+    // 去重后只有 1 个），不是账号级敏感信息——裸匹配宽度会把它也替换掉，
+    // 对贡献者的 fixture 造成不必要的改动。字段名已经把语义锁定为"服务器
+    // 标识"，与具体位数无关，因此取值宽度只设下限（防误伤过短、明显不是
+    // 标识符的 hex 片段）、不设上限，理由与 uid-field 的复核订正记录一致：
+    // 有字段名锚定时，靠宽度兜底不提供额外保护，只会在长度不是 32 的实现
+    // 上重演"新规则静默漏掉"。
+    //
+    // 会漏掉什么：
+    //   - CardPoolId 等同形态但语义不同的字段（刻意不覆盖，理由见上）
+    //   - 非 "ServerID" 命名的服务器标识字段（如某游戏改用 serverUid /
+    //     regionId 之类，字段名登记表里没有就漏）
+    //   - 15 位及以下的十六进制值（下限 16 位是刻意的，防误伤过短的
+    //     hex 片段）
+    //
+    // 幂等性说明同 uid-field：不加负向先行断言，理由一致（前缀含可选引号）；
+    // 占位值本身是 32 位十六进制（≥ 16 位下限），重复运行会被再次匹配、
+    // 替换为自身，字节不变。
+    pattern: /(\bserver[_-]?id\b"?\s*[:=]\s*"?)[0-9a-fA-F]{16,}(?![0-9a-fA-F])/gi,
+    reason: '命中 ServerID 字段的十六进制标识符',
+    placeholder: 'a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0',
+  },
+  {
     // JSON 里的键名通常自己也带引号（如 `"accessToken": "xxx"`），键名与冒号
     // 之间可能夹一个闭合引号，因此前缀允许 `"?` 出现在 `[:=]` 两侧。
     //
@@ -101,10 +186,14 @@ function offsetToLine(text, offset) {
 /**
  * 扫描单个文件的文本内容，返回命中列表（不修改内容）。
  * 每条命中：{ rule, index, line, matchedText }
+ *
+ * `rules` 默认取全量 RULES；自检脚本会传入过滤掉某条规则的子集，用来
+ * 在当前代码里重构"如果这条规则不存在会怎样"的反例（证明"不加规则会漏"），
+ * 而不需要另外维护一份历史规则集的复制品。
  */
-function scanText(text) {
+function scanText(text, rules = RULES) {
   const findings = [];
-  for (const rule of RULES) {
+  for (const rule of rules) {
     for (const m of text.matchAll(rule.pattern)) {
       findings.push({
         rule,
@@ -118,10 +207,10 @@ function scanText(text) {
   return findings;
 }
 
-/** 对文本应用全部规则的替换，返回替换后的文本。 */
-function applyRules(text) {
+/** 对文本应用全部规则的替换，返回替换后的文本。`rules` 默认取全量 RULES，理由同 scanText。 */
+function applyRules(text, rules = RULES) {
   let result = text;
-  for (const rule of RULES) {
+  for (const rule of rules) {
     if (rule.wholeMatchIsSensitive) {
       result = result.replace(rule.pattern, () => rule.placeholder);
     } else {
@@ -232,7 +321,11 @@ function main(argv) {
   process.exitCode = totalFindings > 0 && !write ? 1 : 0;
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1]).href) {
+// `process.argv[1]` 在 `node -e` / `--input-type=module` 这类无脚本入口的场景下是
+// undefined，`pathToFileURL(undefined)` 会抛 ERR_INVALID_ARG_TYPE——本模块被
+// gs-check 门禁与自检脚本导入，也应当能被随手 `import` 进来临时验证规则行为，
+// 因此守卫先判 argv[1] 存在再比对。
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   main(process.argv);
 }
 

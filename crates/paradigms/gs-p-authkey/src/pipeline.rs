@@ -47,6 +47,16 @@ pub enum PipelineError {
     /// authkey 已过期——不可重试的终止条件，调用方需要引导用户重新打开
     /// 游戏内抽卡记录页以刷新凭据，而不是傻等重试。
     AuthkeyExpired,
+    /// 占位符替换完成之后的最终请求 URL，其 host 不在插件声明的
+    /// `allowedHosts` 白名单内——见 [`AuthkeyApiPipeline::validate_request_url_host`]
+    /// 与 crate 顶部 §7.8 裁定。**不携带完整 URL**（URL 含替换后的明文凭据，
+    /// 见 `docs/_internal/audit/AUDIT-2026-08-12-M2鸣潮纸面填表演练.md`
+    /// §7.8 关于错误信息不能泄露明文凭据的要求），只携带插件 id 与解析出的
+    /// host（解析失败时为 `None`）。
+    HostNotAllowed {
+        plugin_id: String,
+        host: Option<String>,
+    },
 }
 
 impl std::fmt::Display for PipelineError {
@@ -61,6 +71,16 @@ impl std::fmt::Display for PipelineError {
                 f,
                 "authkey 已过期，需要用户重新打开游戏内抽卡记录页刷新凭据"
             ),
+            Self::HostNotAllowed { plugin_id, host } => match host {
+                Some(host) => write!(
+                    f,
+                    "插件 \"{plugin_id}\" 的请求目标 host \"{host}\" 不在 allowedHosts 白名单内，请求已拒绝"
+                ),
+                None => write!(
+                    f,
+                    "插件 \"{plugin_id}\" 的请求 URL 无法解析出合法 host，请求已拒绝"
+                ),
+            },
         }
     }
 }
@@ -178,6 +198,15 @@ struct CollectSectionJson {
 pub struct AuthkeyParamsJson {
     pub credential: CredentialJson,
     pub request: RequestTemplateJson,
+    /// 请求目标 host 白名单，**必填**——本字段没有 `#[serde(default)]`，
+    /// manifest 里完全缺失这个键会在这里直接反序列化失败（`from_manifest_value`
+    /// 的 `serde_json::from_value` 调用点），"忘了填"与"故意留空数组"是两种
+    /// 不同的构造期拒绝路径，后者由 [`validate_allowed_hosts`] 负责。
+    /// 非空/合法性校验、以及"必须在占位符替换之后校验最终 URL"的完整理由，
+    /// 见 `packages/gs-plugin-kit/manifest.ts` 的
+    /// `CredentialedApiPipelineParams.allowedHosts` 文档与 crate 顶部 §7.8 裁定。
+    #[serde(rename = "allowedHosts")]
+    pub allowed_hosts: Vec<String>,
     /// 每页条数，填进 `request.url` 的 `{{pageSize}}` 占位符。
     ///
     /// > 这里曾有 `type_param` / `page_param` 两个字段。M1-S3 实现后实测确认
@@ -476,6 +505,91 @@ fn validate_endpoint_override_segment(segment: &str) -> Result<(), &'static str>
     Ok(())
 }
 
+// ============================================================
+// allowedHosts：请求目标 host 白名单（§7.8 裁定）
+// ============================================================
+
+/// `allowedHosts` 单个条目的合法性校验：不接受 scheme、路径、query、通配符、
+/// 空白，冒号只允许出现在"host:端口号"这一种形态里。
+///
+/// 比 [`validate_endpoint_override_segment`] 宽松（真实 host 本来就含 `.`
+/// 与 `-`），但精神一致——不接受任何会重新引入"这段字符串到底匹配到哪"
+/// 解释空间的写法，尤其是通配符：一旦允许 `*.example.com`，`*` 匹配到的
+/// 边界本身就是一段需要另外定义的语义，等于把 `endpointOverride` 已经拒绝
+/// 过的同一类风险重新引入白名单机制。校验放在 pipeline 构造期（同
+/// [`validate_endpoint_override_segment`] 的理由），声明不合法直接拒绝
+/// 启动，不留到某次请求发出前才发现。
+fn validate_allowed_host_entry(host: &str) -> Result<(), &'static str> {
+    if host.is_empty() {
+        return Err("不能是空字符串");
+    }
+    if host.contains("://") {
+        return Err("不能包含 scheme（形如 \"https://\"），只写 host 本身");
+    }
+    if host.contains('/') {
+        return Err("不能包含路径分隔符 \"/\"");
+    }
+    if host.contains('?') {
+        return Err("不能包含查询串分隔符 \"?\"");
+    }
+    if host.contains('*') {
+        return Err("不支持通配符 \"*\"，必须精确匹配完整 host");
+    }
+    if host.chars().any(|c| c.is_whitespace()) {
+        return Err("不能包含空白字符");
+    }
+    // 冒号只允许用于"host:端口号"这一种形态：切到第一个冒号之后，剩余部分
+    // 必须是纯数字端口号，且不能再出现第二个冒号（排除 IPv6 字面量这类
+    // 本项目未支持的形态——fail closed，不猜测它是否合法）。
+    if let Some((_, port)) = host.split_once(':') {
+        let port_is_valid_port_number =
+            !port.is_empty() && port.chars().all(|c| c.is_ascii_digit());
+        if !port_is_valid_port_number {
+            return Err("冒号只能用于端口号（形如 \"example.com:8080\"），且只能出现一次");
+        }
+    }
+    Ok(())
+}
+
+/// `allowedHosts` 整个数组的校验：非空、且每一项都通过
+/// [`validate_allowed_host_entry`]。可选的安全字段等于默认关闭
+/// （manifest.ts `allowedHosts` 字段文档 §为什么必填而非可选），因此空数组
+/// 本身就是配置错误，不是"没有限制"的合法表达。
+fn validate_allowed_hosts(hosts: &[String]) -> Result<(), String> {
+    if hosts.is_empty() {
+        return Err("不能是空数组——省略等于关闭校验，必须至少声明一个允许的 host".to_string());
+    }
+    for host in hosts {
+        validate_allowed_host_entry(host)
+            .map_err(|reason| format!("条目 \"{host}\" 不合法：{reason}"))?;
+    }
+    Ok(())
+}
+
+/// 解析 URL 的 host（若显式声明了非默认端口，一并纳入比对，形如
+/// `"host:port"`），并归一化为小写——host 本身大小写不敏感。解析失败或
+/// URL 本身没有 host（如相对路径、`data:` 之类的非常规 scheme）一律返回
+/// `None`，调用方按 fail closed 处理，不尝试"大概能对"的字符串切分兜底。
+fn extract_url_host(url: &str) -> Option<String> {
+    let parsed = url::Url::parse(url).ok()?;
+    let host = parsed.host_str()?;
+    match parsed.port() {
+        Some(port) => Some(format!("{}:{port}", host.to_ascii_lowercase())),
+        None => Some(host.to_ascii_lowercase()),
+    }
+}
+
+/// `host` 是否精确命中 `allowed_hosts` 里的某一项（大小写不敏感）。
+/// `allowed_hosts` 约定已经是小写（构造期归一化，见
+/// [`AuthkeyApiPipeline::from_manifest_value`]），这里仍然用
+/// `eq_ignore_ascii_case` 而不是裸 `==`——不依赖调用方是否真的做了归一化，
+/// 这条比对规则本身就该是大小写不敏感的。
+fn host_is_allowed(host: &str, allowed_hosts: &[String]) -> bool {
+    allowed_hosts
+        .iter()
+        .any(|allowed| allowed.eq_ignore_ascii_case(host))
+}
+
 /// `hooks.deriveRecordKey`（逐条）与 `hooks.deriveRecordKeys`（批处理）互斥：
 /// 两者只能声明其一。拒绝同时声明，而不是隐式约定"批处理优先"之类的规则——
 /// 一份 manifest 该走哪种 record_key 生成方式应当只有一个答案，写出两个只会
@@ -646,6 +760,10 @@ pub struct AuthkeyApiPipeline<'rt> {
     is_reached_known_stop_condition: bool,
     error_map: HashMap<String, ErrorSemantic>,
     rate_limit: RateLimitPolicy,
+    /// 请求目标 host 白名单，已在构造期校验合法并归一化为小写（§7.8 裁定）。
+    /// 消费点见 [`Self::validate_request_url_host`]，调用点见
+    /// [`Self::collect_banner`]——在占位符替换完成之后、真正发起请求之前。
+    allowed_hosts: Vec<String>,
 }
 
 impl<'rt> AuthkeyApiPipeline<'rt> {
@@ -715,6 +833,23 @@ impl<'rt> AuthkeyApiPipeline<'rt> {
             }
         }
 
+        // allowedHosts：非空 + 每项合法，同 endpointOverride 的时机——声明
+        // 不合法直接拒绝启动，不留到某次请求发出前才发现。归一化为小写
+        // 存下来，运行时比对（Self::validate_request_url_host）不需要每次
+        // 都重新转换大小写。
+        validate_allowed_hosts(&parsed.collect.params.allowed_hosts).map_err(|reason| {
+            PipelineError::Config(format!(
+                "插件 \"{plugin_id}\" 声明的 collect.params.allowedHosts {reason}"
+            ))
+        })?;
+        let allowed_hosts: Vec<String> = parsed
+            .collect
+            .params
+            .allowed_hosts
+            .iter()
+            .map(|host| host.to_ascii_lowercase())
+            .collect();
+
         let timezone_source = parsed.time.as_ref().and_then(|t| t.timezone_source.clone());
         let raw_time_convention = parsed.time.as_ref().and_then(|t| t.raw_time_convention);
 
@@ -763,6 +898,7 @@ impl<'rt> AuthkeyApiPipeline<'rt> {
             is_reached_known_stop_condition,
             error_map,
             rate_limit,
+            allowed_hosts,
         })
     }
 
@@ -870,6 +1006,27 @@ impl<'rt> AuthkeyApiPipeline<'rt> {
         self.params.request.body.as_ref().map(|template| {
             self.substitute_placeholders(template, &credential_url, banner_id, page)
         })
+    }
+
+    /// 校验**占位符替换完成之后**的最终请求 URL，host 是否在插件声明的
+    /// `allowedHosts` 白名单内。调用点在 [`Self::collect_banner`]，位置是
+    /// [`Self::build_page_url`] 之后、真正发起请求（`fetch_with_retry`）
+    /// 之前——校验模板本身挡不住"凭据被投毒"这种场景（`request.url` 的
+    /// host 常常整个来自 `{{credential}}`，模板字符串里根本没有 host 可查），
+    /// 只有校验替换后的最终 URL 才能同时挡住恶意插件与被投毒的凭据源，
+    /// 完整理由见 crate 顶部 §7.8.3 引用的裁定文档。
+    ///
+    /// 错误信息只携带 host 与插件 id，**不携带完整 URL**——`url` 参数里
+    /// 可能含有已经替换进去的明文凭据。
+    fn validate_request_url_host(&self, url: &str) -> Result<(), PipelineError> {
+        let host = extract_url_host(url);
+        match &host {
+            Some(host) if host_is_allowed(host, &self.allowed_hosts) => Ok(()),
+            _ => Err(PipelineError::HostNotAllowed {
+                plugin_id: self.plugin_id.clone(),
+                host,
+            }),
+        }
     }
 
     /// 根据 `time.timezoneSource` 的声明，从**本页**响应体计算时区偏移
@@ -1184,6 +1341,9 @@ impl<'rt> AuthkeyApiPipeline<'rt> {
 
         loop {
             let url = self.build_page_url(credential_url, banner_id, page);
+            // §7.8.3：必须校验替换完成之后的最终 URL，且必须在真正发起请求
+            // （下一行 fetch_with_retry）之前——晚一步就等于请求已经发出去了。
+            self.validate_request_url_host(&url)?;
             let response_json = self.fetch_with_retry(transport, &url)?;
             pages_fetched += 1;
 
@@ -1660,7 +1820,10 @@ mod tests {
         let pipeline =
             AuthkeyApiPipeline::new("genshin", &runtime, RateLimitPolicy::zero_delay_for_tests())
                 .expect("应当能构造 pipeline");
-        let credential_url = "https://x.example.com/getGachaLog?authkey=FAKE&lang=zh-cn";
+        // host 用 genshin 真实 allowedHosts 里的域名——这几个测试要验证的是
+        // 去重/时区/错误语义等与 host 白名单无关的行为，用真实允许的 host
+        // 避免 §7.8 新增的校验掩盖了测试本身要验证的逻辑。
+        let credential_url = "https://public-operation-hk4e.mihoyo.com/gacha_info/api/getGachaLog?authkey=FAKE&lang=zh-cn";
 
         // 每次调用用不同的 captured_at——`banner_snapshot` 是时间序列表，
         // `UNIQUE(account_id, banner_key, captured_at, source)` 约束的正是
@@ -1718,7 +1881,10 @@ mod tests {
         let pipeline =
             AuthkeyApiPipeline::new("genshin", &runtime, RateLimitPolicy::zero_delay_for_tests())
                 .expect("应当能构造 pipeline");
-        let credential_url = "https://x.example.com/getGachaLog?authkey=FAKE";
+        // 同上：用 genshin 真实 allowedHosts 里的域名，避免 §7.8 host 白名单
+        // 校验掩盖本测试真正要验证的逻辑。
+        let credential_url =
+            "https://public-operation-hk4e.mihoyo.com/gacha_info/api/getGachaLog?authkey=FAKE";
 
         let transport = FixtureTransport::new();
         transport.register(
@@ -2070,6 +2236,228 @@ mod tests {
     }
 
     // ============================================================
+    // §7.8 · allowedHosts host 白名单
+    // ============================================================
+
+    #[test]
+    fn validate_allowed_host_entry_accepts_plain_hostname_and_host_with_port() {
+        assert!(validate_allowed_host_entry("public-operation-hk4e.mihoyo.com").is_ok());
+        assert!(validate_allowed_host_entry("example.com:8080").is_ok());
+    }
+
+    #[test]
+    fn validate_allowed_host_entry_rejects_scheme_path_query_wildcard_whitespace_and_bad_colon() {
+        assert!(
+            validate_allowed_host_entry("").is_err(),
+            "空字符串应当被拒绝"
+        );
+        assert!(
+            validate_allowed_host_entry("https://evil.example.com").is_err(),
+            "带 scheme 的写法应当被拒绝"
+        );
+        assert!(
+            validate_allowed_host_entry("evil.example.com/path").is_err(),
+            "带路径的写法应当被拒绝"
+        );
+        assert!(
+            validate_allowed_host_entry("evil.example.com?x=1").is_err(),
+            "带查询串的写法应当被拒绝"
+        );
+        assert!(
+            validate_allowed_host_entry("*.example.com").is_err(),
+            "通配符应当被拒绝——本裁定明确不支持通配符匹配"
+        );
+        assert!(
+            validate_allowed_host_entry("evil example.com").is_err(),
+            "空白字符应当被拒绝"
+        );
+        assert!(
+            validate_allowed_host_entry("evil.example.com:abc").is_err(),
+            "冒号之后不是纯数字端口号应当被拒绝"
+        );
+        assert!(
+            validate_allowed_host_entry("evil.example.com:80:81").is_err(),
+            "出现第二个冒号应当被拒绝"
+        );
+    }
+
+    #[test]
+    fn validate_allowed_hosts_rejects_empty_array() {
+        let result = validate_allowed_hosts(&[]);
+        assert!(result.is_err(), "空数组应当被拒绝——省略等于关闭校验");
+    }
+
+    #[test]
+    fn validate_allowed_hosts_rejects_first_invalid_entry_and_accepts_all_valid() {
+        assert!(validate_allowed_hosts(&["*.evil.com".to_string()]).is_err());
+        assert!(
+            validate_allowed_hosts(&[
+                "public-operation-hk4e.mihoyo.com".to_string(),
+                "public-operation-hk4e-sg.hoyoverse.com".to_string(),
+            ])
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn extract_url_host_parses_lowercase_host_and_optional_port() {
+        assert_eq!(
+            extract_url_host(
+                "https://Public-Operation-HK4E.Mihoyo.com/gacha_info/api/getGachaLog?authkey=x"
+            ),
+            Some("public-operation-hk4e.mihoyo.com".to_string()),
+            "host 比对大小写不敏感，这里归一化为小写"
+        );
+        assert_eq!(
+            extract_url_host("https://example.com:8443/path"),
+            Some("example.com:8443".to_string()),
+            "显式声明了非默认端口时，端口应当纳入比对"
+        );
+    }
+
+    #[test]
+    fn extract_url_host_returns_none_for_unparseable_url() {
+        // fail closed：解析失败时返回 None，不猜测、不做字符串切分兜底。
+        assert_eq!(extract_url_host("not a url at all"), None);
+        assert_eq!(extract_url_host(""), None);
+    }
+
+    #[test]
+    fn pipeline_construction_rejects_empty_allowed_hosts() {
+        let runtime = PluginRuntime::new().expect("插件运行时应当能正常启动");
+        let manifest_value = genshin_manifest_with(|v| {
+            v["collect"]["params"]["allowedHosts"] = serde_json::json!([]);
+        });
+        let result =
+            AuthkeyApiPipeline::from_manifest_json_for_test("genshin", &runtime, manifest_value);
+        assert!(
+            result.is_err(),
+            "空的 allowedHosts 数组应当在构造期就被拒绝——可选的安全字段等于默认关闭"
+        );
+    }
+
+    #[test]
+    fn pipeline_construction_rejects_allowed_hosts_with_wildcard_scheme_or_path() {
+        let runtime = PluginRuntime::new().expect("插件运行时应当能正常启动");
+
+        let wildcard = genshin_manifest_with(|v| {
+            v["collect"]["params"]["allowedHosts"] = serde_json::json!(["*.mihoyo.com"]);
+        });
+        assert!(
+            AuthkeyApiPipeline::from_manifest_json_for_test("genshin", &runtime, wildcard).is_err(),
+            "通配符条目应当在构造期就被拒绝"
+        );
+
+        let with_scheme = genshin_manifest_with(|v| {
+            v["collect"]["params"]["allowedHosts"] =
+                serde_json::json!(["https://public-operation-hk4e.mihoyo.com"]);
+        });
+        assert!(
+            AuthkeyApiPipeline::from_manifest_json_for_test("genshin", &runtime, with_scheme)
+                .is_err(),
+            "带 scheme 的条目应当在构造期就被拒绝"
+        );
+
+        let with_path = genshin_manifest_with(|v| {
+            v["collect"]["params"]["allowedHosts"] =
+                serde_json::json!(["public-operation-hk4e.mihoyo.com/gacha_info"]);
+        });
+        assert!(
+            AuthkeyApiPipeline::from_manifest_json_for_test("genshin", &runtime, with_path)
+                .is_err(),
+            "带路径的条目应当在构造期就被拒绝"
+        );
+    }
+
+    /// ★ §7.8.3 的核心验证：白名单本身合法，但 `{{credential}}` 展开出的
+    /// host 不在白名单内——这正是"凭据被投毒"的场景：能往游戏缓存/日志里
+    /// 写内容的攻击者，可以种一个匹配 `urlPattern` 正则、却指向自己域名的
+    /// URL。校验模板本身挡不住这个（genshin 的 `request.url` 模板里根本
+    /// 没有 host，host 完全来自 `{{credential}}`），必须校验替换完成之后
+    /// 的最终 URL 才挡得住。
+    ///
+    /// 额外断言 `transport.call_count() == 0`：证明被拒绝的请求**从未真正
+    /// 发出**，不是"发出去了但结果被事后丢弃"。
+    #[test]
+    fn collect_banner_rejects_request_when_final_url_host_is_credential_poisoned() {
+        let storage = Storage::open_in_memory().expect("应当能打开内存数据库");
+        let (runtime, account_id) = setup_pipeline_and_account(&storage);
+        let pipeline =
+            AuthkeyApiPipeline::new("genshin", &runtime, RateLimitPolicy::zero_delay_for_tests())
+                .expect("应当能构造 pipeline");
+
+        // 白名单是 genshin 真实声明（mihoyo.com / hoyoverse.com），但这里的
+        // "凭据"指向攻击者自己的域名——模拟"游戏缓存/日志被投毒"场景。
+        let poisoned_credential_url =
+            "https://evil.example.com/gacha_info/api/getGachaLog?authkey=stolen&lang=zh-cn";
+
+        let transport = FixtureTransport::new();
+        // 刻意不给这个 URL 注册任何响应——如果校验没生效、请求真的被发出去，
+        // FixtureTransport 会因为找不到注册的响应而报错，而不是"意外成功"，
+        // 这样测试在两种失败模式下都不会被误判为通过。
+
+        let repo = storage.repository();
+        let result = pipeline.collect_banner(
+            &transport,
+            &repo,
+            account_id,
+            "301",
+            poisoned_credential_url,
+            "100000000",
+            None,
+            Some("zh-cn"),
+            1_754_812_801_000,
+        );
+
+        match result {
+            Err(PipelineError::HostNotAllowed { plugin_id, host }) => {
+                assert_eq!(plugin_id, "genshin");
+                assert_eq!(host.as_deref(), Some("evil.example.com"));
+            }
+            other => panic!("期望 HostNotAllowed，实际：{other:?}"),
+        }
+        assert_eq!(
+            transport.call_count(),
+            0,
+            "host 不在白名单内的请求必须在发出之前就被拦下，FixtureTransport 不应该收到任何调用"
+        );
+    }
+
+    #[test]
+    fn collect_banner_allows_request_when_final_url_host_is_allowlisted() {
+        // 回归：正常路径（host 属于插件真实声明的 allowedHosts）不受影响，
+        // 与 full_pipeline_run_matches_fixture_expectations 覆盖同一条正常
+        // 路径，这里只聚焦断言"host 校验本身放行"，不重复校验记录内容。
+        let storage = Storage::open_in_memory().expect("应当能打开内存数据库");
+        let (runtime, account_id) = setup_pipeline_and_account(&storage);
+        let pipeline =
+            AuthkeyApiPipeline::new("genshin", &runtime, RateLimitPolicy::zero_delay_for_tests())
+                .expect("应当能构造 pipeline");
+
+        let credential_url = "https://public-operation-hk4e.mihoyo.com/gacha_info/api/getGachaLog?authkey=FAKE&lang=zh-cn";
+        let transport = FixtureTransport::new();
+        transport.register(
+            pipeline.build_page_url(credential_url, "301", 1),
+            read_fixture("fixtures/genshin/raw_response/301_page_3_empty.json"),
+        );
+
+        let repo = storage.repository();
+        let result = pipeline.collect_banner(
+            &transport,
+            &repo,
+            account_id,
+            "301",
+            credential_url,
+            "100000000",
+            None,
+            Some("zh-cn"),
+            1_754_812_801_000,
+        );
+        assert!(result.is_ok(), "host 在白名单内时不应当被拒绝：{result:?}");
+        assert_eq!(transport.call_count(), 1);
+    }
+
+    // ============================================================
     // A2 · timezoneSource: apiField / staticTable
     // ============================================================
 
@@ -2131,7 +2519,10 @@ mod tests {
             AuthkeyApiPipeline::from_manifest_json_for_test("genshin", &runtime, manifest_value)
                 .expect("应当能构造 pipeline");
 
-        let credential_url = "https://x.example.com/getGachaLog?authkey=FAKE";
+        // 同上：用 genshin 真实 allowedHosts 里的域名，避免 §7.8 host 白名单
+        // 校验掩盖本测试真正要验证的逻辑。
+        let credential_url =
+            "https://public-operation-hk4e.mihoyo.com/gacha_info/api/getGachaLog?authkey=FAKE";
         let page_1 = serde_json::json!({
             "retcode": 0,
             "message": "OK",
@@ -2203,7 +2594,10 @@ mod tests {
                 .expect("应当能构造 pipeline");
 
         // 复用真实 genshin fixture——它没有 region_time_zone 字段。
-        let credential_url = "https://x.example.com/getGachaLog?authkey=FAKE";
+        // 同上：用 genshin 真实 allowedHosts 里的域名，避免 §7.8 host 白名单
+        // 校验掩盖本测试真正要验证的逻辑。
+        let credential_url =
+            "https://public-operation-hk4e.mihoyo.com/gacha_info/api/getGachaLog?authkey=FAKE";
         let transport = FixtureTransport::new();
         transport.register(
             pipeline.build_page_url(credential_url, "301", 1),
@@ -2243,7 +2637,10 @@ mod tests {
             AuthkeyApiPipeline::from_manifest_json_for_test("genshin", &runtime, manifest_value)
                 .expect("应当能构造 pipeline");
 
-        let credential_url = "https://x.example.com/getGachaLog?authkey=FAKE";
+        // 同上：用 genshin 真实 allowedHosts 里的域名，避免 §7.8 host 白名单
+        // 校验掩盖本测试真正要验证的逻辑。
+        let credential_url =
+            "https://public-operation-hk4e.mihoyo.com/gacha_info/api/getGachaLog?authkey=FAKE";
         let transport = FixtureTransport::new();
         transport.register(
             pipeline.build_page_url(credential_url, "301", 1),
@@ -2301,7 +2698,10 @@ mod tests {
             AuthkeyApiPipeline::from_manifest_json_for_test("genshin", &runtime, manifest_value)
                 .expect("应当能构造 pipeline");
 
-        let credential_url = "https://x.example.com/getGachaLog?authkey=FAKE";
+        // 同上：用 genshin 真实 allowedHosts 里的域名，避免 §7.8 host 白名单
+        // 校验掩盖本测试真正要验证的逻辑。
+        let credential_url =
+            "https://public-operation-hk4e.mihoyo.com/gacha_info/api/getGachaLog?authkey=FAKE";
         let transport = FixtureTransport::new();
         transport.register(
             pipeline.build_page_url(credential_url, "301", 1),
