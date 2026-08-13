@@ -243,6 +243,38 @@ pub enum RecordSource {
     Import,
 }
 
+/// 记录的卡池归属以哪一侧为准。
+///
+/// 两个游戏的真实采集行为已实证但根本不同，两者都不能靠猜：
+///
+/// - **原神——响应携带权威的卡池身份，且可能与查询参数不同。** 实测
+///   `fixtures/genshin/raw_response/301_page_1.json`：查询 `gacha_type=301`，
+///   响应里 `gacha_type` 分布是 `{'301': 4, '400': 1}`——一次查询会混回其它
+///   卡池的记录。此时若用查询时的 banner 覆盖，那条 400 记录会被错误归到
+///   301，因此原神**必须**声明 `response`（也是省略时的默认值，历史行为
+///   不变）。
+/// - **鸣潮——响应不携带可还原的卡池身份。** API 响应元素是 `KRAPIItem`
+///   （`docs/example-projects/WWGachaExport/WWGachaExport/Models/GachaAPI.cs`），
+///   其 `cardPoolType` 字段实测是中文展示标签（如 `"角色精准调谐"`），不是
+///   插件 `banners[].id` 用的 `PoolType` 数字；只有映射表跟不上的新池才会
+///   降级成数字串（实测 `PoolType=10` 时回 `"10"`）。而鸣潮一次查询只返回
+///   一个池的全量记录，不存在混池，因此查询时的 banner 才是权威，鸣潮
+///   **必须**声明 `query`。
+///
+/// ⚠️ **声明 `query` 的前提是「一次查询只返回一个卡池的记录」。** 若某游戏
+/// 其实会混池却声明了 `query`，被混进来的记录会被**静默错误归池**——不报错、
+/// 不进日志，保底统计与卡池筛选会一起错，且极难定位。原神就是会混池的真实
+/// 例子，它必须用 `response`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename_all = "camelCase")]
+pub enum BannerIdentitySource {
+    /// 响应自带权威卡池身份，以 `extractRecord` 产出的 `bannerId` 为准。
+    Response,
+    /// 响应不携带可还原的卡池身份，以宿主发起本次查询时用的卡池为准。
+    Query,
+}
+
 /// 归一化并落库后的一条抽卡记录，对应存储数据模型设计文档 §3.2。
 /// 本 Stage 只定义 Rust 结构体，不建表（建表是 `gs-storage` 的职责）。
 ///
@@ -328,6 +360,18 @@ mod tests {
         assert_eq!(value, serde_json::json!("windows"));
         let value = serde_json::to_value(Platform::Macos).unwrap();
         assert_eq!(value, serde_json::json!("macos"));
+    }
+
+    #[test]
+    fn banner_identity_source_serializes_to_camel_case_string_union() {
+        let value = serde_json::to_value(BannerIdentitySource::Response).unwrap();
+        assert_eq!(value, serde_json::json!("response"));
+        let value = serde_json::to_value(BannerIdentitySource::Query).unwrap();
+        assert_eq!(value, serde_json::json!("query"));
+
+        let round_tripped: BannerIdentitySource =
+            serde_json::from_value(serde_json::json!("query")).unwrap();
+        assert_eq!(round_tripped, BannerIdentitySource::Query);
     }
 
     #[test]

@@ -1,0 +1,280 @@
+{
+  "records": [
+    {
+      "fields": {
+        "itemId": "21030043",
+        "time": "2100-01-06T22:53:07",
+        "bannerId": "wuwa-banner-identity-not-derivable-from-response",
+        "count": 1,
+        "name": "远行者佩枪·洞察",
+        "itemType": "武器",
+        "rarity": "3"
+      },
+      "recordKey": "89208029fc6744cd"
+    },
+    {
+      "fields": {
+        "itemId": "21030043",
+        "time": "2100-01-06T22:53:07",
+        "bannerId": "wuwa-banner-identity-not-derivable-from-response",
+        "count": 1,
+        "name": "远行者佩枪·洞察",
+        "itemType": "武器",
+        "rarity": "3"
+      },
+      "recordKey": "c5231d34f8697d18"
+    },
+    {
+      "fields": {
+        "itemId": "21030043",
+        "time": "2100-01-06T22:53:07",
+        "bannerId": "wuwa-banner-identity-not-derivable-from-response",
+        "count": 1,
+        "name": "远行者佩枪·洞察",
+        "itemType": "武器",
+        "rarity": "3"
+      },
+      "recordKey": "c51ace6ff862c153"
+    },
+    {
+      "fields": {
+        "itemId": "21030043",
+        "time": "2100-01-06T22:53:07",
+        "bannerId": "wuwa-banner-identity-not-derivable-from-response",
+        "count": 1,
+        "name": "远行者佩枪·洞察",
+        "itemType": "武器",
+        "rarity": "3"
+      },
+      "recordKey": "c91d13523c656af6"
+    },
+    {
+      "fields": {
+        "itemId": "21030043",
+        "time": "2100-01-06T22:53:07",
+        "bannerId": "wuwa-banner-identity-not-derivable-from-response",
+        "count": 1,
+        "name": "远行者佩枪·洞察",
+        "itemType": "武器",
+        "rarity": "3"
+      },
+      "recordKey": "89297a853c5d1c31"
+    },
+    {
+      "fields": {
+        "itemId": "1304",
+        "time": "2099-01-23T03:14:48",
+        "bannerId": "wuwa-banner-identity-not-derivable-from-response",
+        "count": 1,
+        "name": "今汐",
+        "itemType": "角色",
+        "rarity": "5"
+      },
+      "recordKey": "b4f3a80bf46e0497"
+    },
+    {
+      "fields": {
+        "itemId": "1503",
+        "time": "2099-01-23T03:13:14",
+        "bannerId": "wuwa-banner-identity-not-derivable-from-response",
+        "count": 1,
+        "name": "维里奈",
+        "itemType": "角色",
+        "rarity": "5"
+      },
+      "recordKey": "7b54694c20560a60"
+    },
+    {
+      "fields": {
+        "itemId": "21020043",
+        "time": "2099-01-01T00:00:00",
+        "bannerId": "wuwa-banner-identity-not-derivable-from-response",
+        "count": 1,
+        "name": "远行者迅刀·旅迹",
+        "itemType": "武器",
+        "rarity": "3"
+      },
+      "recordKey": "095b4a5daf81a649"
+    },
+    {
+      "fields": {
+        "itemId": "21050023",
+        "time": "2099-01-01T00:00:00",
+        "bannerId": "wuwa-banner-identity-not-derivable-from-response",
+        "count": 1,
+        "name": "源能音感仪·测五",
+        "itemType": "武器",
+        "rarity": "3"
+      },
+      "recordKey": "3333c4fa0312a196"
+    },
+    {
+      "fields": {
+        "itemId": "21020043",
+        "time": "2099-01-01T00:00:00",
+        "bannerId": "wuwa-banner-identity-not-derivable-from-response",
+        "count": 1,
+        "name": "远行者迅刀·旅迹",
+        "itemType": "武器",
+        "rarity": "3"
+      },
+      "recordKey": "455de7686b850cd4"
+    },
+    {
+      "fields": {
+        "itemId": "21010043",
+        "time": "2099-01-01T00:00:00",
+        "bannerId": "wuwa-banner-identity-not-derivable-from-response",
+        "count": 1,
+        "name": "远行者长刃·辟路",
+        "itemType": "武器",
+        "rarity": "3"
+      },
+      "recordKey": "900819401f5db30c"
+    },
+    {
+      "fields": {
+        "itemId": "21030013",
+        "time": "2099-01-01T00:00:00",
+        "bannerId": "wuwa-banner-identity-not-derivable-from-response",
+        "count": 1,
+        "name": "暗夜佩枪·暗星",
+        "itemType": "武器",
+        "rarity": "3"
+      },
+      "recordKey": "bf68544f6a1f7253"
+    },
+    {
+      "fields": {
+        "itemId": "21030043",
+        "time": "2099-01-01T00:00:00",
+        "bannerId": "wuwa-banner-identity-not-derivable-from-response",
+        "count": 1,
+        "name": "远行者佩枪·洞察",
+        "itemType": "武器",
+        "rarity": "3"
+      },
+      "recordKey": "9602933e9e121a1a"
+    },
+    {
+      "fields": {
+        "itemId": "21020013",
+        "time": "2099-01-01T00:00:00",
+        "bannerId": "wuwa-banner-identity-not-derivable-from-response",
+        "count": 1,
+        "name": "暗夜迅刀·黑闪",
+        "itemType": "武器",
+        "rarity": "3"
+      },
+      "recordKey": "d6d20f2452ad3508"
+    },
+    {
+      "fields": {
+        "itemId": "21010013",
+        "time": "2099-01-01T00:00:00",
+        "bannerId": "wuwa-banner-identity-not-derivable-from-response",
+        "count": 1,
+        "name": "暗夜长刃·玄明",
+        "itemType": "武器",
+        "rarity": "3"
+      },
+      "recordKey": "a72a8e81b14626e5"
+    },
+    {
+      "fields": {
+        "itemId": "21010013",
+        "time": "2099-01-01T00:00:00",
+        "bannerId": "wuwa-banner-identity-not-derivable-from-response",
+        "count": 1,
+        "name": "暗夜长刃·玄明",
+        "itemType": "武器",
+        "rarity": "3"
+      },
+      "recordKey": "a32cc6cc6d498d70"
+    },
+    {
+      "fields": {
+        "itemId": "1601",
+        "time": "2099-01-01T00:00:00",
+        "bannerId": "wuwa-banner-identity-not-derivable-from-response",
+        "count": 1,
+        "name": "桃祈",
+        "itemType": "角色",
+        "rarity": "4"
+      },
+      "recordKey": "9708cd3f9826119b"
+    },
+    {
+      "fields": {
+        "itemId": "21030043",
+        "time": "2101-01-06T21:26:34",
+        "bannerId": "wuwa-banner-identity-not-derivable-from-response",
+        "count": 1,
+        "name": "远行者佩枪·洞察",
+        "itemType": "武器",
+        "rarity": "3"
+      },
+      "recordKey": "54165f3d512b3c21"
+    },
+    {
+      "fields": {
+        "itemId": "21040013",
+        "time": "2101-01-06T21:26:34",
+        "bannerId": "wuwa-banner-identity-not-derivable-from-response",
+        "count": 1,
+        "name": "暗夜臂铠·夜芒",
+        "itemType": "武器",
+        "rarity": "3"
+      },
+      "recordKey": "a3117dd56f088e69"
+    },
+    {
+      "fields": {
+        "itemId": "1504",
+        "time": "2101-01-06T21:26:34",
+        "bannerId": "wuwa-banner-identity-not-derivable-from-response",
+        "count": 1,
+        "name": "灯灯",
+        "itemType": "角色",
+        "rarity": "4"
+      },
+      "recordKey": "ccc7de8af26bd6c6"
+    },
+    {
+      "fields": {
+        "itemId": "21030013",
+        "time": "2101-01-06T21:26:34",
+        "bannerId": "wuwa-banner-identity-not-derivable-from-response",
+        "count": 1,
+        "name": "暗夜佩枪·暗星",
+        "itemType": "武器",
+        "rarity": "3"
+      },
+      "recordKey": "99512a8478c8c160"
+    },
+    {
+      "fields": {
+        "itemId": "21010013",
+        "time": "2101-01-06T21:26:34",
+        "bannerId": "wuwa-banner-identity-not-derivable-from-response",
+        "count": 1,
+        "name": "暗夜长刃·玄明",
+        "itemType": "武器",
+        "rarity": "3"
+      },
+      "recordKey": "5a9ca16e68b4dd6a"
+    },
+    {
+      "fields": {
+        "itemId": "21050023",
+        "time": "2101-01-06T21:26:34",
+        "bannerId": "wuwa-banner-identity-not-derivable-from-response",
+        "count": 1,
+        "name": "源能音感仪·测五",
+        "itemType": "武器",
+        "rarity": "3"
+      },
+      "recordKey": "143d153de64b5211"
+    }
+  ]
+}

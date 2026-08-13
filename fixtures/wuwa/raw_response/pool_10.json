@@ -1,0 +1,60 @@
+{
+  "code": 0,
+  "message": "success",
+  "data": [
+    {
+      "cardPoolType": "10",
+      "resourceId": 21030043,
+      "qualityLevel": 3,
+      "resourceType": "武器",
+      "name": "远行者佩枪·洞察",
+      "count": 1,
+      "time": "2101-01-06T21:26:34"
+    },
+    {
+      "cardPoolType": "10",
+      "resourceId": 21040013,
+      "qualityLevel": 3,
+      "resourceType": "武器",
+      "name": "暗夜臂铠·夜芒",
+      "count": 1,
+      "time": "2101-01-06T21:26:34"
+    },
+    {
+      "cardPoolType": "10",
+      "resourceId": 1504,
+      "qualityLevel": 4,
+      "resourceType": "角色",
+      "name": "灯灯",
+      "count": 1,
+      "time": "2101-01-06T21:26:34"
+    },
+    {
+      "cardPoolType": "10",
+      "resourceId": 21030013,
+      "qualityLevel": 3,
+      "resourceType": "武器",
+      "name": "暗夜佩枪·暗星",
+      "count": 1,
+      "time": "2101-01-06T21:26:34"
+    },
+    {
+      "cardPoolType": "10",
+      "resourceId": 21010013,
+      "qualityLevel": 3,
+      "resourceType": "武器",
+      "name": "暗夜长刃·玄明",
+      "count": 1,
+      "time": "2101-01-06T21:26:34"
+    },
+    {
+      "cardPoolType": "10",
+      "resourceId": 21050023,
+      "qualityLevel": 3,
+      "resourceType": "武器",
+      "name": "源能音感仪·测五",
+      "count": 1,
+      "time": "2101-01-06T21:26:34"
+    }
+  ]
+}

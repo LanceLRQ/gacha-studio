@@ -9,5 +9,6 @@
  */
 export const plugins: Array<() => Promise<unknown>> = [
   () => import("./genshin/manifest.ts"),
+  () => import("./wuwa/manifest.ts"),
   // 新插件在此追加一行
 ];

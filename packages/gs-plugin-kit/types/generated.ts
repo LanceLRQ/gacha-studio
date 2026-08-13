@@ -50,6 +50,7 @@ count: number, name?: string, itemType?: string, rarity?: string, stableId?: str
 export type TzOrigin = "source" | "region" | "user" | "assumed";
 export type MetaState = "complete" | "pending" | "unresolvable";
 export type RecordSource = "packet" | "ocr" | "officialApi" | "import";
+export type BannerIdentitySource = "response" | "query";
 export type RecordKey = string;
 export type GachaRecord = { id: number, accountId: number, bannerKey: string, pityGroup: string, recordKey: RecordKey, lang?: string, 
 /**

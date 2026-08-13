@@ -93,6 +93,16 @@ importers:
         specifier: 'catalog:'
         version: 6.0.3
 
+  plugins/wuwa:
+    dependencies:
+      gs-plugin-kit:
+        specifier: workspace:*
+        version: link:../../packages/gs-plugin-kit
+    devDependencies:
+      typescript:
+        specifier: 'catalog:'
+        version: 6.0.3
+
   web:
     dependencies:
       '@fontsource/ibm-plex-sans':

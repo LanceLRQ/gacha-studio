@@ -22,8 +22,8 @@ pub use collect::{
 pub use error::{AcquireError, Dependency, GsError, NetworkError, NoCredentialReason};
 pub use pity::{GuaranteeRule, PityGroup, ProbabilityCurve};
 pub use record::{
-    BannerBaseline, BannerSpec, DrawCountingConfig, GachaRecord, HttpMethod, LocalizedText,
-    MetaState, MetadataEntry, Platform, RareEventRef, RaritySpec, RecordSource, RequestTemplate,
-    RetentionPolicy, TzOrigin, UnifiedRecordFields,
+    BannerBaseline, BannerIdentitySource, BannerSpec, DrawCountingConfig, GachaRecord, HttpMethod,
+    LocalizedText, MetaState, MetadataEntry, Platform, RareEventRef, RaritySpec, RecordSource,
+    RequestTemplate, RetentionPolicy, TzOrigin, UnifiedRecordFields,
 };
 pub use record_key::RecordKey;

@@ -21,12 +21,13 @@
 //! 按依赖关系排序。
 
 use gs_core::{
-    AcquireError, BackoffKind, BannerBaseline, BannerSpec, Dependency, DrawCountingConfig,
-    ErrorSemantic, GachaRecord, GameClientSize, GuaranteeRule, HostEnv, HttpMethod, LocalizedText,
-    MetaState, MetadataEntry, NetworkError, NoCredentialReason, PityGroup, Platform,
-    PreconditionLevel, PreconditionStatus, ProbabilityCurve, RareEventRef, RaritySpec,
-    RateLimitConfig, RawTimeConvention, RecordKey, RecordSource, RequestTemplate, RetentionPolicy,
-    RetryConfig, StopCondition, TimeConfig, TimezoneSource, TzOrigin, UnifiedRecordFields,
+    AcquireError, BackoffKind, BannerBaseline, BannerIdentitySource, BannerSpec, Dependency,
+    DrawCountingConfig, ErrorSemantic, GachaRecord, GameClientSize, GuaranteeRule, HostEnv,
+    HttpMethod, LocalizedText, MetaState, MetadataEntry, NetworkError, NoCredentialReason,
+    PityGroup, Platform, PreconditionLevel, PreconditionStatus, ProbabilityCurve, RareEventRef,
+    RaritySpec, RateLimitConfig, RawTimeConvention, RecordKey, RecordSource, RequestTemplate,
+    RetentionPolicy, RetryConfig, StopCondition, TimeConfig, TimezoneSource, TzOrigin,
+    UnifiedRecordFields,
 };
 use std::fs;
 use std::path::PathBuf;
@@ -66,6 +67,11 @@ fn main() {
         ("TzOrigin", TzOrigin::decl(&cfg)),
         ("MetaState", MetaState::decl(&cfg)),
         ("RecordSource", RecordSource::decl(&cfg)),
+        // BannerIdentitySource 不是 GachaRecord 的字段类型（不影响它的形状），
+        // 但由 packages/gs-plugin-kit/manifest.ts 的
+        // CredentialedApiPipelineParams.bannerIdentity 引用，且与本节其余
+        // record.rs 判别联合同源，因此归在这一组导出，不单开一个分组。
+        ("BannerIdentitySource", BannerIdentitySource::decl(&cfg)),
         // RecordKey 未列在原始导出清单里，但 GachaRecord.record_key 直接引用它，
         // 不导出的话生成文件里会出现指向未定义类型的引用，因此补上。
         ("RecordKey", RecordKey::decl(&cfg)),

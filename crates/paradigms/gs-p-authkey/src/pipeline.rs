@@ -291,6 +291,13 @@ pub struct AuthkeyParamsJson {
     pub error_map: HashMap<String, String>,
     #[serde(rename = "stopCondition")]
     pub stop_condition: Option<StopConditionJson>,
+    /// 记录的卡池归属以哪一侧为准，缺省 `Response`（历史行为不变）。消费点
+    /// 见 [`AuthkeyApiPipeline::collect_banner`] 里选择 `banner_key`/
+    /// `pity_group` 来源那一段；两个游戏的完整对照证据见
+    /// `gs_core::BannerIdentitySource` 的文档注释与
+    /// `packages/gs-plugin-kit/manifest.ts` 同名字段的文档。
+    #[serde(rename = "bannerIdentity", default)]
+    pub banner_identity: Option<gs_core::BannerIdentitySource>,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -1750,11 +1757,37 @@ impl<'rt> AuthkeyApiPipeline<'rt> {
             let mut fields_values: Vec<Value> = Vec::with_capacity(list.len());
             let mut fields_list: Vec<UnifiedRecordFieldsJson> = Vec::with_capacity(list.len());
             for raw in &list {
-                let fields_value = self.plugin_runtime.call(
+                let mut fields_value = self.plugin_runtime.call(
                     &self.plugin_id,
                     "manifest.fields.extractRecord",
                     std::slice::from_ref(raw),
                 )?;
+
+                // `bannerIdentity: "query"` 时，**在这里**就把 bannerId 换成本次
+                // 查询实际使用的卡池，而不是等到下面第三阶段建 GachaRecord 时才
+                // 覆盖 banner_key——因为夹在中间的第二阶段 `deriveRecordKeys`
+                // 也要读这个字段。
+                //
+                // 覆盖晚一步的后果不是"卡池归属错"（那一处最终还是会被改对），
+                // 而是**记录去重键少了卡池这一维**：插件此时只能拿到一个与卡池
+                // 无关的占位值，`hash(bannerId, time, itemId, 组内序位)` 在两个
+                // 不同卡池之间就失去了区分度。鸣潮的十连整组共用同一个时间戳，
+                // 而 3★ 武器同时出现在角色池与武器池——两池在同一秒各出一次同一
+                // 件 3★ 且组内序位相同时，两条记录会算出**相同的 record_key**，
+                // 被 `UNIQUE(account_id, record_key)` + `INSERT OR IGNORE` 静默
+                // 吞掉一条：不报错、不进日志，用户只看到"少了一条"。
+                //
+                // 提前到这里之后，插件不需要为"响应里没有卡池身份"编造任何占位
+                // 值——它照常读响应，宿主负责把这一维补成权威值，
+                // `deriveRecordKeys` / `banner_key` / `pity_group` 三处天然一致。
+                if matches!(
+                    self.params.banner_identity,
+                    Some(gs_core::BannerIdentitySource::Query)
+                ) && let Some(object) = fields_value.as_object_mut()
+                {
+                    object.insert("bannerId".to_string(), Value::String(banner_id.to_string()));
+                }
+
                 let fields: UnifiedRecordFieldsJson = serde_json::from_value(fields_value.clone())
                     .map_err(|err| {
                         PipelineError::Json(format!("extractRecord 返回值不满足契约：{err}"))
@@ -1793,11 +1826,20 @@ impl<'rt> AuthkeyApiPipeline<'rt> {
                 let (occurred_at, tz_origin, tz_offset_min) =
                     Self::normalize_time(&fields.time, tz_offset_hours)?;
 
+                // 此处直接用 fields.banner_id，**不再**二次判别 banner_identity：
+                // `Query` 模式下这个字段已经在第一阶段 extractRecord 之后被换成
+                // 本次查询实际使用的卡池了（见那里的说明），`Response`/缺省模式
+                // 下它本来就是响应产出的值。两种模式在这里已经收敛成同一个权威
+                // 取值，再判一次只会制造第二处真相来源——而 banner_key 与
+                // pity_group 一旦取自不同来源，记录的卡池归属就会和它的保底组
+                // 对不上，那是比两处都错更难查的 bug。
+                let banner_identity_key = fields.banner_id.as_str();
+
                 batch.push(GachaRecord {
                     id: 0,
                     account_id,
-                    banner_key: fields.banner_id.clone(),
-                    pity_group: self.pity_group_for(&fields.banner_id),
+                    banner_key: banner_identity_key.to_string(),
+                    pity_group: self.pity_group_for(banner_identity_key),
                     record_key: RecordKey::new(record_key_text)?,
                     lang: lang.map(str::to_string),
                     occurred_at,
@@ -3716,6 +3758,232 @@ mod tests {
                 "x", false, false
             )
             .is_ok()
+        );
+    }
+
+    // ============================================================
+    // bannerIdentity（M2-S4）：banner_key/pity_group 取查询还是取响应
+    // ============================================================
+    //
+    // 三个用例共用同一份 fixture（301_page_1.json：5 条记录，4 条
+    // gacha_type="301"、1 条 gacha_type="400"，实测分布见
+    // gs_core::BannerIdentitySource 文档注释）+ 一页空响应终止翻页，
+    // 不复用 full_pipeline_run_matches_fixture_expectations 的三页设置——
+    // 这三个用例只关心 banner_key/pity_group 的分布，不需要验证完整分页
+    // 行为，两页足够且更聚焦。
+
+    /// `bannerIdentity: "query"`：即使响应里混回了别的卡池的记录（fixture
+    /// 里那条 gacha_type="400"），落库的 `banner_key` 也必须是本次查询实际
+    /// 使用的 banner（"301"），不是响应自带的 `gacha_type`。这是
+    /// `gs_core::BannerIdentitySource` 文档注释里鸣潮那条真实行为的直接
+    /// 模拟——声明 query 就是要求宿主无条件信查询参数，哪怕响应看起来
+    /// "混池"了。
+    #[test]
+    fn collect_banner_uses_query_banner_id_when_banner_identity_is_query() {
+        let storage = Storage::open_in_memory().expect("应当能打开内存数据库");
+        let (runtime, account_id) = setup_pipeline_and_account(&storage);
+        let manifest_value = genshin_manifest_with(|v| {
+            v["collect"]["params"]["bannerIdentity"] = serde_json::json!("query");
+        });
+        let pipeline =
+            AuthkeyApiPipeline::from_manifest_json_for_test("genshin", &runtime, manifest_value)
+                .expect("应当能构造 pipeline");
+
+        let credential_url = "https://public-operation-hk4e.mihoyo.com/gacha_info/api/getGachaLog?authkey=FAKE&lang=zh-cn";
+        let transport = FixtureTransport::new();
+        transport.register(
+            pipeline
+                .build_page_url(credential_url, "301", 1)
+                .expect("URL 构造应当成功"),
+            read_fixture("fixtures/genshin/raw_response/301_page_1.json"),
+        );
+        transport.register(
+            pipeline
+                .build_page_url(credential_url, "301", 2)
+                .expect("URL 构造应当成功"),
+            read_fixture("fixtures/genshin/raw_response/301_page_3_empty.json"),
+        );
+
+        let repo = storage.repository();
+        let outcome = pipeline
+            .collect_banner(
+                &transport,
+                &repo,
+                account_id,
+                "301",
+                credential_url,
+                "100000000",
+                None,
+                Some("zh-cn"),
+                1_754_812_801_000,
+            )
+            .expect("采集应当成功");
+        assert_eq!(outcome.records_inserted, 5);
+
+        let records_301 = repo
+            .find_records_by_banner(account_id, "301")
+            .expect("查询应当成功");
+        let records_400 = repo
+            .find_records_by_banner(account_id, "400")
+            .expect("查询应当成功");
+        assert_eq!(
+            records_301.len(),
+            5,
+            "query 模式下全部记录都应归到查询参数 \"301\"，包括响应里 gacha_type=400 的那条"
+        );
+        assert_eq!(
+            records_400.len(),
+            0,
+            "query 模式下不应有任何记录落到响应自带的 \"400\"——那条记录必须被查询参数覆盖"
+        );
+
+        // ★ 覆盖必须发生在 record_key 生成**之前**，不能只改最终落库的
+        // banner_key。genshin 的 deriveRecordKey 产出 `${bannerId}:${stableId}`，
+        // 因此 record_key 的前缀直接暴露了 hook 当时看到的是哪个 bannerId：
+        //   - 覆盖在 hook 之前（正确）→ 那条响应 gacha_type=400 的记录，key 是 "301:..."
+        //   - 覆盖在 hook 之后（错误）→ key 仍是 "400:..."，而 banner_key 已是 "301"
+        // 后者两处不一致，且更要命的是：`bannerIdentity: "query"` 的游戏里插件
+        // 拿不到真实卡池，key 就少了卡池这一维，两个卡池在同一秒出同一件物品时
+        // 会算出相同的 record_key，被 UNIQUE + INSERT OR IGNORE 静默吞掉一条。
+        // 没有这条断言，把覆盖挪回下游不会让任何测试变红。
+        assert!(
+            records_301
+                .iter()
+                .all(|record| record.record_key.as_str().starts_with("301:")),
+            "record_key 必须由被覆盖后的 bannerId 生成（前缀 \"301:\"），\
+             说明 query 覆盖发生在 deriveRecordKey 之前；实际：{:?}",
+            records_301
+                .iter()
+                .map(|record| record.record_key.as_str())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// 缺省（不声明 `bannerIdentity`）：`banner_key` 必须继续取响应自带的
+    /// `gacha_type`，混池的那条记录（`gacha_type: "400"`）绝不能被查询参数
+    /// "301" 覆盖——这是本次改动前唯一真实存在的行为，必须原样保留。用真实、
+    /// 未经修改的 genshin manifest（不经过 genshin_manifest_with 覆盖任何
+    /// 字段）构造 pipeline，是防止新增的 query 模式误伤原神现有行为的
+    /// 回归用例。
+    #[test]
+    fn collect_banner_defaults_to_response_banner_id_and_keeps_mixed_pool_fixture_correct() {
+        let storage = Storage::open_in_memory().expect("应当能打开内存数据库");
+        let (runtime, account_id) = setup_pipeline_and_account(&storage);
+        let pipeline =
+            AuthkeyApiPipeline::new("genshin", &runtime, RateLimitPolicy::zero_delay_for_tests())
+                .expect("应当能构造 pipeline");
+
+        let credential_url = "https://public-operation-hk4e.mihoyo.com/gacha_info/api/getGachaLog?authkey=FAKE&lang=zh-cn";
+        let transport = FixtureTransport::new();
+        transport.register(
+            pipeline
+                .build_page_url(credential_url, "301", 1)
+                .expect("URL 构造应当成功"),
+            read_fixture("fixtures/genshin/raw_response/301_page_1.json"),
+        );
+        transport.register(
+            pipeline
+                .build_page_url(credential_url, "301", 2)
+                .expect("URL 构造应当成功"),
+            read_fixture("fixtures/genshin/raw_response/301_page_3_empty.json"),
+        );
+
+        let repo = storage.repository();
+        let outcome = pipeline
+            .collect_banner(
+                &transport,
+                &repo,
+                account_id,
+                "301",
+                credential_url,
+                "100000000",
+                None,
+                Some("zh-cn"),
+                1_754_812_801_000,
+            )
+            .expect("采集应当成功");
+        assert_eq!(outcome.records_inserted, 5);
+
+        let records_301 = repo
+            .find_records_by_banner(account_id, "301")
+            .expect("查询应当成功");
+        let records_400 = repo
+            .find_records_by_banner(account_id, "400")
+            .expect("查询应当成功");
+        assert_eq!(
+            records_301.len(),
+            4,
+            "缺省 Response 模式：5 条记录里 1 条 gacha_type=400，其余 4 条归 301，\
+             这条行为不能被本次改动破坏"
+        );
+        assert_eq!(
+            records_400.len(),
+            1,
+            "缺省 Response 模式：混池的那条记录必须落到响应真实的 400，不能被查询参数 301 覆盖"
+        );
+    }
+
+    /// `banner_key` 与 `pity_group` 必须取自**同一个**来源，不能一处用
+    /// 查询、一处用响应——那种"各用各的"组合会让记录的卡池归属与它的保底组
+    /// 不一致，是比两处都错更难查的 bug。
+    ///
+    /// 构造两个互不相同的保底组：`groupA` 只含 "301"，`groupB` 只含
+    /// "400"。若实现有 bug（`banner_key` 信查询、`pity_group` 却仍信响应），
+    /// 混池的那条记录会被错误地判给 `groupB`；只有两处一致地信查询参数，
+    /// 它才会落进与其余记录相同的 `groupA`。
+    #[test]
+    fn collect_banner_derives_banner_key_and_pity_group_from_the_same_source() {
+        let storage = Storage::open_in_memory().expect("应当能打开内存数据库");
+        let (runtime, account_id) = setup_pipeline_and_account(&storage);
+        let manifest_value = genshin_manifest_with(|v| {
+            v["collect"]["params"]["bannerIdentity"] = serde_json::json!("query");
+            v["pityGroups"] = serde_json::json!([
+                { "key": "groupA", "members": ["301"] },
+                { "key": "groupB", "members": ["400"] },
+            ]);
+        });
+        let pipeline =
+            AuthkeyApiPipeline::from_manifest_json_for_test("genshin", &runtime, manifest_value)
+                .expect("应当能构造 pipeline");
+
+        let credential_url = "https://public-operation-hk4e.mihoyo.com/gacha_info/api/getGachaLog?authkey=FAKE&lang=zh-cn";
+        let transport = FixtureTransport::new();
+        transport.register(
+            pipeline
+                .build_page_url(credential_url, "301", 1)
+                .expect("URL 构造应当成功"),
+            read_fixture("fixtures/genshin/raw_response/301_page_1.json"),
+        );
+        transport.register(
+            pipeline
+                .build_page_url(credential_url, "301", 2)
+                .expect("URL 构造应当成功"),
+            read_fixture("fixtures/genshin/raw_response/301_page_3_empty.json"),
+        );
+
+        let repo = storage.repository();
+        pipeline
+            .collect_banner(
+                &transport,
+                &repo,
+                account_id,
+                "301",
+                credential_url,
+                "100000000",
+                None,
+                Some("zh-cn"),
+                1_754_812_801_000,
+            )
+            .expect("采集应当成功");
+
+        let records_301 = repo
+            .find_records_by_banner(account_id, "301")
+            .expect("查询应当成功");
+        assert_eq!(records_301.len(), 5, "query 模式下全部记录都应归到 \"301\"");
+        assert!(
+            records_301.iter().all(|r| r.pity_group == "groupA"),
+            "banner_key 与 pity_group 必须取自同一来源：全部记录的 pity_group 都应是查询参数 \
+             \"301\" 对应的 groupA，不能有记录因为响应里的 gacha_type=400 而被错误地判给 groupB"
         );
     }
 }

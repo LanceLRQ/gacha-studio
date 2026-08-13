@@ -1,0 +1,15 @@
+{
+  "name": "wuwa",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "test": "node --experimental-strip-types fixture.test.ts && node --experimental-strip-types hooks.test.ts"
+  },
+  "dependencies": {
+    "gs-plugin-kit": "workspace:*"
+  },
+  "devDependencies": {
+    "typescript": "catalog:"
+  }
+}

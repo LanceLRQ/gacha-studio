@@ -59,6 +59,7 @@ import type {
   PreconditionLevel,
   PreconditionStatus,
   HostEnv,
+  BannerIdentitySource,
 } from "./types/generated";
 
 // ============================================================
@@ -256,6 +257,36 @@ export interface CredentialedApiPipelineParams {
   errorMap?: Record<string, ErrorSemantic>;
   /** 终止条件，默认 `{ kind: "emptyPage" }`。 */
   stopCondition?: StopCondition;
+  /**
+   * 记录的卡池归属以哪一侧为准，缺省 `"response"`（现有行为不变）。
+   *
+   * `fields.extractRecord` 的签名是 `(raw: unknown) => UnifiedRecordFields`
+   * ——**没有任何参数能告诉它这批记录查的是哪个池**，给它加参数是破坏性
+   * 变更，不采纳。两个已实证的游戏行为根本不同，任何一方都不能靠猜：
+   *
+   * - **原神——响应携带权威的卡池身份，且可能与查询参数不同。** 实测
+   *   `fixtures/genshin/raw_response/301_page_1.json`：查询 `gacha_type=301`，
+   *   响应里 `gacha_type` 分布是 `{'301': 4, '400': 1}`——一次查询会混回
+   *   其它卡池的记录。此时若用查询时的 banner 覆盖，那条 400 记录会被错误
+   *   归到 301，因此原神**必须**声明 `"response"`。
+   * - **鸣潮——响应不携带可还原的卡池身份。** API 响应元素的 `cardPoolType`
+   *   字段实测是中文展示标签（如 `"角色精准调谐"`），不是插件
+   *   `banners[].id` 用的 `PoolType` 数字；只有映射表跟不上的新池才会降级
+   *   成数字串（实测 `PoolType=10` 时回 `"10"`）。而鸣潮一次查询只返回
+   *   一个池的全量记录，不存在混池，因此查询时的 banner 才是权威，鸣潮
+   *   **必须**声明 `"query"`，见 `plugins/wuwa/manifest.ts` 的实际声明与
+   *   `fields.extractRecord` 里 `bannerId` 字段旁的说明。
+   *
+   * ⚠️ **声明 `"query"` 的前提是「一次查询只返回一个卡池的记录」。** 若某
+   * 游戏其实会混池却声明了 `"query"`，被混进来的记录会被**静默错误归池**
+   * ——不报错、不进日志，保底统计与卡池筛选会一起错，且极难定位。原神就是
+   * 会混池的真实例子，它必须用 `"response"`。
+   *
+   * 宿主侧的消费点见 `crates/paradigms/gs-p-authkey/src/pipeline.rs` 的
+   * `AuthkeyApiPipeline::collect_banner`——`banner_key`/`pity_group` 两处
+   * 落库字段必须取自同一个来源，不能一处用查询、一处用响应。
+   */
+  bannerIdentity?: BannerIdentitySource;
 }
 
 /**

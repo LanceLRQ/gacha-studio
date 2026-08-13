@@ -113,6 +113,9 @@ export const metaStateSchema = z.enum(["complete", "pending", "unresolvable"]);
 
 export const recordSourceSchema = z.enum(["packet", "ocr", "officialApi", "import"]);
 
+/** 对应 BannerIdentitySource——`CredentialedApiPipelineParams.bannerIdentity` 的取值。 */
+export const bannerIdentitySourceSchema = z.enum(["response", "query"]);
+
 export const recordKeySchema = z.string();
 
 /** 对应 GachaRecord——宿主归一化 + 入库后的记录形态，非插件直接产出的数据。 */

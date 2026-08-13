@@ -1,0 +1,159 @@
+# 鸣潮插件 fixture 元信息。
+#
+# ⚠️ **与 fixtures/genshin/ 的性质不同**：原神那套是手工构造、从未接触真实
+# 账号数据；本目录的记录样本**裁自真实存档**（3371 条中选取 25 条），因此
+# 脱敏不是走过场，零命中也不构成安全证明——见文末「脱敏验证」一节。
+
+[game]
+id = "wuwa"
+displayName = "鸣潮"
+apiVersionNote = """
+raw_response/*.json 模拟的是 POST gmserver-api.aki-game2.com/gacha/record/query
+的响应形状：{ code, message, data: [...] }，data 元素对齐 WWGachaExport 的
+**Models/GachaAPI.cs 里的 KRAPIItem**（不是 Models/GachaData.cs）。
+"""
+
+# ============================================================
+# ⚠️ 本目录的第一版建模错了，记在这里而不是悄悄改掉
+# ============================================================
+#
+# 第一版 raw_response/*.json 是直接从本地存档裁样得来的，于是照抄了**存档**
+# 的形状：PascalCase 字段名（`ResourceId`/`CardPoolType`/`Time`…），并且带了
+# 一个 `CardPoolId` 字段。两处都错，同一个根因——**把本地存档格式当成了 API
+# 响应格式**。这两者是不同的类型：
+#
+#   - API 响应元素 = `Models/GachaAPI.cs` 的 `KRAPIItem`，每个字段都带
+#     `[JsonProperty("...")]` 注解，线上是 **camelCase**（`cardPoolType` /
+#     `resourceId` / `qualityLevel` / `resourceType` / `name` / `count` / `time`），
+#     **共 7 个字段，没有 `cardPoolId`**。
+#   - 本地存档元素 = `Models/GachaData.cs` 的 `GachaData`，PascalCase，且**多出
+#     一个 `CardPoolId`**——源码 `UpdateGachaDataDialogViewModel.cs:301` 是
+#     `CardPoolId = cardPoolId`，赋的是从**请求 URL** 的 `resources_id` 参数
+#     解析出来的局部变量，**不是响应里的字段**。
+#
+# 为什么这个错误值得留档：它不会被任何一道门拦住。字段名大小写错了，
+# `extractRecord` 读到的全是 `undefined`，但 fixture 与插件如果“错得一致”，
+# 契约测试照样全绿——而真实采集会产出一批空字段记录。这与本项目反复记录的
+# 「门之所以通过，是因为它什么都没检查」是同一类，只是换到了 fixture 上：
+# **fixture 建模错了，测试就在验证一个不存在的世界。**
+#
+# 发现路径：写插件的一方读 `Models/GachaAPI.cs` 源码后指出与 fixture 不符，
+# 由主进程复核源码确认。再次印证本项目那条硬约束——**调研结论必须用参考项目
+# 的真实源码校准**，这次被校准掉的是 fixture 本身。
+
+[account]
+# 本目录不含任何账号级字段——UID / ServerID / ServerArea 是存档的顶层字段，
+# 而 fixture 只保留记录数组，账号级字段整体未被裁入。
+uid = "（不适用：fixture 不含账号级字段）"
+
+[fixture]
+collectedAt = "2026-08-13"
+sanitized = "true"
+sanitizedBy = "主进程手工裁样 + 脱敏，随后过 gs-sanitize 复核 + 六项正向核对"
+
+# ============================================================
+# ★ 已知未验证项：API 的 Time 线格式
+# ============================================================
+#
+# 本目录的 Time 用 ISO 8601（`2099-01-01T00:00:00`），**但这不是已验证的
+# API 线格式**，而是本地存档的形状。查证过程：
+#
+#   - WWGachaExport 的 Models/GachaData.cs:18 里 `Time` 是 **DateTime 强类型**，
+#     不是 string——API 发来的线格式在反序列化那一刻就被吃掉了。
+#   - 存档里的 ISO 格式是 Newtonsoft 序列化 DateTime 的默认产物，反推不出
+#     API 到底发的什么。
+#   - 该工具反序列化 API 响应时设了 DateFormatString = "yyyy/MM/dd hh:mm:ss"
+#     （斜杠分隔），暗示 API 可能发斜杠格式；但 Newtonsoft 的 DateFormatString
+#     在**反序列化**路径上基本不起作用，这条证据不足以定论。
+#   - docs/_internal/capture/ 下没有鸣潮抓包；research/03 §3.1 的样本是**存档**
+#     结构不是 API 响应，同样证明不了。
+#
+# 为什么这件事必须显式记下来：record_key = hash(时间 + 物品 + 序位)。若 key
+# 直接哈希原始时间字符串而我们猜错了线格式，fixture 测试会**全绿**，但首次
+# 真实采集产出的 key 与预期全不相同——不报错，只会全量重复入库。
+#
+# 应对：插件的 deriveRecordKeys **先把时间规范化再哈希**，让 key 与线格式
+# 无关。raw_response/pool_1_slash_time.json 就是这条保护的机械验证——它与
+# pool_1.json 是同一批记录、只把时间换成斜杠写法，两者产出的 key 数组必须
+# 逐项相同。
+
+[[samples]]
+path = "raw_response/pool_1.json"
+count = 17
+note = """
+PoolType=1（角色活动唤取）。刻意选中真实存档里最难的几种情形：
+  - 同秒同物品 5 连碰撞组 ×1 —— 全库最大的碰撞组，组内记录逐字段完全相同，
+    只能靠序位区分
+  - 十连组 ×1（10 条同秒记录）—— 十连天然同秒，是碰撞的主要来源
+  - 5★ 记录 ×2
+数组顺序为**倒序**（最新在前），与真实 API 一致；参考实现取回后用
+apiData.Data.Reverse() 翻成正序才使用，本地存档存的是翻转后的正序。
+"""
+
+[[samples]]
+path = "variants/pool_1_slash_time.json"
+count = 17
+note = """
+与 pool_1.json 同一批记录，只把 time 从 ISO 改成 `2099/01/01 00:00:00` 斜杠
+写法。用于断言 record_key 与时间线格式无关，见上方「已知未验证项」。
+
+⚠️ **刻意放在 `variants/` 而不是 `raw_response/`**：`assertPluginFixture` 会把
+`raw_response/*.json` 下的**全部**文件按文件名排序后拼成**一批**，只调一次
+`hooks.deriveRecordKeys`（`packages/gs-plugin-kit/testkit/index.ts` 的流程说明
+第 3~4 步）。本文件与 pool_1.json 是同一批记录，合批后规范化时间逐条相同，会
+互相干扰彼此的「批次内序位」计数——实测两批第一条记录合批后算出的 key 并不
+相等。那样的 expected 快照固化的是一个**生产中不会出现**的人造批次。
+
+因此本文件移出 `raw_response/`，改由 `plugins/wuwa/hooks.test.ts` 的用例 5
+**独立读取、独立调用两次** `deriveRecordKeys` 再比较——这才是「线格式无关」
+这条不变量真正被验证的方式。
+
+> 📌 顺带记下一个 testkit 层面的模型不一致（不在 M2-S4 范围内，另行处理）：
+> `assertPluginFixture` 把**所有卡池**的响应合成一批调用 `deriveRecordKeys`，
+> 而宿主真实行为是 `derive_record_keys_for_page` **逐页、且在单个卡池内**调用
+> （`crates/paradigms/gs-p-authkey/src/pipeline.rs` 的 `collect_banner`），
+> 从不跨卡池合批。对鸣潮这种「序位参与 record_key」的插件，两者算出的序位
+> 分组并不等价，契约测试因此比生产环境更严苛（也更不真实）。
+"""
+
+[[samples]]
+path = "raw_response/pool_10.json"
+count = 6
+note = """
+PoolType=10（角色联动唤取）。取它是因为 CardPoolType 在这个池上**降级成了
+数字字符串 "10"** 而不是中文名——工具的映射表跟不上新卡池时的真实表现。
+这条印证「以 PoolType 数字为主键、CardPoolType 仅作展示」不是假设性设计：
+把中文名当键，同一个池会在不同工具版本下分裂成两个。
+"""
+
+[[samples]]
+path = "credential/client_log.sample"
+note = """
+模拟鸣潮 Client.log：前 3 字节是被丢弃的头，其后逐字节异或编码（编码器是
+解码器的真反函数——解码按**字节自身值**的奇偶选 0xA5/0xEF，故编码时分支
+条件翻转）。**内容全部伪造**，不来自任何真实日志。
+故意放了两个可匹配 urlPattern 的 URL，靠后那个才是完整链接——用于验证
+按行**倒序**扫描确实取到最新的一条，而不是第一条。
+"""
+
+# ============================================================
+# 脱敏验证（两道，缺一不可）
+# ============================================================
+#
+# ① gs-sanitize 扫描：3 个文件命中 0 处。
+#
+# ② 正向逐项核对：**零命中不构成安全证明**，只说明「这版规则集没匹配上」。
+#    AUDIT-2026-08-12-M2鸣潮真实存档实测.md §四 记过一次真实案例——早期版本
+#    的 gs-sanitize 对含 9 位 UID 与 32 位十六进制 ServerID 的鸣潮结构样本
+#    报告零命中，是规则下限定得太窄（19 位数字），不是数据本身干净。
+#    因此另做了六项正向核对，逐项确认真实值确实不在文件里：
+#      真实 UID / 真实 ServerID / 真实 ServerArea / 真实 CardPoolId /
+#      真实时间戳 / authkey 等凭据字段名
+#    结果：3 个文件 × 6 项全部未命中。
+#
+# 具体脱敏手法：
+#   - 账号级字段（UID/ServerID/ServerArea）整体未裁入
+#   - 时间**整体平移**到 2099-01-01 基准，保留相对间隔与同秒分组结构——
+#     既保住了碰撞组这个测试的核心性质，又抹掉了真实游玩时刻
+#   - CardPoolId 非空值替换为全 f 占位
+#   - 物品名 / ResourceId / QualityLevel 保留：这些是游戏内容，不是账号数据
