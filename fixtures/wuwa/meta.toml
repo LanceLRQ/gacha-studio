@@ -42,9 +42,19 @@ raw_response/*.json 模拟的是 POST gmserver-api.aki-game2.com/gacha/record/qu
 # 的真实源码校准**，这次被校准掉的是 fixture 本身。
 
 [account]
-# 本目录不含任何账号级字段——UID / ServerID / ServerArea 是存档的顶层字段，
-# 而 fixture 只保留记录数组，账号级字段整体未被裁入。
-uid = "（不适用：fixture 不含账号级字段）"
+# 本小节描述的是 `raw_response/` 与 `variants/`：那两处只保留记录数组，
+# UID / ServerID / ServerArea 这些存档顶层字段整体未被裁入，所以「不适用」。
+#
+# ⚠️ **`archive/` 不在此列**（2026-08-13 随 M2-S6 加入后补正）：存档格式的
+# 定义就包含账号级字段，剥掉它就不再是这个格式、适配器也无从解析。那三个
+# 字段在 `archive/wwgacha_archive.json` 里确实存在，但**全部是脚本内硬编码
+# 的字面占位值**（`100000000` / `"fixture-server-id"` / `"fixture-server-area"`），
+# 不来自任何真实数据——详见本文件下方 `archive/` 目录说明与「脱敏验证」两节。
+#
+# 本行的取值只被 `assertPluginFixture` 读去构造 `hooks.resolveTimezone` 的
+# 上下文（`packages/gs-plugin-kit/testkit/index.ts:321`）。鸣潮插件没有声明
+# 该 hook，因此这个值在契约测试里不参与任何计算，保持原样。
+uid = "（不适用：raw_response / variants 不含账号级字段；archive 见下）"
 
 [fixture]
 collectedAt = "2026-08-13"
@@ -137,21 +147,133 @@ note = """
 """
 
 # ============================================================
-# 脱敏验证（两道，缺一不可）
+# archive/ 目录 —— 本地存档形状（GameUser），M2-S6 交换格式适配器的夹具
 # ============================================================
 #
-# ① gs-sanitize 扫描：3 个文件命中 0 处。
+# 与上面 raw_response/ 的关系是本目录的核心不变量，必须显式记录：
+# `archive/wwgacha_archive.json` 的记录与 `raw_response/pool_1.json`、
+# `raw_response/pool_10.json` **是同一批记录的不同形状**，这是刻意的——
+# 后续会有测试断言「同一批记录走采集路径（读 raw_response，模拟 API 响应）
+# 与走导入路径（读 archive，模拟本地存档导入）算出的 record_key 完全相同」。
+# 两个目录不是两份独立样本，是同一批记录的两种投影。
 #
-# ② 正向逐项核对：**零命中不构成安全证明**，只说明「这版规则集没匹配上」。
-#    AUDIT-2026-08-12-M2鸣潮真实存档实测.md §四 记过一次真实案例——早期版本
-#    的 gs-sanitize 对含 9 位 UID 与 32 位十六进制 ServerID 的鸣潮结构样本
-#    报告零命中，是规则下限定得太窄（19 位数字），不是数据本身干净。
-#    因此另做了六项正向核对，逐项确认真实值确实不在文件里：
-#      真实 UID / 真实 ServerID / 真实 ServerArea / 真实 CardPoolId /
-#      真实时间戳 / authkey 等凭据字段名
-#    结果：3 个文件 × 6 项全部未命中。
+# 本目录**没有重新接触任何真实存档**——生成方式是对已脱敏的
+# raw_response/pool_1.json（17 条）与 pool_10.json（6 条）做机械字段变换，
+# 脚本见下，全程只读这两个已入库文件。
 #
-# 具体脱敏手法：
+# 转换规则（KRAPIItem → GachaData，字段形状分野见上方「第一版建模错了」）：
+#   - camelCase → PascalCase 重命名：cardPoolType→CardPoolType /
+#     resourceId→ResourceId / qualityLevel→QualityLevel /
+#     resourceType→ResourceType / name→Name / count→Count / time→Time
+#   - 类型原样保留（数字仍是数字，字符串仍是字符串）——不做字符串化，
+#     这是 AUDIT-2026-08-12-M2鸣潮真实存档实测.md §2.1 实测纠正过的点
+#   - 补 `"CardPoolId": null`：对应真实存档 93.1%（3139/3371）的形态
+#     （§2.2）；本目录选择让 100% 记录都是 null，因为非空的 232 条其
+#     取值全库去重后只有 1 个 hash 字符串，携带该值没有额外测试价值，
+#     反而多一处需要脱敏的表面
+#   - 每池顺序反转：raw_response 是 API 响应的倒序（新→旧），存档是正序
+#     （旧→新）——参考实现取回 API 数据后调 apiData.Data.Reverse() 才落盘
+#   - 顶层 GachaPoolData 固定 13 个槽位（PoolType 1..13）：PoolType=1 装
+#     转换后的 pool_1 记录，PoolType=10 装转换后的 pool_10 记录，**其余
+#     11 个槽位是空数组 `[]`**——真实存档的形态是固定槽位、空池为空数组
+#     而非缺失键（§2.4），适配器必须能正确跳过而不是假设槽位非空
+#
+# 转换脚本（一次性，未入库，跑在会话临时目录）自校验了以下断言，全部通过：
+#   - 池 1 / 池 10 转换后条数与源文件一致（17 / 6），其余 11 池为空数组
+#   - 每条记录字段集合与顺序恰好等于 GachaData.cs 声明顺序（8 字段）
+#   - 反转确实发生：archive 每池首条 == 对应 raw_response 该池末条（反之亦然）
+#   - CardPoolId 全部为 JSON null；ResourceId/QualityLevel/Count 为数字类型
+#   - UID/ServerID/ServerArea 恰好等于脚本内写死的字面占位值
+#
+# 顶层账号字段是**占位值，不来自任何真实数据**：
+#   - UID = 100000000（数字类型，AUDIT §2.1 实测纠正——不是字符串；取值沿用
+#     fixtures/genshin/meta.toml 已有的假 UID 惯例，也是 gs-sanitize 的
+#     uid-field 规则本身的占位常量——见下方 ① 的幂等性说明，选它而不是随手
+#     写一个数字，是为了让「--write 重跑不改字节」这条断言成立）
+#   - ServerID = "fixture-server-id"
+#   - ServerArea = "fixture-server-area"
+# 三者均为脚本内字面量硬编码，脚本从未读取过 raw_response 之外的任何文件。
+#
+# ⚠️ **过程记录，不静默改掉**：本目录第一版把 UID 写成 900000001（当时的
+# 直觉是"一眼可见是假的"），跑 --write 幂等性实测时发现它会被 uid-field
+# 规则**改写**成 100000000（规则替换的是它自己的固定占位常量，不是"原样
+# 保留输入值"）——即第一版的 UID 在 --write 下**不是幂等的**，dry-run 报告
+# 的"命中"与"数据不变"之间存在落差，若不实测这条差异不会被发现。改用
+# 100000000 后重新实测，--write 对两个文件均写回 0 个文件、字节不变。
+# 与本文件多处"先实测再下结论"的记录方式一致，不覆盖这条修正过程。
+
+[[samples]]
+path = "archive/wwgacha_archive.json"
+count = 23
+note = """
+GameUser 形状的本地存档（PascalCase，三层嵌套）。由 raw_response/pool_1.json
+（17 条）与 pool_10.json（6 条）机械转换而来，共 23 条，规则见上方目录说明。
+13 个槽位全部存在，PoolType=1 与 10 有数据，其余 11 个为空数组。
+"""
+
+[[samples]]
+path = "archive/uigf_v4_negative.json"
+count = 1
+note = """
+⚠️ **伪造样本，不是真实 UIGF 导出**，本项目当前**没有** UIGF 适配器实现——
+本文件唯一用途是充当 wwgacha 适配器 `sniff()` 的反例（必须返回 No），不代表
+UIGF v4 的适配器已存在或已校准。
+
+顶层结构核对自 docs/example-projects/HoYo.Gacha/tauri/src/business/converters.rs：
+`info` 对象为 `UigfInfo`（1048-1054 行：`export_timestamp` / `export_app` /
+`export_app_version` / `version`），可选数组键为 `hk4e` / `hkrpg` / `nap` /
+`hk4e_ugc`（`Uigf` 结构体，1035-1045 行）。
+
+⚠️ **与本次任务下发的口径有一处出入，已按源码校准**：任务描述里把 `info`
+的版本字段写成 `uigf_version`，但源码里这个字段名是 `version`——`uigf_version`
+是**旧版**（v2.x~v3.x）`ClassicUigfInfo`（304-320 行）的字段名，v4 的
+`UigfInfo` 并没有这个字段，字段名换成了 `version`（测试用例 2274-2339 行的
+`"version": "v4.2"` 印证）。本文件按源码用 `version`，不是按任务描述的
+`uigf_version`——这与本项目反复强调的「调研结论必须用参考项目真实源码校准，
+不能照抄转述」是同一条硬约束的又一次应用。
+
+内容全部伪造：`uid`/雪花 ID `id` 字段直接取值为 gs-sanitize 自身两条规则的
+占位常量（"100000000" / "1000000000000000000"，见 scripts/gs-sanitize.mjs
+的 uid-field 与 long-numeric-id 规则），不含任何真实 UID 或记录。
+"""
+
+# ============================================================
+# 脱敏验证（两道，缺一不可）—— 覆盖全部 5 个入库样本文件
+# ============================================================
+#
+# ① gs-sanitize 扫描：
+#      raw_response/、variants/、credential/ 下 3 个文件命中 0 处（同前）。
+#      archive/ 下 2 个新文件命中 **2 处**，均为 [uid-field] 规则：
+#        - archive/wwgacha_archive.json 行 2：`UID": 100000000`
+#        - archive/uigf_v4_negative.json 行 10：`uid": "100000000`
+#      两处命中都是规则按**字段名**结构性匹配到「一个叫 uid/UID 的字段后面
+#      跟着数字」，命中的正是我们自己写入的占位字面量本身——不是遗漏的真实
+#      数据。这与 scripts/gs-sanitize.mjs 里 uid-field 规则注释自陈的行为
+#      一致：该规则不加「已是占位值就跳过」的负向断言，「dry-run 会持续
+#      报告命中，这是可接受的噪音，不是数据损坏」。
+#
+#      ⚠️ 这条"噪音不是损坏"的判断**已实测验证**，不是照搬规则注释的转述——
+#      在临时目录跑 `--write` 复核：两个文件命中 2 处、**写回 0 个文件**、
+#      字节与原文件逐一比对完全相同。选用 100000000 作为 UID 正是为了让这
+#      条实测成立（详见上方目录说明里的过程记录：第一版用 900000001，
+#      --write 下会被规则改写成 100000000，并不幂等）。
+#
+# ② 正向逐项核对：**零命中不构成安全证明**，本目录已经因为这条踩过一次
+#    真实的坑（见上方 §四 引用），archive/ 下两个新文件同样不能只看 ① 的
+#    结果就收尾。逐项确认真实值不在文件里（用「新文件字段值是否恰好等于
+#    我写入的占位字面量」代替「与某个真实值比对」——因为转换脚本自始至终
+#    没有读取过任何真实存档，压根不存在可比对的真实值）：
+#      - archive.UID === 100000000（脚本自校验断言 + 独立复核脚本二次确认）
+#      - archive.ServerID === "fixture-server-id"
+#      - archive.ServerArea === "fixture-server-area"
+#      - 全部 23 条记录 CardPoolId === JSON null（不含任何 hash 字符串）
+#      - 全部 23 条记录 Time 直接继承自已通过六项核对的 raw_response 样本，
+#        未引入任何新时间戳
+#      - uigf_v4_negative.json 的 uid / id 恰好等于已知占位常量，
+#        export_app 显式写成 "fixture-fake-app"
+#    结果：2 个新文件 × 6 项全部核对通过。
+#
+# 具体脱敏手法（既有 3 个文件）：
 #   - 账号级字段（UID/ServerID/ServerArea）整体未裁入
 #   - 时间**整体平移**到 2099-01-01 基准，保留相对间隔与同秒分组结构——
 #     既保住了碰撞组这个测试的核心性质，又抹掉了真实游玩时刻

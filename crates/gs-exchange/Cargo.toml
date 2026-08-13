@@ -1,0 +1,12 @@
+[package]
+name = "gs-exchange"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "交换格式适配器框架，识别并导入第三方工具产出的抽卡存档"
+
+[dependencies]
+gs-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true

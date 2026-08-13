@@ -6,6 +6,13 @@ rust-version.workspace = true
 license.workspace = true
 description = "L1 范式层：authkey 采集流程（data_2 缓存扫描 + 分页拉取）"
 
+# `test-support`：把 `AuthkeyApiPipeline::from_manifest_json_for_test` 对外
+# 暴露为 `pub`，供其它 crate 的测试代码构造带有本仓库真实插件都未声明过的
+# 分支（如 `timezoneSource: apiField`）的 pipeline，见该函数文档。只应出现
+# 在消费方的 `[dev-dependencies]` 里，不进任何 `[dependencies]`。
+[features]
+test-support = []
+
 [dependencies]
 gs-core.workspace = true
 # 存储层写入接口：insert_records 的返回值（实际新增行数）是 reachedKnown

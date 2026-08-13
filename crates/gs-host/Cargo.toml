@@ -10,4 +10,21 @@ description = "宿主运行时骨架：聚合存储与分析能力"
 gs-core.workspace = true
 gs-storage.workspace = true
 gs-analysis.workspace = true
+# 交换格式适配器产出的 ImportBatch——导入流程（src/import.rs）的输入形状。
+gs-exchange.workspace = true
+# 复用采集用的同一条 extractRecord → deriveRecordKeys → 落库字段拼装通路
+# （`AuthkeyApiPipeline::build_records`），导入路径不得另起一套字段映射，
+# 理由见 src/import.rs 模块文档与
+# docs/_internal/milestones/03-M2-鸣潮插件与抽象证伪.md §4.6.3。
+gs-p-authkey.workspace = true
+# 构造 AuthkeyApiPipeline 需要一个已加载插件 bundle 的运行时实例。
+gs-plugin-runtime.workspace = true
+serde_json.workspace = true
 ts-rs.workspace = true
+
+[dev-dependencies]
+# 端到端测试需要构造声明了 gs-p-authkey 真实插件都未声明过的分支
+# （timezoneSource: apiField）的 pipeline，验证导入路径对它 fail closed
+# ——只有开启 test-support feature 才能拿到 from_manifest_json_for_test
+# 这个测试专用构造入口，见该函数文档。不进 [dependencies]。
+gs-p-authkey = { workspace = true, features = ["test-support"] }

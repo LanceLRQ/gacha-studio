@@ -1253,12 +1253,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "gs-exchange"
+version = "0.1.0"
+dependencies = [
+ "gs-core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "gs-host"
 version = "0.1.0"
 dependencies = [
  "gs-analysis",
  "gs-core",
+ "gs-exchange",
+ "gs-p-authkey",
+ "gs-plugin-runtime",
  "gs-storage",
+ "serde_json",
  "ts-rs",
 ]
 

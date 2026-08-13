@@ -860,6 +860,48 @@ fn parse_timezone_offset_hours(value: &Value) -> Option<i32> {
     }
 }
 
+/// 解析 `fields.time`（不带时区的记录时间字符串），兼容两种已实测出现过的
+/// 线格式：
+/// - `"YYYY-MM-DD HH:MM:SS"`（空格分隔）——米哈游三游三个参考实现的真实
+///   响应格式，历史行为不变，第一优先尝试。
+/// - `"YYYY-MM-DDTHH:MM:SS"`（ISO 8601，`T` 分隔）——`fixtures/wuwa/
+///   raw_response/*.json` 的记录时间用这个格式，但这**不是**已经抓包证实
+///   的鸣潮 API 线格式，而是本地存档字段（C# `DateTime`，Newtonsoft 默认
+///   序列化产物）的形状，真实线格式仍未验证（`fixtures/wuwa/meta.toml`
+///   "已知未验证项：API 的 Time 线格式"一节）。在证实之前两种都按"可能"
+///   处理，不赌哪一种——`hooks.deriveRecordKeys`（JS 侧）已经靠"先规范化
+///   再哈希"让 `record_key` 与线格式无关，但 `occurred_at`/`tz_origin`
+///   这两个字段是 Rust 侧现算的，同一份不确定性在这里必须单独兜住，否则
+///   M2-S6 引入的采集/导入两条路径联调（`gs-host` 的 `import_batch`，都
+///   要经过这个函数）第一次真跑 wuwa 真实 fixture 就会全军覆没——不是
+///   假设性风险，是本次实现时的真实报错。
+///
+/// ⚠️ **本函数是一处已知的能力边界违规，当前实现是止血不是终局。**
+///
+/// 按 `00-实施总览.md` §11.5 的判断依据——「这段逻辑换一个游戏还成立吗？」
+/// ——「解析一个日期时间字符串」的**算法**换一个游戏依然成立，归 Rust；但
+/// 「这个游戏的时间用什么格式书写」是**游戏知识**，归 TS 声明。同一条边界
+/// 在本 crate 里已经有正确的先例：`log_scan.rs` 的异或解混淆没有把
+/// `0xA5`/`0xEF`/跳 3 字节写死在 Rust 里，而是从插件声明的
+/// [`crate::log_scan::LogDecodeSpec`] 读参数。时间格式与它完全对称，却在
+/// M1 阶段被直接硬编码成了米哈游三游的空格格式。
+///
+/// M2 撞上这条边界，正是本阶段「证伪」要找的东西：**它不是破坏性变更**
+/// （加一个可选的格式声明是纯增量），但它是「宿主里藏着游戏专属知识」的
+/// 实例。现在这个「依次尝试两种格式」的写法只是把硬编码从一种变成两种，
+/// 第三个用其它格式的游戏还会再撞一次。正确的收口是让插件在 manifest 里
+/// 声明格式（对齐 `LogDecodeSpec` 的形态），已单独立项，不在 M2-S6 范围内
+/// ——S7 做证伪判定时须把这条计入。
+///
+/// 两种格式互斥、不会误判：分隔符不同，用错格式解析必然失败而不是解析出
+/// 另一个时刻；`chrono::NaiveDateTime::parse_from_str` 要求整串被完全消费，
+/// 不接受尾部残留。
+fn parse_record_time(raw_time: &str) -> Result<chrono::NaiveDateTime, PipelineError> {
+    chrono::NaiveDateTime::parse_from_str(raw_time, "%Y-%m-%d %H:%M:%S")
+        .or_else(|_| chrono::NaiveDateTime::parse_from_str(raw_time, "%Y-%m-%dT%H:%M:%S"))
+        .map_err(|err| PipelineError::Json(format!("无法解析记录时间 \"{raw_time}\"：{err}")))
+}
+
 // ============================================================
 // PageRequest：单次页面请求的完整声明
 // ============================================================
@@ -1104,8 +1146,17 @@ impl<'rt> AuthkeyApiPipeline<'rt> {
     /// `plugin_id` 路由到插件运行时里真实编译的 JS，与这里传入的
     /// `manifest_value` 互不影响——这正是这个测试入口能成立的原因：拿
     /// genshin 已经编译好的 JS 当执行载体，只替换 Rust 侧要解析的纯数据。
-    #[cfg(test)]
-    fn from_manifest_json_for_test(
+    ///
+    /// 默认只在本 crate 编译测试代码时可见（`#[cfg(test)]`）。额外挂一个
+    /// `test-support` feature 把它变成 `pub`，供其它 crate 的测试代码构造
+    /// 本仓库唯一真实插件都没声明过的分支（如 `timezoneSource: apiField`）
+    /// ——`gs-host` 验证"导入路径必须对 apiField/staticTable fail closed"
+    /// 这条约束正是靠它，见 `crates/gs-host/tests/import_wwgacha.rs`。不把
+    /// 这个入口做成默认可见：生产代码永远只应该经 [`Self::new`] 走插件
+    /// 注册表构造 pipeline，`test-support` 不进 `[dependencies]`，只在
+    /// `[dev-dependencies]` 里对需要它的 crate 单独开启。
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn from_manifest_json_for_test(
         plugin_id: &str,
         plugin_runtime: &'rt PluginRuntime,
         manifest_value: Value,
@@ -1120,6 +1171,37 @@ impl<'rt> AuthkeyApiPipeline<'rt> {
 
     pub fn credential(&self) -> &CredentialJson {
         &self.params.credential
+    }
+
+    /// 插件 id，供调用方（如 `gs-host` 的导入流程）在错误信息里指明是哪个
+    /// 插件——[`PipelineError`] 的变体普遍携带 `plugin_id`，调用方自己的
+    /// 错误类型延续同一惯例时需要能读到它。
+    pub fn plugin_id(&self) -> &str {
+        &self.plugin_id
+    }
+
+    /// `time.timezoneSource` 声明为 `apiField`/`staticTable` 时返回
+    /// `true`——这两个分支都要读**页级 API 响应体**里的字段
+    /// （[`Self::resolve_page_level_timezone_offset_hours`]），而存档导入
+    /// 路径根本没有响应体可读。
+    ///
+    /// 供导入流程在调用 [`Self::build_records`] 之前做 fail-closed 检查：
+    /// `build_records` 本身不知道调用方是采集还是导入，无法替调用方判断
+    /// "拿不到时区来源该不该继续"，这个判断必须留给调用方——静默传
+    /// `page_tz_offset_hours: None` 会让时间按"无时区"归一化、
+    /// `tz_origin` 落成不真实的 `Assumed`，且这一切不报错，正是本项目
+    /// 反复记录的"门之所以通过，是因为它什么都没检查"这类失效模式。
+    ///
+    /// `computed` 分支走 `hooks.resolveTimezone`（逐条记录调用，不依赖
+    /// 响应体）可以正常支持，返回 `false`；未声明（`None`）同样返回
+    /// `false`——历史行为不变，`page_tz_offset_hours` 传 `None` 就是
+    /// 这两种情况原本就有的正确取值，不是新引入的静默降级。
+    pub fn timezone_source_requires_page_response(&self) -> bool {
+        matches!(
+            self.timezone_source,
+            Some(TimezoneSourceJson::ApiField { .. })
+                | Some(TimezoneSourceJson::StaticTable { .. })
+        )
     }
 
     /// 单个 banner 落库时使用的**主**保底组 key。`GachaRecord.pity_group` 是
@@ -1565,9 +1647,7 @@ impl<'rt> AuthkeyApiPipeline<'rt> {
         raw_time: &str,
         tz_offset_hours: Option<i32>,
     ) -> Result<(i64, TzOrigin, Option<i32>), PipelineError> {
-        let naive = chrono::NaiveDateTime::parse_from_str(raw_time, "%Y-%m-%d %H:%M:%S").map_err(
-            |err| PipelineError::Json(format!("无法解析记录时间 \"{raw_time}\"：{err}")),
-        )?;
+        let naive = parse_record_time(raw_time)?;
         match tz_offset_hours {
             Some(hours) => {
                 let utc_seconds = naive.and_utc().timestamp() - i64::from(hours) * 3600;
@@ -1654,6 +1734,158 @@ impl<'rt> AuthkeyApiPipeline<'rt> {
                 })
             })
             .collect()
+    }
+
+    /// 把"原始记录数组"变换成可落库的 [`GachaRecord`] 批次——完整走一遍
+    /// `manifest.fields.extractRecord → hooks.deriveRecordKeys → 时区换算/
+    /// 落库字段拼装`三阶段。
+    ///
+    /// 这是 M2-S6 从 [`Self::collect_banner`] 循环体里抽出来的可复用阶段
+    /// （`docs/_internal/milestones/03-M2-鸣潮插件与抽象证伪.md` §4.6.3 裁定）：
+    /// 导入路径（`gs-host` 的存档导入流程）必须走与采集**完全相同**的这段
+    /// 逻辑，两边才会对同一条实际记录算出同一个 `record_key`——若导入侧
+    /// 另写一套字段映射，`UNIQUE(account_id, record_key)` 形同虚设，是
+    /// HoYo.Gacha 因 `record_key` 裸用雪花 ID 付出过整表重建代价的同一类
+    /// 问题（"同一语义写了两遍只改一遍"，M2-S5 的 `effective_pity_target`
+    /// 也是这个成因）。
+    ///
+    /// 因此把 `collect_banner` 里原本写死/现算的两个量参数化，调用方必须
+    /// 显式给出：
+    /// - `source`：分页采集固定传 `RecordSource::OfficialApi`；导入路径必须
+    ///   传 `RecordSource::Import`，两者不能共用一个写死的值。
+    /// - `page_tz_offset_hours`：分页采集从**本页 API 响应体**现算
+    ///   （[`Self::resolve_page_level_timezone_offset_hours`]）；导入路径根本
+    ///   拿不到响应体，只能由调用方决定传什么——`timezoneSource` 声明为
+    ///   `apiField`/`staticTable` 时，导入侧必须提前拒绝而不是编一个假值传
+    ///   `None`，这条 fail-closed 检查在导入流程里实现，不在这个方法内部
+    ///   （本方法不知道调用方是采集还是导入，无法替调用方做这个判断）。
+    ///
+    /// `raw_records` 是 `extractList` 已经拆出的记录数组（分页采集里是响应
+    /// `list`，导入路径里是 `gs_exchange::ImportBanner::records`）——两者
+    /// 形状相同，都是"未经 Rust 侧二次解释的 API 原始记录"，这正是
+    /// `gs-exchange` 适配器不产出 `UnifiedRecordFields` 的原因。
+    #[allow(clippy::too_many_arguments)]
+    pub fn build_records(
+        &self,
+        raw_records: &[Value],
+        banner_id: &str,
+        account_id: i64,
+        uid: &str,
+        region: Option<&str>,
+        lang: Option<&str>,
+        captured_at: i64,
+        page_tz_offset_hours: Option<i32>,
+        source: RecordSource,
+    ) -> Result<Vec<GachaRecord>, PipelineError> {
+        // 第一阶段：先跑完整页的 extractRecord，收齐 fields_values/
+        // fields_list——deriveRecordKeys（批处理钩子）需要整页数据一起
+        // 传给插件，不能逐条调用，见 Self::derive_record_keys_for_page。
+        let mut fields_values: Vec<Value> = Vec::with_capacity(raw_records.len());
+        let mut fields_list: Vec<UnifiedRecordFieldsJson> = Vec::with_capacity(raw_records.len());
+        for raw in raw_records {
+            let mut fields_value = self.plugin_runtime.call(
+                &self.plugin_id,
+                "manifest.fields.extractRecord",
+                std::slice::from_ref(raw),
+            )?;
+
+            // `bannerIdentity: "query"` 时，**在这里**就把 bannerId 换成本次
+            // 查询/导入实际归属的卡池，而不是等到下面第三阶段建 GachaRecord
+            // 时才覆盖 banner_key——因为夹在中间的第二阶段 `deriveRecordKeys`
+            // 也要读这个字段。
+            //
+            // 覆盖晚一步的后果不是"卡池归属错"（那一处最终还是会被改对），
+            // 而是**记录去重键少了卡池这一维**：插件此时只能拿到一个与卡池
+            // 无关的占位值，`hash(bannerId, time, itemId, 组内序位)` 在两个
+            // 不同卡池之间就失去了区分度。鸣潮的十连整组共用同一个时间戳，
+            // 而 3★ 武器同时出现在角色池与武器池——两池在同一秒各出一次同一
+            // 件 3★ 且组内序位相同时，两条记录会算出**相同的 record_key**，
+            // 被 `UNIQUE(account_id, record_key)` + `INSERT OR IGNORE` 静默
+            // 吞掉一条：不报错、不进日志，用户只看到"少了一条"。
+            //
+            // 提前到这里之后，插件不需要为"响应里没有卡池身份"编造任何占位
+            // 值——它照常读响应，宿主负责把这一维补成权威值，
+            // `deriveRecordKeys` / `banner_key` / `pity_group` 三处天然一致。
+            if matches!(
+                self.params.banner_identity,
+                Some(gs_core::BannerIdentitySource::Query)
+            ) && let Some(object) = fields_value.as_object_mut()
+            {
+                object.insert("bannerId".to_string(), Value::String(banner_id.to_string()));
+            }
+
+            let fields: UnifiedRecordFieldsJson = serde_json::from_value(fields_value.clone())
+                .map_err(|err| {
+                    PipelineError::Json(format!("extractRecord 返回值不满足契约：{err}"))
+                })?;
+            fields_values.push(fields_value);
+            fields_list.push(fields);
+        }
+
+        // 第二阶段：批量算出这一页全部记录的 record_key。
+        let record_keys = self.derive_record_keys_for_page(&fields_values, &fields_list)?;
+
+        // 第三阶段：逐条补上时区换算等剩余字段，拼出可落库的 GachaRecord。
+        let mut batch = Vec::with_capacity(raw_records.len());
+        for ((fields_value, fields), record_key_text) in fields_values
+            .iter()
+            .zip(fields_list.iter())
+            .zip(record_keys.into_iter())
+        {
+            // computed 分支逐条记录调用 hook（历史行为不变，签名允许按
+            // 记录定制，即使目前唯一实现——原神的 uid 首位数字推断——
+            // 只用了账号级信息）；apiField/staticTable 已经在调用方算好，
+            // 通过 page_tz_offset_hours 传入，这里直接复用同一个值。
+            let tz_offset_hours: Option<i32> = match &self.timezone_source {
+                Some(TimezoneSourceJson::Computed {}) if self.has_resolve_timezone => {
+                    let ctx = serde_json::json!({ "uid": uid, "region": region });
+                    let value = self.plugin_runtime.call(
+                        &self.plugin_id,
+                        "hooks.resolveTimezone",
+                        &[fields_value.clone(), ctx],
+                    )?;
+                    value.as_i64().map(|n| n as i32)
+                }
+                _ => page_tz_offset_hours,
+            };
+
+            let (occurred_at, tz_origin, tz_offset_min) =
+                Self::normalize_time(&fields.time, tz_offset_hours)?;
+
+            // 此处直接用 fields.banner_id，**不再**二次判别 banner_identity：
+            // `Query` 模式下这个字段已经在第一阶段 extractRecord 之后被换成
+            // 本次查询/导入实际归属的卡池了（见那里的说明），`Response`/缺省
+            // 模式下它本来就是响应产出的值。两种模式在这里已经收敛成同一个
+            // 权威取值，再判一次只会制造第二处真相来源——而 banner_key 与
+            // pity_group 一旦取自不同来源，记录的卡池归属就会和它的保底组
+            // 对不上，那是比两处都错更难查的 bug。
+            let banner_identity_key = fields.banner_id.as_str();
+
+            batch.push(GachaRecord {
+                id: 0,
+                account_id,
+                banner_key: banner_identity_key.to_string(),
+                pity_group: self.pity_group_for(banner_identity_key),
+                record_key: RecordKey::new(record_key_text)?,
+                lang: lang.map(str::to_string),
+                occurred_at,
+                occurred_raw: fields.time.clone(),
+                tz_origin,
+                tz_offset_min,
+                seq_in_batch: None,
+                item_id: fields.item_id.clone(),
+                item_type: fields.item_type.clone(),
+                rarity: fields.rarity.clone(),
+                qty: fields.count,
+                meta_state: self.determine_meta_state(fields),
+                source,
+                captured_at,
+                raw_ref: None,
+                extra: None,
+            });
+        }
+
+        Ok(batch)
     }
 
     /// 采集单个卡池（`banner_id`，即填进 `{{gachaType}}` 占位符的取值，如原神的
@@ -1747,117 +1979,26 @@ impl<'rt> AuthkeyApiPipeline<'rt> {
             records_seen += list.len() as u64;
 
             // apiField/staticTable 是页级元数据，每页只需要解析一次；
-            // computed 分支逐条记录调用 hook，见下面循环体内的分支判断。
+            // computed 分支逐条记录调用 hook，见 Self::build_records 内部的
+            // 分支判断。
             let page_tz_offset_hours =
                 self.resolve_page_level_timezone_offset_hours(&response_json)?;
 
-            // 第一阶段：先跑完整页的 extractRecord，收齐 fields_values/
-            // fields_list——deriveRecordKeys（批处理钩子）需要整页数据一起
-            // 传给插件，不能逐条调用，见 Self::derive_record_keys_for_page。
-            let mut fields_values: Vec<Value> = Vec::with_capacity(list.len());
-            let mut fields_list: Vec<UnifiedRecordFieldsJson> = Vec::with_capacity(list.len());
-            for raw in &list {
-                let mut fields_value = self.plugin_runtime.call(
-                    &self.plugin_id,
-                    "manifest.fields.extractRecord",
-                    std::slice::from_ref(raw),
-                )?;
-
-                // `bannerIdentity: "query"` 时，**在这里**就把 bannerId 换成本次
-                // 查询实际使用的卡池，而不是等到下面第三阶段建 GachaRecord 时才
-                // 覆盖 banner_key——因为夹在中间的第二阶段 `deriveRecordKeys`
-                // 也要读这个字段。
-                //
-                // 覆盖晚一步的后果不是"卡池归属错"（那一处最终还是会被改对），
-                // 而是**记录去重键少了卡池这一维**：插件此时只能拿到一个与卡池
-                // 无关的占位值，`hash(bannerId, time, itemId, 组内序位)` 在两个
-                // 不同卡池之间就失去了区分度。鸣潮的十连整组共用同一个时间戳，
-                // 而 3★ 武器同时出现在角色池与武器池——两池在同一秒各出一次同一
-                // 件 3★ 且组内序位相同时，两条记录会算出**相同的 record_key**，
-                // 被 `UNIQUE(account_id, record_key)` + `INSERT OR IGNORE` 静默
-                // 吞掉一条：不报错、不进日志，用户只看到"少了一条"。
-                //
-                // 提前到这里之后，插件不需要为"响应里没有卡池身份"编造任何占位
-                // 值——它照常读响应，宿主负责把这一维补成权威值，
-                // `deriveRecordKeys` / `banner_key` / `pity_group` 三处天然一致。
-                if matches!(
-                    self.params.banner_identity,
-                    Some(gs_core::BannerIdentitySource::Query)
-                ) && let Some(object) = fields_value.as_object_mut()
-                {
-                    object.insert("bannerId".to_string(), Value::String(banner_id.to_string()));
-                }
-
-                let fields: UnifiedRecordFieldsJson = serde_json::from_value(fields_value.clone())
-                    .map_err(|err| {
-                        PipelineError::Json(format!("extractRecord 返回值不满足契约：{err}"))
-                    })?;
-                fields_values.push(fields_value);
-                fields_list.push(fields);
-            }
-
-            // 第二阶段：批量算出这一页全部记录的 record_key。
-            let record_keys = self.derive_record_keys_for_page(&fields_values, &fields_list)?;
-
-            // 第三阶段：逐条补上时区换算等剩余字段，拼出可落库的 GachaRecord。
-            let mut batch = Vec::with_capacity(list.len());
-            for ((fields_value, fields), record_key_text) in fields_values
-                .iter()
-                .zip(fields_list.iter())
-                .zip(record_keys.into_iter())
-            {
-                // computed 分支逐条记录调用 hook（历史行为不变，签名允许按
-                // 记录定制，即使目前唯一实现——原神的 uid 首位数字推断——
-                // 只用了账号级信息）；apiField/staticTable 已经在页级算好，
-                // 直接复用同一个值。
-                let tz_offset_hours: Option<i32> = match &self.timezone_source {
-                    Some(TimezoneSourceJson::Computed {}) if self.has_resolve_timezone => {
-                        let ctx = serde_json::json!({ "uid": uid, "region": region });
-                        let value = self.plugin_runtime.call(
-                            &self.plugin_id,
-                            "hooks.resolveTimezone",
-                            &[fields_value.clone(), ctx],
-                        )?;
-                        value.as_i64().map(|n| n as i32)
-                    }
-                    _ => page_tz_offset_hours,
-                };
-
-                let (occurred_at, tz_origin, tz_offset_min) =
-                    Self::normalize_time(&fields.time, tz_offset_hours)?;
-
-                // 此处直接用 fields.banner_id，**不再**二次判别 banner_identity：
-                // `Query` 模式下这个字段已经在第一阶段 extractRecord 之后被换成
-                // 本次查询实际使用的卡池了（见那里的说明），`Response`/缺省模式
-                // 下它本来就是响应产出的值。两种模式在这里已经收敛成同一个权威
-                // 取值，再判一次只会制造第二处真相来源——而 banner_key 与
-                // pity_group 一旦取自不同来源，记录的卡池归属就会和它的保底组
-                // 对不上，那是比两处都错更难查的 bug。
-                let banner_identity_key = fields.banner_id.as_str();
-
-                batch.push(GachaRecord {
-                    id: 0,
-                    account_id,
-                    banner_key: banner_identity_key.to_string(),
-                    pity_group: self.pity_group_for(banner_identity_key),
-                    record_key: RecordKey::new(record_key_text)?,
-                    lang: lang.map(str::to_string),
-                    occurred_at,
-                    occurred_raw: fields.time.clone(),
-                    tz_origin,
-                    tz_offset_min,
-                    seq_in_batch: None,
-                    item_id: fields.item_id.clone(),
-                    item_type: fields.item_type.clone(),
-                    rarity: fields.rarity.clone(),
-                    qty: fields.count,
-                    meta_state: self.determine_meta_state(fields),
-                    source: RecordSource::OfficialApi,
-                    captured_at,
-                    raw_ref: None,
-                    extra: None,
-                });
-            }
+            // extractRecord → deriveRecordKeys → 时区换算/落库字段拼装
+            // 三阶段已抽成 Self::build_records（M2-S6，见该方法文档）——
+            // 分页采集固定传 RecordSource::OfficialApi，页级时区就是刚解析出
+            // 的 page_tz_offset_hours。
+            let batch = self.build_records(
+                &list,
+                banner_id,
+                account_id,
+                uid,
+                region,
+                lang,
+                captured_at,
+                page_tz_offset_hours,
+                RecordSource::OfficialApi,
+            )?;
 
             let inserted = repo.insert_records(&batch)?;
             records_inserted += inserted;
@@ -3042,6 +3183,24 @@ mod tests {
             None
         );
         assert_eq!(parse_timezone_offset_hours(&serde_json::json!(null)), None);
+    }
+
+    /// 空格分隔（米哈游三游真实响应格式）与 ISO 8601 `T` 分隔（鸣潮
+    /// `raw_response/*.json` fixture 的形状）两种线格式都必须能解析出
+    /// 同一个时刻——这是 `fixtures/wuwa/meta.toml` "已知未验证项：API 的
+    /// Time 线格式"一节记录的不确定性在 Rust 侧的直接后果，两种都要接住。
+    #[test]
+    fn parse_record_time_accepts_both_space_and_iso_t_separated_formats() {
+        let space_separated =
+            parse_record_time("2026-06-18 21:15:32").expect("空格分隔格式应当能解析");
+        let iso_t_separated =
+            parse_record_time("2026-06-18T21:15:32").expect("ISO T 分隔格式应当能解析");
+        assert_eq!(space_separated, iso_t_separated);
+    }
+
+    #[test]
+    fn parse_record_time_rejects_unrecognized_format() {
+        assert!(parse_record_time("18/06/2026 21:15:32").is_err());
     }
 
     /// apiField 声明且响应体确实带该字段：时区应当正确换算，`tz_origin`

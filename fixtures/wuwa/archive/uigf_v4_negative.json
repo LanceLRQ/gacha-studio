@@ -1,0 +1,23 @@
+{
+  "info": {
+    "export_timestamp": "1735689600",
+    "export_app": "fixture-fake-app",
+    "export_app_version": "0.0.0",
+    "version": "v4.0"
+  },
+  "hk4e": [
+    {
+      "uid": "100000000",
+      "timezone": 8,
+      "list": [
+        {
+          "uigf_gacha_type": "301",
+          "gacha_type": "301",
+          "item_id": "10000002",
+          "time": "2023-01-01 00:00:00",
+          "id": "1000000000000000000"
+        }
+      ]
+    }
+  ]
+}
