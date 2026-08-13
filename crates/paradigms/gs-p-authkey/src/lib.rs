@@ -29,10 +29,12 @@
 use gs_core::GsError;
 
 pub mod cache_scan;
+pub mod log_scan;
 pub mod pipeline;
 pub mod rate_limit;
 
 pub use cache_scan::{InstalledGameLocator, StaticGameLocator, scan_game_cache};
+pub use log_scan::{LogDecodeSpec, scan_log_file};
 pub use pipeline::{
     AuthkeyApiPipeline, CollectOutcome, GameApiTransport, PipelineError, ReqwestTransport,
     StopReason,

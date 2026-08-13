@@ -92,22 +92,39 @@ const CONTRACT_SECTIONS = [
     // 定义在 manifest.ts 而不是 types/generated.ts——这也是新增本区块前
     // 必须先修 extractTsTypeFields/findTypeAliasEnd 的原因，见两个函数的
     // 文档注释。
+    //
+    // M2-S3：logPath 字段原有的 knownUnconsumed 白名单条目已移除——该白名单
+    // 存在的唯一理由是"真实读取实现（鸣潮 Client.log 异或解混淆）还没落地"，
+    // 这个理由到 M2-S3 已经不成立，登记时就写明了"接上真实读取逻辑后必须
+    // 移除本条白名单"。若本门此刻仍对 logPath 报红，说明 Rust 侧
+    // CredentialJson::LogFile 的消费点尚未接上，应等 Rust 侧落地后转绿，
+    // 不应该把白名单加回来糊弄过去。
     tsType: 'CredentialSource',
     tsFile: 'packages/gs-plugin-kit/manifest.ts',
     rustStruct: 'CredentialJson',
     rustFile: 'crates/paradigms/gs-p-authkey/src/pipeline.rs',
-    knownUnconsumed: [
-      {
-        field: 'logPath',
-        reason:
-          'M2-S2（本次改动）只登记契约，真正的日志文件读取实现（鸣潮 Client.log 异或解混淆）' +
-          '要到 M2-S3 才落地——chromiumCache 分支的 gameDir/urlPattern 已有真实消费点' +
-          '（cache_scan.rs 的 scan_game_cache），logFile 分支目前还没有。HC-4 造出来就是为了拦' +
-          '这类"声明了但没消费"的分支，见 M2 纸面填表演练审计 §7.5 第 9 条。' +
-          '**M2-S3 接上 CredentialJson::LogFile 的真实读取逻辑后必须移除本条白名单**，' +
-          '不能让它变成长期摆设。',
-      },
-    ],
+  },
+  {
+    // ★ HC-4 CONTRACT_SECTIONS 漏登记的第二个实例，登记本身怎么漏掉的：
+    // CONTRACT_SECTIONS 是手工维护的清单，新增一个契约类型（如
+    // RequestTemplate）时如果忘了同步在这里补一项，门禁完全看不见它——
+    // 不会报错、不会有任何提示，因为检查逻辑只遍历这个数组里显式登记的
+    // 条目，不会自动扫描 manifest.ts / types/generated.ts 里声明过的全部
+    // 类型。第一次发生在 `CredentialSource`（本区块，见上方历史注释）；
+    // 这是第二次——`RequestTemplate` 早在 M1 就已经生成进
+    // types/generated.ts，但从未被登记进本数组，门禁对它形同虚设了整个
+    // M1 阶段。
+    //
+    // 本次登记顺带发现的真实漏洞：generated.ts 的 RequestTemplate 有
+    // `url`/`method`/`headers`/`body` 四个字段，但 pipeline.rs 的
+    // RequestTemplateJson 只镜像了 url 与 body，method/headers 在
+    // crates/paradigms 里零消费（`request.method`/`request.headers` 声明了
+    // 却从未被读取过）——本门就是为了拦这类"声明了但没消费"的字段，加上
+    // 这项登记后会如实报红，不应该为了变绿而追加白名单。
+    tsType: 'RequestTemplate',
+    tsFile: 'packages/gs-plugin-kit/types/generated.ts',
+    rustStruct: 'RequestTemplateJson',
+    rustFile: 'crates/paradigms/gs-p-authkey/src/pipeline.rs',
   },
 ];
 

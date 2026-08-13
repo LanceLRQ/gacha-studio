@@ -23,6 +23,8 @@ use gs_storage::{NewBannerSnapshot, Repository, SnapshotOrigin};
 use serde_json::Value;
 
 use crate::DEFAULT_PAGE_SIZE;
+use crate::cache_scan::InstalledGameLocator;
+use crate::log_scan::LogScanError;
 use crate::rate_limit::RateLimitPolicy;
 
 // ============================================================
@@ -57,6 +59,19 @@ pub enum PipelineError {
         plugin_id: String,
         host: Option<String>,
     },
+    /// `{{credential.<queryParam>}}` 具名占位符解析失败——见
+    /// [`AuthkeyApiPipeline::substitute_named_credential_placeholders`] 的
+    /// 三条 fail-closed 规则（参数不存在 / 值含非法字符 / 均不得静默放行）。
+    ///
+    /// **不携带凭据 URL 或解析出的参数值**，只携带插件 id 与占位符名称——
+    /// 与 [`Self::HostNotAllowed`] 同一条理由：这类失败往往正是"凭据被
+    /// 投毒"的信号，错误信息本身还可能被写进日志，携带明文凭据片段等于
+    /// 把证据递给攻击者。
+    CredentialParamInvalid {
+        plugin_id: String,
+        param_name: String,
+        reason: &'static str,
+    },
 }
 
 impl std::fmt::Display for PipelineError {
@@ -81,6 +96,14 @@ impl std::fmt::Display for PipelineError {
                     "插件 \"{plugin_id}\" 的请求 URL 无法解析出合法 host，请求已拒绝"
                 ),
             },
+            Self::CredentialParamInvalid {
+                plugin_id,
+                param_name,
+                reason,
+            } => write!(
+                f,
+                "插件 \"{plugin_id}\" 的占位符 \"{{{{credential.{param_name}}}}}\" 解析失败：{reason}"
+            ),
         }
     }
 }
@@ -96,6 +119,18 @@ impl From<PluginCallError> for PipelineError {
 impl From<gs_core::GsError> for PipelineError {
     fn from(err: gs_core::GsError) -> Self {
         Self::Storage(err)
+    }
+}
+
+// LogScanError 的两个变体（游戏未在宿主配置里登记安装目录 / 日志文件读取
+// 失败）本质上都是"缺少可用的采集前置条件"，语义上与 Config 变体（manifest
+// 纯数据缺失/形状不对）最贴近——都是"流程还没走到发请求那一步就已经无法
+// 继续"，不是 HTTP 传输失败（Transport 变体特指网络往返），也不是 JSON
+// 解析失败（Json 变体）。两个调用点（见 [`AuthkeyApiPipeline::
+// resolve_log_credential`]）不足以单开一个专属变体。
+impl From<LogScanError> for PipelineError {
+    fn from(err: LogScanError) -> Self {
+        Self::Config(err.to_string())
     }
 }
 
@@ -124,8 +159,20 @@ impl std::error::Error for TransportError {}
 /// 抽象出 HTTP 传输层，使整条 pipeline 能在 `cargo test` 里无网络跑通——
 /// 测试用 fixture 驱动的实现见本文件 `tests` 模块的 `FixtureTransport`，
 /// 生产用 [`ReqwestTransport`]。
+///
+/// ⚠️ **`post` 没有默认实现**——这是有意为之。带默认实现的话，默认体只能
+/// 返回一个"不支持 POST"的错误，那正是本项目反复抓到的失效模式："看起来
+/// 有防护、实际什么都没做"：新增一个实现者时完全可以忘记覆写 `post`，
+/// 编译器不会提醒，直到真跑到鸣潮这类 POST 范式时才在运行时报错。不给
+/// 默认实现，让编译器强制每个实现者显式表态。
 pub trait GameApiTransport {
     fn get(&self, url: &str) -> Result<TransportResponse, TransportError>;
+    fn post(
+        &self,
+        url: &str,
+        body: &str,
+        headers: &std::collections::BTreeMap<String, String>,
+    ) -> Result<TransportResponse, TransportError>;
 }
 
 /// 生产环境实现。用阻塞客户端而不是 async——本 crate 与 `gs-storage`
@@ -148,6 +195,31 @@ impl GameApiTransport for ReqwestTransport {
         let response = self
             .client
             .get(url)
+            .send()
+            .map_err(|err| TransportError(err.to_string()))?;
+        let status = response.status().as_u16();
+        let body = response
+            .text()
+            .map_err(|err| TransportError(err.to_string()))?;
+        Ok(TransportResponse { status, body })
+    }
+
+    /// `Content-Type` 等请求头完全由插件通过 `request.headers` 声明——
+    /// **不在这里硬编码 `application/json`**：具体发什么内容类型是游戏
+    /// 知识（鸣潮的接口要什么头，只有插件作者知道），不是范式能力，硬编码
+    /// 一个"看起来总是对"的默认值，下一个 POST 范式的游戏若需要不同的
+    /// `Content-Type` 就只能改 Rust 主程序，违反"新游戏只改插件"的目标。
+    fn post(
+        &self,
+        url: &str,
+        body: &str,
+        headers: &std::collections::BTreeMap<String, String>,
+    ) -> Result<TransportResponse, TransportError> {
+        let mut request = self.client.post(url).body(body.to_string());
+        for (key, value) in headers {
+            request = request.header(key.as_str(), value.as_str());
+        }
+        let response = request
             .send()
             .map_err(|err| TransportError(err.to_string()))?;
         let status = response.status().as_u16();
@@ -230,10 +302,14 @@ pub enum StopConditionJson {
     CursorExhausted {},
     #[serde(rename = "reachedKnown")]
     ReachedKnown {},
-    /// 镜像 `gs_core::StopCondition::SingleRequest`——只是为了让声明了这个
-    /// 变体的 manifest（如未来的鸣潮插件）能被正常反序列化，不落入
-    /// "unknown variant" 报错。**本 Stage 没有消费点**：`collect_banner`
-    /// 的分页循环行为不变，鸣潮真正的一次性请求流程在 M2-S3 落地时再接线。
+    /// 镜像 `gs_core::StopCondition::SingleRequest`——接口本身不分页，一次
+    /// 请求即返回全部记录。**M2-S3 起已接线**：`collect_banner` 处理完第一次
+    /// 请求（无论本页是否为空）就无条件终止循环，不再判断 `emptyPage`/
+    /// `reachedKnown`。消费点见 [`AuthkeyApiPipeline`] 的
+    /// `is_single_request_stop_condition` 字段与 `collect_banner` 循环体内
+    /// 的判断——鸣潮 API 不认 `page` 参数，若继续沿用缺省的 `emptyPage`，
+    /// 第二次请求会拿到与第一次完全相同的全量数据，`emptyPage` 永远不触发，
+    /// 陷入死循环。
     #[serde(rename = "singleRequest")]
     SingleRequest {},
 }
@@ -254,6 +330,10 @@ pub enum CredentialJson {
         log_path: String,
         #[serde(rename = "urlPattern")]
         url_pattern: RegexJson,
+        /// 解混淆参数，省略表示日志是明文，不需要解码。真实消费点见
+        /// [`AuthkeyApiPipeline::resolve_log_credential`]。
+        #[serde(default)]
+        decode: Option<crate::log_scan::LogDecodeSpec>,
     },
     #[serde(rename = "manual")]
     Manual {},
@@ -296,17 +376,42 @@ impl RegexJson {
     }
 }
 
+/// ⚠️ **已知缺口 C8：一个 `url` 模板装不下"凭据决定的端点分支"**（M2-S3
+/// 记录，未实现）。
+///
+/// 鸣潮参考实现按凭据 URL 的 `svr_area` 参数在两个 host 之间二选一
+/// （`WWGachaExport/ViewModels/Dialogs/UpdateGachaDataDialogViewModel.cs:239-242`：
+/// 国服 `gmserver-api.aki-game2.com`、国际服 `gmserver-api.aki-game2.net`）。
+/// 本结构体只有**一个** `url` 模板，而 `.com` → `.net` 不是任何字符串替换
+/// 能从 `svr_area="global"` 推导出来的——具名占位符
+/// `{{credential.svr_area}}` 只能把 `"global"` 这个值填进去，填不出 TLD。
+///
+/// **刻意不实现**：本机只有国服存档样本，国际服分支无法验证。为一个验证不了
+/// 的分支发明机制（如按凭据参数取值路由的 `requestVariants`），正是三次法则
+/// 与本项目"不提前留判别联合分支"这条教训要防的事——占位分支能过类型检查、
+/// 过所有门禁、被文档引用为设计依据，却永远跑不起来。
+/// `collect.params.allowedHosts` 里同样**不预放** `.net`：预放等于声明一个
+/// 跑不到的能力。等真有国际服样本再一并落地。
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct RequestTemplateJson {
     pub url: String,
+    /// 请求方法，缺省 GET——原神/星铁/绝区零现有行为不变。声明为 `POST`
+    /// 时 [`AuthkeyApiPipeline::collect_banner`] 会改走
+    /// [`GameApiTransport::post`]，见该方法的分派逻辑。
+    #[serde(default)]
+    pub method: Option<gs_core::HttpMethod>,
+    /// 请求头模板，值与 `url`/`body` 共用同一套占位符替换规则（含具名的
+    /// `{{credential.<queryParam>}}`），见
+    /// [`AuthkeyApiPipeline::build_page_headers`]。键（header 名）不做替换
+    /// ——占位符只用于凭据这类"值会变化"的场景，header 名本身是插件的静态
+    /// 声明。典型用途：`Cookie`/`Authorization` 这类凭据不适合塞进 URL 或
+    /// body 的场景。
+    #[serde(default)]
+    pub headers: Option<std::collections::BTreeMap<String, String>>,
     /// POST 请求体模板，占位符替换规则与 `url` 完全一致，见
-    /// [`AuthkeyApiPipeline::substitute_placeholders`]。
-    ///
-    /// ⚠️ **本 Stage 只提供替换能力（[`AuthkeyApiPipeline::build_page_body`]
-    /// 有直接的单元测试验证），未接入 `collect_banner` 的实际发送路径**——
-    /// 把 body 真正发出去需要 `GameApiTransport` 支持 POST + body，这是
-    /// M2-S3 落地鸣潮采集实现时的范围，此处不提前改动已经跑通的 GET 分页
-    /// 传输层。
+    /// [`AuthkeyApiPipeline::substitute_placeholders`]。`method` 声明为
+    /// `POST` 时必须同时声明本字段，否则 [`AuthkeyApiPipeline::collect_banner`]
+    /// 会在构造请求时报 [`PipelineError::Config`]。
     #[serde(default)]
     pub body: Option<String>,
 }
@@ -449,6 +554,9 @@ pub fn should_stop_reached_known(consecutive_zero_pages: u32) -> bool {
 pub enum StopReason {
     EmptyPage,
     ReachedKnown,
+    /// `stopCondition: { kind: "singleRequest" }`：处理完第一次请求（无论
+    /// 本页是否为空）即终止，不判断 `emptyPage`/`reachedKnown`。
+    SingleRequest,
 }
 
 #[derive(Debug, Clone)]
@@ -590,6 +698,17 @@ fn host_is_allowed(host: &str, allowed_hosts: &[String]) -> bool {
         .any(|allowed| allowed.eq_ignore_ascii_case(host))
 }
 
+/// `value` 是否含有会破坏 JSON body 字符串字面量语法的字符（引号/反斜杠/
+/// 花括号），或空白/控制字符。用于
+/// [`AuthkeyApiPipeline::substitute_named_credential_placeholders`] 的规则
+/// 二——`crate::cache_scan::extract_query_param` 不做百分号解码，合法的
+/// query 参数值不可能出现这些字符，出现即视为凭据 URL 已被投毒。
+fn contains_json_string_unsafe_char(value: &str) -> bool {
+    value
+        .chars()
+        .any(|c| matches!(c, '"' | '\\' | '{' | '}') || c.is_whitespace() || c.is_control())
+}
+
 /// `hooks.deriveRecordKey`（逐条）与 `hooks.deriveRecordKeys`（批处理）互斥：
 /// 两者只能声明其一。拒绝同时声明，而不是隐式约定"批处理优先"之类的规则——
 /// 一份 manifest 该走哪种 record_key 生成方式应当只有一个答案，写出两个只会
@@ -612,6 +731,42 @@ fn validate_derive_record_key_hooks_not_both_declared(
         return Err(PipelineError::Config(format!(
             "插件 \"{plugin_id}\" 同时声明了 hooks.deriveRecordKey 与 hooks.deriveRecordKeys——\
              二者只能二选一，宿主不会替插件猜该信哪一个"
+        )));
+    }
+    Ok(())
+}
+
+/// 拒绝"批处理序位 record_key + 增量提前终止"这个组合在构造期就出现。
+///
+/// 背景（`docs/_internal/audit/AUDIT-2026-08-12-M2鸣潮真实存档实测.md`
+/// §1.6～§1.8 的实测结论）：鸣潮 `record_key` 必须合成
+/// `hash(时间 + 物品 + 同秒内序位)`，真实存档 3371 条记录里 **17.53%**
+/// （591 条）靠这个序位才能互相区分——这不是边角情况，是六分之一的数据。
+/// 序位由 `hooks.deriveRecordKeys` 在**一整页**记录上算出，它的正确性
+/// 完全建立在"每次采集都是整池全量拉取"这个前提上：`stopCondition:
+/// reachedKnown` 恰恰是"只拉新记录、拉到已采集过的就提前停"的增量语义，
+/// 一旦允许它与批处理序位共存，序位就会在**局部集合**（而不是完整数组）
+/// 上重新计算，17.53% 的 key 当场漂移——写入层用 `INSERT OR IGNORE`，
+/// 撞键的记录会被**静默跳过**，不会报错，用户看到的只是"这次采集少了一些
+/// 记录"，且没有任何信号能告诉他为什么。因此这两个声明只要同时出现，就在
+/// 插件构造期直接拒绝启动，不留到某次真实采集才暴露。
+///
+/// 抽成独立纯函数、测试模式与
+/// [`validate_derive_record_key_hooks_not_both_declared`] 一致：直接用
+/// 合成的布尔值验证判断本身，不依赖某个真实插件恰好声明过这个组合。
+fn validate_batch_record_keys_not_combined_with_reached_known_stop_condition(
+    plugin_id: &str,
+    has_derive_record_keys: bool,
+    is_reached_known_stop_condition: bool,
+) -> Result<(), PipelineError> {
+    if has_derive_record_keys && is_reached_known_stop_condition {
+        return Err(PipelineError::Config(format!(
+            "插件 \"{plugin_id}\" 同时声明了 hooks.deriveRecordKeys（批处理序位去重）与 \
+             stopCondition: reachedKnown（增量提前终止）——鸣潮真实存档实测 17.53% 的记录\
+             依赖同秒内序位区分，这个序位只有在\"每次都是整池全量拉取\"时才稳定；一旦允许\
+             增量拉取，序位会在局部集合上重新计算并漂移，撞键的记录会被 INSERT OR IGNORE \
+             静默跳过、不会报错。二者不能同时声明，详见 \
+             docs/_internal/audit/AUDIT-2026-08-12-M2鸣潮真实存档实测.md §1.6～§1.8。"
         )));
     }
     Ok(())
@@ -699,6 +854,27 @@ fn parse_timezone_offset_hours(value: &Value) -> Option<i32> {
 }
 
 // ============================================================
+// PageRequest：单次页面请求的完整声明
+// ============================================================
+
+/// 一次页面请求需要的全部信息——GET 只需要 `url`，POST 还需要 `body` 与
+/// `headers`。用一个判别联合而不是给 `fetch_with_retry` 加
+/// `body: Option<&str>`/`headers: Option<&BTreeMap<...>>` 这类可选参数，是
+/// 因为 GET/POST 两种取值本来就互斥（POST 必然有 body，GET 必然没有），
+/// 用类型表达这份互斥比"某个参数在某种方法下该不该是 `None`"这类隐式约定
+/// 更难用错——调用方在 `match` 的每个分支里都清楚自己在构造哪一种请求。
+enum PageRequest<'a> {
+    Get {
+        url: &'a str,
+    },
+    Post {
+        url: &'a str,
+        body: &'a str,
+        headers: &'a std::collections::BTreeMap<String, String>,
+    },
+}
+
+// ============================================================
 // AuthkeyApiPipeline
 // ============================================================
 
@@ -758,6 +934,10 @@ pub struct AuthkeyApiPipeline<'rt> {
     /// （例如两次采集时间间隔极短、上游对同一页返回了完全相同的数据）
     /// 提前掐断翻页，把 `emptyPage` 语义悄悄替换掉。
     is_reached_known_stop_condition: bool,
+    /// `stopCondition: { kind: "singleRequest" }`——接口一次请求返回整池
+    /// 全量，没有下一页。消费点见 `collect_banner` 循环体：处理完第一次
+    /// 请求即无条件终止，不再判断 `emptyPage`/`reachedKnown`。
+    is_single_request_stop_condition: bool,
     error_map: HashMap<String, ErrorSemantic>,
     rate_limit: RateLimitPolicy,
     /// 请求目标 host 白名单，已在构造期校验合法并归一化为小写（§7.8 裁定）。
@@ -880,6 +1060,15 @@ impl<'rt> AuthkeyApiPipeline<'rt> {
             parsed.collect.params.stop_condition,
             Some(StopConditionJson::ReachedKnown {})
         );
+        let is_single_request_stop_condition = matches!(
+            parsed.collect.params.stop_condition,
+            Some(StopConditionJson::SingleRequest {})
+        );
+        validate_batch_record_keys_not_combined_with_reached_known_stop_condition(
+            plugin_id,
+            has_derive_record_keys,
+            is_reached_known_stop_condition,
+        )?;
 
         Ok(Self {
             plugin_id: plugin_id.to_string(),
@@ -896,6 +1085,7 @@ impl<'rt> AuthkeyApiPipeline<'rt> {
             has_derive_record_keys,
             has_resolve_timezone,
             is_reached_known_stop_condition,
+            is_single_request_stop_condition,
             error_map,
             rate_limit,
             allowed_hosts,
@@ -951,22 +1141,141 @@ impl<'rt> AuthkeyApiPipeline<'rt> {
             .unwrap_or(&[])
     }
 
-    /// 对模板字符串做四个占位符的替换——`build_page_url`（`request.url`）与
-    /// `build_page_body`（`request.body`）共用同一套规则，不各写一份。
+    /// `endpointOverride` 已声明的卡池，把凭据 URL 的路径最后一段替换成
+    /// 卡池覆盖的端点；未声明的卡池原样返回。`build_page_url`/
+    /// `build_page_body`/`build_page_headers` 三处占位符替换入口共用这一步，
+    /// 不各写一份。
+    fn credential_url_with_endpoint_override(
+        &self,
+        credential_url: &str,
+        banner_id: &str,
+    ) -> String {
+        match self.endpoint_override_by_banner.get(banner_id) {
+            Some(segment) => override_url_path_segment(credential_url, segment),
+            None => credential_url.to_string(),
+        }
+    }
+
+    /// 具名占位符 `{{credential.<queryParam>}}` 的替换：从凭据 URL 的对应
+    /// query 参数里取值，供 `substitute_placeholders` 在替换裸 `{{credential}}`
+    /// **之前**调用。
+    ///
+    /// 动机（C7 缺口，`docs/_internal/audit/AUDIT-2026-08-12-M2鸣潮纸面填表
+    /// 演练.md` §8.3）：裸 `{{credential}}` 只能把**整个**凭据 URL 塞进模板，
+    /// 没有任何机制能从中拆出单个 query 参数分别填进 POST body 的不同字段
+    /// ——鸣潮 body 需要 `cardPoolId`/`languageCode`/`playerId`/`recordId`/
+    /// `serverId` 五个离散字段，分别来自凭据 URL 的 `resources_id`/`lang`/
+    /// `player_id`/`record_id`/`svr_id` 五个 query 参数。
+    ///
+    /// 三条 fail-closed 规则——本项目反复抓到"门之所以通过，是因为它什么都
+    /// 没检查"这个失效模式，以下三条都是针对它的预防，任何一条都不能退化成
+    /// 静默放行：
+    /// 1. **query 参数不存在 → `Err`，不得替换成空串**。空串会产出一个字段
+    ///    值为空但语法合法的请求，请求照发、服务端可能返回语义错误的结果，
+    ///    用户看到的是"少了一批记录"而不是一条明确的报错。
+    /// 2. **取到的值含非法字符 → `Err`**。这些值会被拼进 JSON body 字符串
+    ///    字面量。[`crate::cache_scan::extract_query_param`] 不做百分号解码，
+    ///    合法的 query 值不可能出现 `"` `\` `{` `}` 或任何空白/控制字符——
+    ///    一旦出现，说明凭据 URL 本身被投毒：凭据是用插件声明的正则去扫描
+    ///    游戏日志匹配出来的，能往日志里写内容的攻击者可以种一个匹配该正则、
+    ///    却带有这些字符的 URL。
+    /// 3. **本方法返回 `Result`，调用方不得用 `unwrap_or_default()` 之类把
+    ///    错误吞掉**——`substitute_placeholders`/`build_page_url`/
+    ///    `build_page_body`/`build_page_headers` 全部跟着传播 `Result`。
+    ///
+    /// 错误信息只携带插件 id 与占位符名称，不携带凭据 URL 或解析出的参数
+    /// 值——理由与 [`Self::validate_request_url_host`] 相同。
+    fn substitute_named_credential_placeholders(
+        &self,
+        template: &str,
+        credential_url: &str,
+    ) -> Result<String, PipelineError> {
+        const PREFIX: &str = "{{credential.";
+        const SUFFIX: &str = "}}";
+
+        let mut result = String::with_capacity(template.len());
+        let mut remaining = template;
+
+        while let Some(prefix_start) = remaining.find(PREFIX) {
+            result.push_str(&remaining[..prefix_start]);
+            let after_prefix = &remaining[prefix_start + PREFIX.len()..];
+
+            let Some(suffix_offset) = after_prefix.find(SUFFIX) else {
+                // 没有匹配的结束符——不是一个完整的具名占位符。真实插件
+                // 声明的模板不会出现半截占位符，这里只保证不 panic、不死
+                // 循环，原样保留剩余文本交给后续处理。
+                result.push_str(&remaining[prefix_start..]);
+                remaining = "";
+                break;
+            };
+
+            let param_name = &after_prefix[..suffix_offset];
+            remaining = &after_prefix[suffix_offset + SUFFIX.len()..];
+
+            let is_valid_param_name = !param_name.is_empty()
+                && param_name
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_');
+            if !is_valid_param_name {
+                return Err(PipelineError::CredentialParamInvalid {
+                    plugin_id: self.plugin_id.clone(),
+                    param_name: param_name.to_string(),
+                    reason: "占位符名称只能是字母、数字、下划线的组合",
+                });
+            }
+
+            // 规则一：参数不存在必须报错，不能替换成空串。
+            let value = crate::cache_scan::extract_query_param(credential_url, param_name)
+                .ok_or(PipelineError::CredentialParamInvalid {
+                    plugin_id: self.plugin_id.clone(),
+                    param_name: param_name.to_string(),
+                    reason: "凭据 URL 里不存在这个 query 参数——不能替换成空串，那会产出一个字段值为空但语法合法的请求",
+                })?;
+
+            // 规则二：取到的值含有会破坏 JSON body 字符串字面量语法的字符
+            // （引号/反斜杠/花括号）或空白/控制字符时拒绝，凭据 URL 可能
+            // 已被投毒。
+            if contains_json_string_unsafe_char(&value) {
+                return Err(PipelineError::CredentialParamInvalid {
+                    plugin_id: self.plugin_id.clone(),
+                    param_name: param_name.to_string(),
+                    reason: "取到的值含有引号/反斜杠/花括号/空白/控制字符——凭据 URL 可能已被投毒",
+                });
+            }
+
+            result.push_str(&value);
+        }
+
+        result.push_str(remaining);
+        Ok(result)
+    }
+
+    /// 对模板字符串做占位符替换——`build_page_url`（`request.url`）、
+    /// `build_page_body`（`request.body`）与 `build_page_headers`
+    /// （`request.headers` 的值）共用同一套规则，不各写一份。
     /// `credential_url` 由调用方传入**已经**套用过 `endpointOverride` 的值
-    /// （见 `build_page_url` 里的处理），本方法本身不关心端点覆盖。
+    /// （见 [`Self::credential_url_with_endpoint_override`]），本方法本身
+    /// 不关心端点覆盖。
+    ///
+    /// **必须先替换具名的 `{{credential.<name>}}`，再替换裸的
+    /// `{{credential}}`**：顺序上更清晰——虽然两者字面量不会互相误匹配
+    /// （`{{credential}}` 不含 `.`，`str::replace` 是精确字面量匹配，交换
+    /// 顺序不会产生错误结果），但读者不该需要自己推导这一点才能确信正确性，
+    /// 因此固定顺序并写清楚理由。
     fn substitute_placeholders(
         &self,
         template: &str,
         credential_url: &str,
         banner_id: &str,
         page: u32,
-    ) -> String {
-        template
+    ) -> Result<String, PipelineError> {
+        let with_named_params =
+            self.substitute_named_credential_placeholders(template, credential_url)?;
+        Ok(with_named_params
             .replace("{{credential}}", credential_url)
             .replace("{{page}}", &page.to_string())
             .replace("{{gachaType}}", banner_id)
-            .replace("{{pageSize}}", &self.page_size.to_string())
+            .replace("{{pageSize}}", &self.page_size.to_string()))
     }
 
     /// 构造某一页请求的完整 URL。`{{credential}}` 的替换发生在这里——替换后
@@ -977,35 +1286,62 @@ impl<'rt> AuthkeyApiPipeline<'rt> {
     /// （如星铁联动池的 `getLdGachaLog`），先在这里把凭据 URL 的路径最后
     /// 一段换掉，再套用 `request.url` 模板——覆盖动作发生在凭据 URL 已经
     /// 是明文之后、离开 Rust 之前，全程不经过插件代码。
-    pub fn build_page_url(&self, credential_url: &str, banner_id: &str, page: u32) -> String {
-        let credential_url = match self.endpoint_override_by_banner.get(banner_id) {
-            Some(segment) => override_url_path_segment(credential_url, segment),
-            None => credential_url.to_string(),
-        };
+    pub fn build_page_url(
+        &self,
+        credential_url: &str,
+        banner_id: &str,
+        page: u32,
+    ) -> Result<String, PipelineError> {
+        let credential_url = self.credential_url_with_endpoint_override(credential_url, banner_id);
         self.substitute_placeholders(&self.params.request.url, &credential_url, banner_id, page)
     }
 
     /// 构造某一页请求的 POST body（若 `request.body` 已声明），占位符替换
     /// 规则与 [`Self::build_page_url`] 完全一致，复用同一个
     /// [`Self::substitute_placeholders`]。`request.body` 未声明时返回
-    /// `None`——多数插件（如原神）走 GET 分页，没有 body 可言。
+    /// `Ok(None)`——多数插件（如原神）走 GET 分页，没有 body 可言。
     ///
-    /// ⚠️ 未接入 `collect_banner` 的实际发送路径，见
-    /// [`RequestTemplateJson::body`] 字段文档；本方法只提供占位符替换能力，
-    /// 由下方单元测试验证正确性。
+    /// 消费点见 [`Self::collect_banner`]：`request.method` 声明为 `POST`
+    /// 时，这里构造出的 body 会真正随请求发出。
     pub fn build_page_body(
         &self,
         credential_url: &str,
         banner_id: &str,
         page: u32,
-    ) -> Option<String> {
-        let credential_url = match self.endpoint_override_by_banner.get(banner_id) {
-            Some(segment) => override_url_path_segment(credential_url, segment),
-            None => credential_url.to_string(),
+    ) -> Result<Option<String>, PipelineError> {
+        let credential_url = self.credential_url_with_endpoint_override(credential_url, banner_id);
+        self.params
+            .request
+            .body
+            .as_ref()
+            .map(|template| {
+                self.substitute_placeholders(template, &credential_url, banner_id, page)
+            })
+            .transpose()
+    }
+
+    /// 构造某一页请求的头部（若 `request.headers` 已声明），值跑与
+    /// [`Self::build_page_url`] 完全一致的占位符替换——header 名（key）本身
+    /// 不做替换，占位符只用于凭据这类会变化的值。未声明 `request.headers`
+    /// 时返回空表，调用方据此判断是否需要附加任何自定义头。
+    pub fn build_page_headers(
+        &self,
+        credential_url: &str,
+        banner_id: &str,
+        page: u32,
+    ) -> Result<std::collections::BTreeMap<String, String>, PipelineError> {
+        let credential_url = self.credential_url_with_endpoint_override(credential_url, banner_id);
+        let Some(headers_template) = &self.params.request.headers else {
+            return Ok(std::collections::BTreeMap::new());
         };
-        self.params.request.body.as_ref().map(|template| {
-            self.substitute_placeholders(template, &credential_url, banner_id, page)
-        })
+        headers_template
+            .iter()
+            .map(|(key, value_template)| {
+                let value =
+                    self.substitute_placeholders(value_template, &credential_url, banner_id, page)?;
+                Ok((key.clone(), value))
+            })
+            .collect()
     }
 
     /// 校验**占位符替换完成之后**的最终请求 URL，host 是否在插件声明的
@@ -1150,18 +1486,22 @@ impl<'rt> AuthkeyApiPipeline<'rt> {
 
     /// 拉取一页并处理重试/错误语义。`errorMap` 的识别在**每一次**响应到达
     /// 时都会发生（本函数就是分页循环的循环体一部分），而不是只在流程开始
-    /// 前检查一次。
+    /// 前检查一次。GET/POST 共用这一份重试/错误语义处理，不各写一份——两种
+    /// 方法唯一的差异只是"怎么发出这次请求"，用 [`PageRequest`] 把这个差异
+    /// 收在一个参数里。
     fn fetch_with_retry<T: GameApiTransport>(
         &self,
         transport: &T,
-        url: &str,
+        request: &PageRequest,
     ) -> Result<Value, PipelineError> {
         let mut last_error: Option<PipelineError> = None;
 
         for attempt in 1..=self.rate_limit.retry.max_attempts {
-            let outcome = transport
-                .get(url)
-                .map_err(|err| PipelineError::Transport(err.to_string()));
+            let outcome = match request {
+                PageRequest::Get { url } => transport.get(url),
+                PageRequest::Post { url, body, headers } => transport.post(url, body, headers),
+            }
+            .map_err(|err| PipelineError::Transport(err.to_string()));
 
             let response = match outcome {
                 Ok(response) => response,
@@ -1340,11 +1680,39 @@ impl<'rt> AuthkeyApiPipeline<'rt> {
         let stop_reason;
 
         loop {
-            let url = self.build_page_url(credential_url, banner_id, page);
+            let url = self.build_page_url(credential_url, banner_id, page)?;
             // §7.8.3：必须校验替换完成之后的最终 URL，且必须在真正发起请求
-            // （下一行 fetch_with_retry）之前——晚一步就等于请求已经发出去了。
+            // （下面的 fetch_with_retry）之前——晚一步就等于请求已经发出去
+            // 了。这一步在 GET/POST 两条路径之前、且只做一次：无论最终走
+            // 哪个方法，用的都是同一个已校验的 `url`，POST 分支不会绕过它。
             self.validate_request_url_host(&url)?;
-            let response_json = self.fetch_with_retry(transport, &url)?;
+
+            // method 缺省 GET——原神/星铁/绝区零现有行为不变。只有插件显式
+            // 声明 POST 时才构造 body/headers 并改走 transport.post。
+            let response_json = match self.params.request.method {
+                Some(gs_core::HttpMethod::Post) => {
+                    let body = self
+                        .build_page_body(credential_url, banner_id, page)?
+                        .ok_or_else(|| {
+                            PipelineError::Config(format!(
+                                "插件 \"{}\" 的 request.method 声明为 POST，但没有声明 request.body",
+                                self.plugin_id
+                            ))
+                        })?;
+                    let headers = self.build_page_headers(credential_url, banner_id, page)?;
+                    self.fetch_with_retry(
+                        transport,
+                        &PageRequest::Post {
+                            url: &url,
+                            body: &body,
+                            headers: &headers,
+                        },
+                    )?
+                }
+                Some(gs_core::HttpMethod::Get) | None => {
+                    self.fetch_with_retry(transport, &PageRequest::Get { url: &url })?
+                }
+            };
             pages_fetched += 1;
 
             // 用 slice::from_ref 借出去而不是移动/clone——extractList 只需要
@@ -1358,7 +1726,14 @@ impl<'rt> AuthkeyApiPipeline<'rt> {
             let list = list_value.as_array().cloned().unwrap_or_default();
 
             if crate::is_empty_page(list.len()) {
-                stop_reason = StopReason::EmptyPage;
+                // singleRequest 优先于 emptyPage：接口本身不分页，第一次
+                // 请求就是全部结果，即使该页恰好为空（空卡池），也应报告
+                // "已按单次请求语义完成"，而不是普通的 emptyPage 终止。
+                stop_reason = if self.is_single_request_stop_condition {
+                    StopReason::SingleRequest
+                } else {
+                    StopReason::EmptyPage
+                };
                 break;
             }
             non_empty_pages += 1;
@@ -1450,6 +1825,14 @@ impl<'rt> AuthkeyApiPipeline<'rt> {
                 0
             };
 
+            // singleRequest：接口不分页，处理完这一次请求（无论插入了多少
+            // 条新记录）就无条件终止，不再判断 reachedKnown——鸣潮 API 不认
+            // page 参数，继续翻页只会拿到与这一次完全相同的全量数据。
+            if self.is_single_request_stop_condition {
+                stop_reason = StopReason::SingleRequest;
+                break;
+            }
+
             if self.is_reached_known_stop_condition
                 && should_stop_reached_known(consecutive_zero_pages)
             {
@@ -1493,6 +1876,43 @@ impl<'rt> AuthkeyApiPipeline<'rt> {
             stop_reason,
         })
     }
+
+    /// 用 `credential.logFile` 声明的 `logPath`/`decode` 参数，从游戏日志
+    /// 文件里扫出凭据 URL——组合调用 [`crate::log_scan::scan_log_file`]。
+    /// 鸣潮凭据来自 `Client.log`（异或混淆的文本日志），不是原神/星铁/
+    /// 绝区零用的 Chromium 磁盘缓存，因此单独走这条分支，不复用
+    /// `crate::cache_scan::scan_game_cache`（`collect_banner` 的调用方目前
+    /// 就是这样对 `ChromiumCache` 分支直接调用的，见测试
+    /// `cache_scan_and_pipeline_run_together_end_to_end`）。
+    ///
+    /// 只处理 `credential` 声明为 `logFile` 的插件——插件声明的凭据来源与
+    /// 该走哪个扫描函数是一一对应的，调用方（宿主）理应已经按
+    /// [`Self::credential`] 暴露的判别联合自行路由；这里若被喂了非
+    /// `logFile` 的插件，直接拒绝而不是静默退化去扫别的东西。
+    pub fn resolve_log_credential(
+        &self,
+        locator: &dyn InstalledGameLocator,
+    ) -> Result<Option<String>, PipelineError> {
+        let CredentialJson::LogFile {
+            log_path,
+            url_pattern,
+            decode,
+        } = &self.params.credential
+        else {
+            return Err(PipelineError::Config(format!(
+                "插件 \"{}\" 的 credential 未声明为 logFile，无法走日志扫描解析凭据",
+                self.plugin_id
+            )));
+        };
+        let compiled_pattern = url_pattern.compile()?;
+        Ok(crate::log_scan::scan_log_file(
+            &self.plugin_id,
+            log_path,
+            decode.as_ref(),
+            &compiled_pattern,
+            locator,
+        )?)
+    }
 }
 
 #[cfg(test)]
@@ -1503,12 +1923,25 @@ mod tests {
     use std::collections::HashMap as StdHashMap;
     use std::collections::VecDeque;
 
+    /// `(url, body, headers)`——一次被记录下来的 POST 请求全貌，供
+    /// `collect_banner_dispatches_post_request_...` 一类测试断言占位符替换
+    /// 后的实际取值是否正确。单独起名是为了绕开 clippy::type_complexity，
+    /// 不是这个元组本身有什么复用价值。
+    type PostRequestRecord = (String, String, StdHashMap<String, String>);
+
     /// fixture 驱动的传输层：按**精确 URL**注册响应，同一 URL 的重复调用
     /// （HTTP 重试）会一直拿到该 URL 最后注册的那个响应，不会"偷跑"到下一页
     /// 的内容——这正是验证"重试同一页不应误吃掉下一页数据"所需要的语义。
+    /// GET/POST 共用同一份响应注册表（按 URL 查找，不区分方法）——测试只
+    /// 关心"这个 URL 该返回什么"，方法层面的差异由 `post_requests()` 单独
+    /// 记录下来，供需要断言"POST 确实带上了正确 body/headers"的用例读取。
     struct FixtureTransport {
         responses: RefCell<StdHashMap<String, VecDeque<String>>>,
-        calls: RefCell<Vec<String>>,
+        /// `(method, url)`，method 取值 `"GET"`/`"POST"`。`call_count()` 统计
+        /// 两者之和——host 白名单等测试用它断言"请求从未被发出"，不需要区分
+        /// 方法。
+        calls: RefCell<Vec<(&'static str, String)>>,
+        post_requests: RefCell<Vec<PostRequestRecord>>,
     }
 
     impl FixtureTransport {
@@ -1516,6 +1949,7 @@ mod tests {
             Self {
                 responses: RefCell::new(StdHashMap::new()),
                 calls: RefCell::new(Vec::new()),
+                post_requests: RefCell::new(Vec::new()),
             }
         }
 
@@ -1530,11 +1964,12 @@ mod tests {
         fn call_count(&self) -> usize {
             self.calls.borrow().len()
         }
-    }
 
-    impl GameApiTransport for FixtureTransport {
-        fn get(&self, url: &str) -> Result<TransportResponse, TransportError> {
-            self.calls.borrow_mut().push(url.to_string());
+        fn post_requests(&self) -> Vec<PostRequestRecord> {
+            self.post_requests.borrow().clone()
+        }
+
+        fn respond_for(&self, url: &str) -> Result<TransportResponse, TransportError> {
             let mut responses = self.responses.borrow_mut();
             let queue = responses.get_mut(url).ok_or_else(|| {
                 TransportError(format!("FixtureTransport 未注册该 URL 的响应：{url}"))
@@ -1548,6 +1983,31 @@ mod tests {
                     .ok_or_else(|| TransportError(format!("URL 的响应队列已空：{url}")))?
             };
             Ok(TransportResponse { status: 200, body })
+        }
+    }
+
+    impl GameApiTransport for FixtureTransport {
+        fn get(&self, url: &str) -> Result<TransportResponse, TransportError> {
+            self.calls.borrow_mut().push(("GET", url.to_string()));
+            self.respond_for(url)
+        }
+
+        fn post(
+            &self,
+            url: &str,
+            body: &str,
+            headers: &std::collections::BTreeMap<String, String>,
+        ) -> Result<TransportResponse, TransportError> {
+            self.calls.borrow_mut().push(("POST", url.to_string()));
+            self.post_requests.borrow_mut().push((
+                url.to_string(),
+                body.to_string(),
+                headers
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect(),
+            ));
+            self.respond_for(url)
         }
     }
 
@@ -1643,15 +2103,21 @@ mod tests {
 
         let transport = FixtureTransport::new();
         transport.register(
-            pipeline.build_page_url(credential_url, "301", 1),
+            pipeline
+                .build_page_url(credential_url, "301", 1)
+                .expect("URL 构造应当成功"),
             read_fixture("fixtures/genshin/raw_response/301_page_1.json"),
         );
         transport.register(
-            pipeline.build_page_url(credential_url, "301", 2),
+            pipeline
+                .build_page_url(credential_url, "301", 2)
+                .expect("URL 构造应当成功"),
             read_fixture("fixtures/genshin/raw_response/301_page_2.json"),
         );
         transport.register(
-            pipeline.build_page_url(credential_url, "301", 3),
+            pipeline
+                .build_page_url(credential_url, "301", 3)
+                .expect("URL 构造应当成功"),
             read_fixture("fixtures/genshin/raw_response/301_page_3_empty.json"),
         );
 
@@ -1782,15 +2248,21 @@ mod tests {
 
         let transport = FixtureTransport::new();
         transport.register(
-            pipeline.build_page_url(&credential_url, "301", 1),
+            pipeline
+                .build_page_url(&credential_url, "301", 1)
+                .expect("URL 构造应当成功"),
             read_fixture("fixtures/genshin/raw_response/301_page_1.json"),
         );
         transport.register(
-            pipeline.build_page_url(&credential_url, "301", 2),
+            pipeline
+                .build_page_url(&credential_url, "301", 2)
+                .expect("URL 构造应当成功"),
             read_fixture("fixtures/genshin/raw_response/301_page_2.json"),
         );
         transport.register(
-            pipeline.build_page_url(&credential_url, "301", 3),
+            pipeline
+                .build_page_url(&credential_url, "301", 3)
+                .expect("URL 构造应当成功"),
             read_fixture("fixtures/genshin/raw_response/301_page_3_empty.json"),
         );
 
@@ -1832,15 +2304,21 @@ mod tests {
         let run_once = |captured_at: i64| {
             let transport = FixtureTransport::new();
             transport.register(
-                pipeline.build_page_url(credential_url, "301", 1),
+                pipeline
+                    .build_page_url(credential_url, "301", 1)
+                    .expect("URL 构造应当成功"),
                 read_fixture("fixtures/genshin/raw_response/301_page_1.json"),
             );
             transport.register(
-                pipeline.build_page_url(credential_url, "301", 2),
+                pipeline
+                    .build_page_url(credential_url, "301", 2)
+                    .expect("URL 构造应当成功"),
                 read_fixture("fixtures/genshin/raw_response/301_page_2.json"),
             );
             transport.register(
-                pipeline.build_page_url(credential_url, "301", 3),
+                pipeline
+                    .build_page_url(credential_url, "301", 3)
+                    .expect("URL 构造应当成功"),
                 read_fixture("fixtures/genshin/raw_response/301_page_3_empty.json"),
             );
             let repo = storage.repository();
@@ -1888,7 +2366,9 @@ mod tests {
 
         let transport = FixtureTransport::new();
         transport.register(
-            pipeline.build_page_url(credential_url, "301", 1),
+            pipeline
+                .build_page_url(credential_url, "301", 1)
+                .expect("URL 构造应当成功"),
             read_fixture("fixtures/genshin/raw_response/301_page_1.json"),
         );
         // 第二页持续返回一个未在 errorMap 里声明的非零 retcode——genshin
@@ -1896,7 +2376,9 @@ mod tests {
         // 重试耗尽后应当以 Transport 错误告终，而不是被静默忽略或在第一页
         // 就被拦下。
         transport.register(
-            pipeline.build_page_url(credential_url, "301", 2),
+            pipeline
+                .build_page_url(credential_url, "301", 2)
+                .expect("URL 构造应当成功"),
             serde_json::json!({ "retcode": -100, "message": "boom", "data": null }).to_string(),
         );
 
@@ -1978,7 +2460,9 @@ mod tests {
         let runtime = PluginRuntime::new().expect("插件运行时应当能正常启动");
         let pipeline = AuthkeyApiPipeline::new("genshin", &runtime, RateLimitPolicy::default())
             .expect("应当能构造 pipeline");
-        let url = pipeline.build_page_url("CREDENTIAL", "301", 3);
+        let url = pipeline
+            .build_page_url("CREDENTIAL", "301", 3)
+            .expect("URL 构造应当成功");
         assert_eq!(url, "CREDENTIAL&page=3&gacha_type=301&size=20&end_id=0");
     }
 
@@ -1988,7 +2472,12 @@ mod tests {
         let runtime = PluginRuntime::new().expect("插件运行时应当能正常启动");
         let pipeline = AuthkeyApiPipeline::new("genshin", &runtime, RateLimitPolicy::default())
             .expect("应当能构造 pipeline");
-        assert_eq!(pipeline.build_page_body("CREDENTIAL", "301", 1), None);
+        assert_eq!(
+            pipeline
+                .build_page_body("CREDENTIAL", "301", 1)
+                .expect("无 body 声明时不应报错"),
+            None
+        );
     }
 
     #[test]
@@ -2006,6 +2495,7 @@ mod tests {
 
         let body = pipeline
             .build_page_body("PLAYER_TOKEN", "1", 1)
+            .expect("替换不应报错")
             .expect("声明了 request.body 时应当返回 Some");
         assert_eq!(
             body,
@@ -2214,7 +2704,9 @@ mod tests {
 
         let credential_url = "https://public-operation-hkrpg.mihoyo.com/common/gacha_record/api/getGachaLog?authkey=SECRET";
 
-        let overridden = pipeline.build_page_url(credential_url, "21", 1);
+        let overridden = pipeline
+            .build_page_url(credential_url, "21", 1)
+            .expect("URL 构造应当成功");
         assert!(
             overridden.contains("getLdGachaLog"),
             "声明了 endpointOverride 的卡池应当替换成联动池端点：{overridden}"
@@ -2228,7 +2720,9 @@ mod tests {
             "查询串（含明文凭据）必须原样保留：{overridden}"
         );
 
-        let default_endpoint = pipeline.build_page_url(credential_url, "301", 1);
+        let default_endpoint = pipeline
+            .build_page_url(credential_url, "301", 1)
+            .expect("URL 构造应当成功");
         assert!(
             default_endpoint.contains("/getGachaLog?"),
             "未声明 endpointOverride 的卡池应当保持默认端点，不受其它卡池声明影响：{default_endpoint}"
@@ -2437,7 +2931,9 @@ mod tests {
         let credential_url = "https://public-operation-hk4e.mihoyo.com/gacha_info/api/getGachaLog?authkey=FAKE&lang=zh-cn";
         let transport = FixtureTransport::new();
         transport.register(
-            pipeline.build_page_url(credential_url, "301", 1),
+            pipeline
+                .build_page_url(credential_url, "301", 1)
+                .expect("URL 构造应当成功"),
             read_fixture("fixtures/genshin/raw_response/301_page_3_empty.json"),
         );
 
@@ -2540,9 +3036,16 @@ mod tests {
             serde_json::json!({ "retcode": 0, "message": "OK", "data": { "region_time_zone": 8, "list": [] } }).to_string();
 
         let transport = FixtureTransport::new();
-        transport.register(pipeline.build_page_url(credential_url, "301", 1), page_1);
         transport.register(
-            pipeline.build_page_url(credential_url, "301", 2),
+            pipeline
+                .build_page_url(credential_url, "301", 1)
+                .expect("URL 构造应当成功"),
+            page_1,
+        );
+        transport.register(
+            pipeline
+                .build_page_url(credential_url, "301", 2)
+                .expect("URL 构造应当成功"),
             page_2_empty,
         );
 
@@ -2600,7 +3103,9 @@ mod tests {
             "https://public-operation-hk4e.mihoyo.com/gacha_info/api/getGachaLog?authkey=FAKE";
         let transport = FixtureTransport::new();
         transport.register(
-            pipeline.build_page_url(credential_url, "301", 1),
+            pipeline
+                .build_page_url(credential_url, "301", 1)
+                .expect("URL 构造应当成功"),
             read_fixture("fixtures/genshin/raw_response/301_page_1.json"),
         );
 
@@ -2643,15 +3148,21 @@ mod tests {
             "https://public-operation-hk4e.mihoyo.com/gacha_info/api/getGachaLog?authkey=FAKE";
         let transport = FixtureTransport::new();
         transport.register(
-            pipeline.build_page_url(credential_url, "301", 1),
+            pipeline
+                .build_page_url(credential_url, "301", 1)
+                .expect("URL 构造应当成功"),
             read_fixture("fixtures/genshin/raw_response/301_page_1.json"),
         );
         transport.register(
-            pipeline.build_page_url(credential_url, "301", 2),
+            pipeline
+                .build_page_url(credential_url, "301", 2)
+                .expect("URL 构造应当成功"),
             read_fixture("fixtures/genshin/raw_response/301_page_2.json"),
         );
         transport.register(
-            pipeline.build_page_url(credential_url, "301", 3),
+            pipeline
+                .build_page_url(credential_url, "301", 3)
+                .expect("URL 构造应当成功"),
             read_fixture("fixtures/genshin/raw_response/301_page_3_empty.json"),
         );
 
@@ -2704,7 +3215,9 @@ mod tests {
             "https://public-operation-hk4e.mihoyo.com/gacha_info/api/getGachaLog?authkey=FAKE";
         let transport = FixtureTransport::new();
         transport.register(
-            pipeline.build_page_url(credential_url, "301", 1),
+            pipeline
+                .build_page_url(credential_url, "301", 1)
+                .expect("URL 构造应当成功"),
             read_fixture("fixtures/genshin/raw_response/301_page_1.json"),
         );
 
@@ -2752,5 +3265,457 @@ mod tests {
         let pipeline = AuthkeyApiPipeline::new("genshin", &runtime, RateLimitPolicy::default())
             .expect("应当能构造 pipeline");
         assert_eq!(pipeline.raw_time_convention, None);
+    }
+
+    // ============================================================
+    // C7 · 具名占位符 {{credential.<name>}}（M2-S3）
+    // ============================================================
+
+    /// 鸣潮 POST body 的真实需求（`AUDIT-2026-08-12-M2鸣潮纸面填表演练.md`
+    /// §8.3）：五个离散字段分别从凭据 URL 的不同 query 参数取值，
+    /// `cardPoolType` 复用已有的裸占位符 `{{gachaType}}`——验证具名占位符与
+    /// 裸占位符能在同一个模板里共存，且都被正确替换。
+    #[test]
+    fn named_credential_placeholder_extracts_individual_query_params() {
+        let runtime = PluginRuntime::new().expect("插件运行时应当能正常启动");
+        let manifest_value = genshin_manifest_with(|v| {
+            v["collect"]["params"]["request"]["body"] = serde_json::json!(
+                r#"{"cardPoolId":"{{credential.resources_id}}","cardPoolType":"{{gachaType}}","languageCode":"{{credential.lang}}","playerId":"{{credential.player_id}}","recordId":"{{credential.record_id}}","serverId":"{{credential.svr_id}}"}"#
+            );
+        });
+        let pipeline =
+            AuthkeyApiPipeline::from_manifest_json_for_test("genshin", &runtime, manifest_value)
+                .expect("应当能构造 pipeline");
+
+        let credential_url = "https://gmserver-api.aki-game2.com/gacha/record?resources_id=6001&lang=zh-cn&player_id=100000000&record_id=abc123&svr_id=76402e5b20be2c39f095a152090711cc";
+
+        let body = pipeline
+            .build_page_body(credential_url, "2001", 1)
+            .expect("具名占位符应当全部替换成功")
+            .expect("声明了 request.body 时应当返回 Some");
+
+        assert_eq!(
+            body,
+            r#"{"cardPoolId":"6001","cardPoolType":"2001","languageCode":"zh-cn","playerId":"100000000","recordId":"abc123","serverId":"76402e5b20be2c39f095a152090711cc"}"#
+        );
+    }
+
+    /// 规则一：query 参数不存在必须报错，不能替换成空串——空串会产出一个
+    /// 字段值为空但语法合法的请求，请求照发、服务端可能返回语义错误的结果，
+    /// 用户看到的是"少了一批记录"而不是一条明确的报错。
+    #[test]
+    fn named_credential_placeholder_rejects_missing_query_param() {
+        let runtime = PluginRuntime::new().expect("插件运行时应当能正常启动");
+        let manifest_value = genshin_manifest_with(|v| {
+            v["collect"]["params"]["request"]["url"] = serde_json::json!(
+                "https://public-operation-hk4e.mihoyo.com/x?playerId={{credential.player_id}}"
+            );
+        });
+        let pipeline =
+            AuthkeyApiPipeline::from_manifest_json_for_test("genshin", &runtime, manifest_value)
+                .expect("应当能构造 pipeline");
+
+        // 凭据 URL 里没有 player_id 这个 query 参数。
+        let credential_url = "https://public-operation-hk4e.mihoyo.com/x?lang=zh-cn";
+        let result = pipeline.build_page_url(credential_url, "301", 1);
+        match result {
+            Err(PipelineError::CredentialParamInvalid {
+                plugin_id,
+                param_name,
+                reason,
+            }) => {
+                assert_eq!(plugin_id, "genshin");
+                assert_eq!(param_name, "player_id");
+                // ★ 必须断言到 reason：CredentialParamInvalid 是规则一（参数
+                // 不存在）与规则二（取值非法）共用的变体，只断言 param_name
+                // 的话，一条本该走规则二的用例即使实际走了规则一也照样通过。
+                // 这不是假设——本文件的规则二用例最初就是这么写错的（占位符
+                // 名与凭据 URL 里的参数名不一致，实际走的是规则一，规则二的
+                // 字符检查零覆盖），由变异测试暴露后才补上本断言。
+                assert!(
+                    reason.contains("不存在"),
+                    "应当是「参数不存在」而非「取值非法」：{reason}"
+                );
+            }
+            other => panic!("期望 CredentialParamInvalid，实际：{other:?}"),
+        }
+    }
+
+    /// 规则二：取到的值含有会破坏 JSON body 字符串字面量语法的字符时必须
+    /// 报错——这里用一个未经百分号编码、直接嵌了字面引号的凭据 URL 模拟
+    /// "凭据被投毒"的场景（能往游戏日志/缓存里写内容的攻击者，可以种一个
+    /// 匹配 urlPattern 正则、但携带这类字符的 URL）。同时验证错误信息只带
+    /// 占位符名称，不带解析出的取值——避免明文凭据片段被写进日志。
+    #[test]
+    fn named_credential_placeholder_rejects_value_with_illegal_characters() {
+        let runtime = PluginRuntime::new().expect("插件运行时应当能正常启动");
+        let manifest_value = genshin_manifest_with(|v| {
+            v["collect"]["params"]["request"]["url"] = serde_json::json!(
+                "https://public-operation-hk4e.mihoyo.com/x?secret={{credential.secret}}"
+            );
+        });
+        let pipeline =
+            AuthkeyApiPipeline::from_manifest_json_for_test("genshin", &runtime, manifest_value)
+                .expect("应当能构造 pipeline");
+
+        // ⚠️ 占位符名（`secret`）必须与凭据 URL 里真实存在的 query 参数名
+        // 一致，本用例才会走到规则二。这里曾经写成 `{{credential.secretToken}}`
+        // 而凭据 URL 里的参数叫 `secret`——extract_query_param 找不到
+        // `secretToken`，实际触发的是规则一（参数不存在），规则二的字符检查
+        // 从未被执行过，而断言只核 param_name，两条规则的错误都能满足，
+        // 于是这条用例名不副实地"通过"了。
+        let poisoned_credential_url =
+            "https://public-operation-hk4e.mihoyo.com/x?secret=super\"secret&lang=zh-cn";
+        let err = pipeline
+            .build_page_url(poisoned_credential_url, "301", 1)
+            .expect_err("取到的值含有字面引号，应当报错");
+        let message = err.to_string();
+        match &err {
+            PipelineError::CredentialParamInvalid {
+                plugin_id,
+                param_name,
+                reason,
+            } => {
+                assert_eq!(plugin_id, "genshin");
+                assert_eq!(param_name, "secret");
+                assert!(
+                    reason.contains("投毒"),
+                    "应当是「取值非法」而非「参数不存在」：{reason}"
+                );
+            }
+            other => panic!("期望 CredentialParamInvalid，实际：{other:?}"),
+        }
+        assert!(message.contains("secret"), "应当带上占位符名称：{message}");
+        assert!(
+            !message.contains("super\"secret"),
+            "不应当带上解析出的凭据取值：{message}"
+        );
+    }
+
+    // ============================================================
+    // S3 · POST 传输 + request.method/headers 接线 + singleRequest（M2-S3）
+    // ============================================================
+
+    /// 端到端验证鸣潮形态：`request.method: "POST"`、`headers`（含具名占位符）、
+    /// `body`（含具名占位符）三者一起接线进 `collect_banner`，
+    /// `stopCondition: singleRequest` 保证只发一次请求。
+    #[test]
+    fn collect_banner_dispatches_post_request_with_substituted_body_and_headers() {
+        let storage = Storage::open_in_memory().expect("应当能打开内存数据库");
+        let (runtime, account_id) = setup_pipeline_and_account(&storage);
+        let manifest_value = genshin_manifest_with(|v| {
+            v["collect"]["params"]["request"] = serde_json::json!({
+                "url": "https://gmserver-api.aki-game2.com/gacha/record/query",
+                "method": "POST",
+                "headers": {
+                    "Content-Type": "application/json",
+                    "Lang": "{{credential.lang}}"
+                },
+                "body": r#"{"cardPoolId":"{{credential.resources_id}}","cardPoolType":"{{gachaType}}","recordId":"{{credential.record_id}}"}"#
+            });
+            v["collect"]["params"]["allowedHosts"] =
+                serde_json::json!(["gmserver-api.aki-game2.com"]);
+            v["collect"]["params"]["stopCondition"] =
+                serde_json::json!({ "kind": "singleRequest" });
+        });
+        let pipeline =
+            AuthkeyApiPipeline::from_manifest_json_for_test("genshin", &runtime, manifest_value)
+                .expect("应当能构造 pipeline");
+
+        let credential_url =
+            "https://gmserver-api.aki-game2.com/x?resources_id=6001&lang=zh-cn&record_id=abc123";
+        let expected_url = pipeline
+            .build_page_url(credential_url, "2001", 1)
+            .expect("URL 构造应当成功");
+
+        let response_body = serde_json::json!({
+            "retcode": 0,
+            "message": "OK",
+            "data": {
+                "list": [{
+                    "uid": "100000000", "gacha_type": "2001", "count": "1",
+                    "time": "2026-06-18 21:15:32", "name": "测试五星角色A", "lang": "zh-cn",
+                    "item_type": "角色", "rank_type": "5", "id": "1400000000000000010"
+                }]
+            }
+        })
+        .to_string();
+
+        let transport = FixtureTransport::new();
+        transport.register(expected_url.clone(), response_body);
+
+        let repo = storage.repository();
+        let outcome = pipeline
+            .collect_banner(
+                &transport,
+                &repo,
+                account_id,
+                "2001",
+                credential_url,
+                "100000000",
+                None,
+                Some("zh-cn"),
+                1_754_812_801_000,
+            )
+            .expect("采集应当成功");
+
+        assert_eq!(outcome.pages_fetched, 1);
+        assert_eq!(outcome.stop_reason, StopReason::SingleRequest);
+        assert_eq!(transport.call_count(), 1, "只应当发出一次请求");
+
+        let post_requests = transport.post_requests();
+        assert_eq!(
+            post_requests.len(),
+            1,
+            "应当且只应当走 POST 一次，不应该退化成 GET"
+        );
+        let (url, body, headers) = &post_requests[0];
+        assert_eq!(url, &expected_url);
+        assert_eq!(
+            body,
+            r#"{"cardPoolId":"6001","cardPoolType":"2001","recordId":"abc123"}"#
+        );
+        assert_eq!(
+            headers.get("Content-Type").map(String::as_str),
+            Some("application/json"),
+            "Content-Type 由插件通过 headers 声明，不是 Rust 侧硬编码"
+        );
+        assert_eq!(
+            headers.get("Lang").map(String::as_str),
+            Some("zh-cn"),
+            "headers 的值也应当跑占位符替换"
+        );
+    }
+
+    /// ★ POST 路径必须同样受 host 白名单保护，不能绕过 §7.8.3 的校验——
+    /// 新增的 POST 分支绕过既有安全检查是最典型的回归。断言
+    /// `transport.call_count() == 0`：请求从未真正发出，不是发出去了但
+    /// 结果被事后丢弃，这两者在抓包/代理日志里差别巨大。
+    #[test]
+    fn collect_banner_rejects_post_request_when_final_url_host_is_not_allowed() {
+        let storage = Storage::open_in_memory().expect("应当能打开内存数据库");
+        let (runtime, account_id) = setup_pipeline_and_account(&storage);
+        let manifest_value = genshin_manifest_with(|v| {
+            v["collect"]["params"]["request"] = serde_json::json!({
+                "url": "https://evil.example.com/gacha/record/query",
+                "method": "POST",
+                "body": r#"{"cardPoolType":"{{gachaType}}"}"#
+            });
+            // allowedHosts 沿用 genshin 真实声明（mihoyo.com/hoyoverse.com），
+            // 与 request.url 的 host 不一致。
+        });
+        let pipeline =
+            AuthkeyApiPipeline::from_manifest_json_for_test("genshin", &runtime, manifest_value)
+                .expect("应当能构造 pipeline");
+
+        let transport = FixtureTransport::new();
+        // 刻意不注册任何响应——校验生效的话请求根本不会被发出，
+        // FixtureTransport 找不到注册响应而报错也不会发生，因为压根不会
+        // 走到 transport.post。
+
+        let repo = storage.repository();
+        let result = pipeline.collect_banner(
+            &transport,
+            &repo,
+            account_id,
+            "301",
+            "https://public-operation-hk4e.mihoyo.com/x?resources_id=6001",
+            "100000000",
+            None,
+            None,
+            1_754_812_801_000,
+        );
+
+        assert!(
+            matches!(result, Err(PipelineError::HostNotAllowed { .. })),
+            "期望 HostNotAllowed，实际：{result:?}"
+        );
+        assert_eq!(
+            transport.call_count(),
+            0,
+            "POST 路径下 host 不在白名单时，请求必须在发出之前就被拦下——\
+             无论走 GET 还是 POST，都不能绕过 host 白名单校验"
+        );
+    }
+
+    /// `stopCondition: singleRequest`：即使第一页非空，也只应当发出一次
+    /// 请求——鸣潮 API 不认 `page` 参数，继续翻页只会拿到与第一次完全相同
+    /// 的全量数据，用缺省的 `emptyPage` 会陷入死循环。只注册第一页的响应：
+    /// 如果 pipeline 错误地继续翻页，测试会失败在"请求了未注册的第二页"，
+    /// 而不是静默通过。
+    #[test]
+    fn collect_banner_stops_after_single_request_even_when_first_page_is_non_empty() {
+        let storage = Storage::open_in_memory().expect("应当能打开内存数据库");
+        let (runtime, account_id) = setup_pipeline_and_account(&storage);
+        let manifest_value = genshin_manifest_with(|v| {
+            v["collect"]["params"]["stopCondition"] =
+                serde_json::json!({ "kind": "singleRequest" });
+        });
+        let pipeline =
+            AuthkeyApiPipeline::from_manifest_json_for_test("genshin", &runtime, manifest_value)
+                .expect("应当能构造 pipeline");
+
+        let credential_url = "https://public-operation-hk4e.mihoyo.com/gacha_info/api/getGachaLog?authkey=FAKE&lang=zh-cn";
+        let transport = FixtureTransport::new();
+        transport.register(
+            pipeline
+                .build_page_url(credential_url, "301", 1)
+                .expect("URL 构造应当成功"),
+            read_fixture("fixtures/genshin/raw_response/301_page_1.json"),
+        );
+
+        let repo = storage.repository();
+        let outcome = pipeline
+            .collect_banner(
+                &transport,
+                &repo,
+                account_id,
+                "301",
+                credential_url,
+                "100000000",
+                None,
+                Some("zh-cn"),
+                1_754_812_801_000,
+            )
+            .expect("采集应当成功");
+
+        assert_eq!(outcome.stop_reason, StopReason::SingleRequest);
+        assert_eq!(outcome.pages_fetched, 1, "只应当发出一次请求");
+        assert_eq!(transport.call_count(), 1);
+        assert!(outcome.records_inserted > 0, "第一页非空，记录应当已经写入");
+    }
+
+    // ============================================================
+    // C1 · resolve_log_credential（credential.logFile 的真实消费点）
+    // ============================================================
+
+    /// 端到端验证：manifest 声明 `credential.kind: "logFile"` + `decode`，
+    /// `resolve_log_credential` 应当能定位日志文件、解混淆、按 urlPattern
+    /// 扫出凭据 URL——这是 `logPath`/`decode` 两个契约字段的真实消费点
+    /// （HC-4）。
+    #[test]
+    fn resolve_log_credential_decodes_log_and_extracts_url_end_to_end() {
+        let runtime = PluginRuntime::new().expect("插件运行时应当能正常启动");
+        let manifest_value = genshin_manifest_with(|v| {
+            v["collect"]["params"]["credential"] = serde_json::json!({
+                "kind": "logFile",
+                "logPath": "Client/Saved/Logs/Client.log",
+                "urlPattern": {
+                    "source": r"https://[\w.-]+/aki/gacha/index\.html#/record[?=&\w-]+",
+                    "flags": ""
+                },
+                "decode": { "kind": "xorByLowBit", "skipBytes": 0, "maskWhenOdd": 90, "maskWhenEven": 90 }
+            });
+        });
+        let pipeline =
+            AuthkeyApiPipeline::from_manifest_json_for_test("genshin", &runtime, manifest_value)
+                .expect("应当能构造 pipeline");
+
+        let dir = TestDir::new("log-credential-e2e");
+        let log_path = dir.path().join("Client/Saved/Logs/Client.log");
+        std::fs::create_dir_all(log_path.parent().unwrap()).unwrap();
+
+        let plaintext = "2026-08-13 10:00:00 [Info] https://gmserver-api.aki-game2.com/aki/gacha/index.html#/record?a=1\n";
+        // mask_when_odd == mask_when_even 时异或自身可逆（同一个字节异或
+        // 同一个掩码两次等于没变），构造"密文"只需要对明文再跑一遍同样的
+        // 解码函数，不需要像 log_scan.rs 测试那样为非对称掩码单写一个
+        // encode 辅助函数。
+        let spec = crate::log_scan::LogDecodeSpec::XorByLowBit {
+            skip_bytes: 0,
+            mask_when_odd: 0x5A,
+            mask_when_even: 0x5A,
+        };
+        let encoded = crate::log_scan::decode_log_bytes(plaintext.as_bytes(), Some(&spec));
+        std::fs::write(&log_path, &encoded).unwrap();
+
+        let locator =
+            crate::cache_scan::StaticGameLocator::new().with_install_root("genshin", dir.path());
+        let url = pipeline
+            .resolve_log_credential(&locator)
+            .expect("解析不应报错")
+            .expect("应当能从日志里扫出凭据 URL");
+        assert!(url.ends_with("a=1"), "应当扫到唯一一行里的 URL：{url}");
+    }
+
+    /// `credential` 不是 `logFile`（genshin 真实声明是 `chromiumCache`）时
+    /// 应当直接拒绝，不静默退化去扫别的东西。
+    #[test]
+    fn resolve_log_credential_rejects_when_credential_is_not_log_file() {
+        let runtime = PluginRuntime::new().expect("插件运行时应当能正常启动");
+        let pipeline = AuthkeyApiPipeline::new("genshin", &runtime, RateLimitPolicy::default())
+            .expect("应当能构造 pipeline");
+        let locator = crate::cache_scan::StaticGameLocator::new();
+        let result = pipeline.resolve_log_credential(&locator);
+        assert!(
+            matches!(result, Err(PipelineError::Config(_))),
+            "credential 不是 logFile 时应当报 Config 错误，实际：{result:?}"
+        );
+    }
+
+    /// 游戏未在宿主配置里登记安装目录：`LogScanError::GameNotInstalled`
+    /// 应当经由 `From<LogScanError> for PipelineError` 正确传播出来，不是
+    /// panic 或被吞掉。
+    #[test]
+    fn resolve_log_credential_propagates_game_not_installed_error() {
+        let runtime = PluginRuntime::new().expect("插件运行时应当能正常启动");
+        let manifest_value = genshin_manifest_with(|v| {
+            v["collect"]["params"]["credential"] = serde_json::json!({
+                "kind": "logFile",
+                "logPath": "Client/Saved/Logs/Client.log",
+                "urlPattern": { "source": "https://example.com/record", "flags": "" }
+            });
+        });
+        let pipeline =
+            AuthkeyApiPipeline::from_manifest_json_for_test("genshin", &runtime, manifest_value)
+                .expect("应当能构造 pipeline");
+        let locator = crate::cache_scan::StaticGameLocator::new(); // 未注册任何安装目录
+        let result = pipeline.resolve_log_credential(&locator);
+        assert!(
+            matches!(result, Err(PipelineError::Config(_))),
+            "游戏未安装应当报 Config 错误，实际：{result:?}"
+        );
+    }
+
+    // ============================================================
+    // §1.8 · 拒绝"批处理序位 + 增量提前终止"的组合（M2-S3）
+    // ============================================================
+
+    #[test]
+    fn validate_batch_record_keys_not_combined_with_reached_known_stop_condition_rejects_combo() {
+        let result = validate_batch_record_keys_not_combined_with_reached_known_stop_condition(
+            "wuwa", true, true,
+        );
+        assert!(result.is_err(), "批处理序位 + 增量提前终止的组合应当被拒绝");
+        let message = result.unwrap_err().to_string();
+        assert!(message.contains("deriveRecordKeys"));
+        assert!(message.contains("reachedKnown"));
+        assert!(
+            message.contains("17.53"),
+            "错误信息应当说清楚为什么拒绝（实测比例），不能只说\"不允许\"：{message}"
+        );
+    }
+
+    #[test]
+    fn validate_batch_record_keys_not_combined_with_reached_known_stop_condition_accepts_others() {
+        assert!(
+            validate_batch_record_keys_not_combined_with_reached_known_stop_condition(
+                "wuwa", true, false
+            )
+            .is_ok(),
+            "只声明批处理序位、不搭配增量终止，应当放行"
+        );
+        assert!(
+            validate_batch_record_keys_not_combined_with_reached_known_stop_condition(
+                "genshin", false, true
+            )
+            .is_ok(),
+            "只声明增量终止、不搭配批处理序位，应当放行"
+        );
+        assert!(
+            validate_batch_record_keys_not_combined_with_reached_known_stop_condition(
+                "x", false, false
+            )
+            .is_ok()
+        );
     }
 }
