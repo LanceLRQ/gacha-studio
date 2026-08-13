@@ -102,6 +102,12 @@ pub struct TimeConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub timezone_source: Option<TimezoneSource>,
+    /// 记录时间字符串的书写格式，见 [`RawTimeFormat`] 的文档。省略时由 L1
+    /// 范式层套用 `RawTimeFormat::SpaceSeparated` 默认值——米哈游三游的
+    /// manifest 不需要为了这个新字段改一行。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub raw_format: Option<RawTimeFormat>,
 }
 
 /// 原始时间字符串遵循的约定。
@@ -113,6 +119,42 @@ pub enum RawTimeConvention {
     ServerLocal,
     /// 客户端已经按某个时区本地化过的时间字符串。
     ClientLocalized,
+}
+
+/// 记录时间字符串（`fields.time`）的书写格式。
+///
+/// 判据同 [`TimezoneSource`]（`00-实施总览.md` §11.5）：「解析一个日期时间
+/// 字符串」的算法换一个游戏依然成立，归 Rust；但「这个游戏的时间用什么格式
+/// 书写」是游戏知识，归插件声明。本类型修复的是一处已被记录过的能力边界
+/// 违规——早期实现把"空格分隔"和"ISO `T` 分隔"两种格式都写死进
+/// `crates/paradigms/gs-p-authkey/src/pipeline.rs` 的 `parse_record_time`，
+/// 依次尝试到能解析为止；这只是把硬编码从一种变成两种，且会掩盖"插件声明与
+/// 真实数据不符"这个信号——两种格式恰好都能解析出同一个时刻时不会算错，但
+/// 一旦声明与实际线格式不一致，静默兜底不会报错，只会在下一个游戏用第三种
+/// 格式时才被撞见。收口方式与 `crates/paradigms/gs-p-authkey/src/log_scan.rs`
+/// 的 `LogDecodeSpec`（鸣潮日志解混淆参数）完全对称：算法留在 Rust，具体
+/// 取值改成从插件声明读。
+///
+/// 省略时默认 [`Self::SpaceSeparated`]——原神/星铁/绝区零三个参考实现的真实
+/// 响应格式，历史行为不变，不需要为了新增本字段去改它们的 manifest。
+///
+/// ⚠️ **鸣潮的已知褶皱**：鸣潮插件目前只声明一份 `rawFormat`，却要同时覆盖
+/// 两条数据来源——采集走 API（真实线格式尚未抓包验证，见
+/// `fixtures/wuwa/meta.toml` "已知未验证项：API 的 Time 线格式"一节）、导入
+/// 走本地存档（Newtonsoft 序列化 `DateTime` 的产物，确定是 `IsoLocal`）。若
+/// 将来证实 API 发的是另一种格式，一个 `rawFormat` 就不够用了，需要按数据
+/// 来源分别声明。**现在不为此设计机制**——按三次法则，样本数为 1（只有一个
+/// 需要双来源覆盖的游戏）不预先抽象，只在这里记一笔，等真的出现分歧再回改。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+#[ts(tag = "kind", rename_all = "camelCase")]
+pub enum RawTimeFormat {
+    /// `YYYY-MM-DD HH:MM:SS`——米哈游三游参考实现的真实响应格式。
+    SpaceSeparated {},
+    /// `YYYY-MM-DDTHH:MM:SS`（ISO 8601，`T` 分隔）——鸣潮本地存档
+    /// （`fixtures/wuwa/raw_response/*.json` 的形状）的确定格式，API 真实
+    /// 线格式仍未验证，见本类型顶部"鸣潮的已知褶皱"一节。
+    IsoLocal {},
 }
 
 /// 时区信息从哪里推断——三个米哈游参考工具时区可得性完全不一致：星铁 API
@@ -245,6 +287,34 @@ mod tests {
         assert_eq!(json, serde_json::json!({ "kind": "singleRequest" }));
         let round_tripped: StopCondition = serde_json::from_value(json).unwrap();
         assert_eq!(round_tripped, condition);
+    }
+
+    #[test]
+    fn raw_time_format_round_trips_with_kind_tag() {
+        let space_separated = RawTimeFormat::SpaceSeparated {};
+        let json = serde_json::to_value(space_separated).unwrap();
+        assert_eq!(json, serde_json::json!({ "kind": "spaceSeparated" }));
+        let round_tripped: RawTimeFormat = serde_json::from_value(json).unwrap();
+        assert_eq!(round_tripped, space_separated);
+
+        let iso_local = RawTimeFormat::IsoLocal {};
+        let json = serde_json::to_value(iso_local).unwrap();
+        assert_eq!(json, serde_json::json!({ "kind": "isoLocal" }));
+        let round_tripped: RawTimeFormat = serde_json::from_value(json).unwrap();
+        assert_eq!(round_tripped, iso_local);
+    }
+
+    #[test]
+    fn time_config_omits_raw_format_when_absent() {
+        let config = TimeConfig {
+            raw_time_convention: None,
+            timezone_source: None,
+            raw_format: None,
+        };
+        let json = serde_json::to_value(&config).unwrap();
+        assert_eq!(json, serde_json::json!({}));
+        let round_tripped: TimeConfig = serde_json::from_value(json).unwrap();
+        assert_eq!(round_tripped, config);
     }
 
     #[test]

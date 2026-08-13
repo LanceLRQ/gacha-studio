@@ -254,6 +254,13 @@ export const stopConditionSchema = z.discriminatedUnion("kind", [
 
 export const rawTimeConventionSchema = z.enum(["serverLocal", "clientLocalized"]);
 
+// 记录时间字符串的书写格式，见 gs-core::RawTimeFormat 的文档（判别联合动机、
+// 默认值、鸣潮双数据源褶皱的完整说明都在那里，这里不重复）。
+export const rawTimeFormatSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("spaceSeparated") }),
+  z.object({ kind: z.literal("isoLocal") }),
+]);
+
 export const timezoneSourceSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("apiField"), field: z.string() }),
   z.object({ kind: z.literal("staticTable"), field: z.string(), table: z.record(z.string(), z.number()) }),
@@ -263,6 +270,7 @@ export const timezoneSourceSchema = z.discriminatedUnion("kind", [
 export const timeConfigSchema = z.object({
   rawTimeConvention: rawTimeConventionSchema.optional(),
   timezoneSource: timezoneSourceSchema.optional(),
+  rawFormat: rawTimeFormatSchema.optional(),
 });
 
 // ============================================================

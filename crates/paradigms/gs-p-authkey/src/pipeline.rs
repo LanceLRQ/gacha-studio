@@ -134,6 +134,12 @@ impl From<LogScanError> for PipelineError {
     }
 }
 
+impl From<crate::cache_scan::CacheScanError> for PipelineError {
+    fn from(err: crate::cache_scan::CacheScanError) -> Self {
+        Self::Config(err.to_string())
+    }
+}
+
 // ============================================================
 // GameApiTransport：HTTP 走 trait 抽象
 // ============================================================
@@ -287,6 +293,14 @@ pub struct AuthkeyParamsJson {
     /// > 已从契约删除。与本字段的区别在于：`page_size` 是**值**，真的被消费。
     #[serde(rename = "pageSize")]
     pub page_size: Option<u32>,
+    /// 限速与重试参数声明，缺省表示插件对这项没有意见，全部沿用宿主注入的
+    /// [`crate::rate_limit::RateLimitPolicy`]。**这不是"覆盖"关系**——真正
+    /// 生效的策略由 [`crate::rate_limit::RateLimitPolicy::merged_with_declared`]
+    /// 逐字段取更温和者算出，消费点见 [`AuthkeyApiPipeline::from_manifest_value`]。
+    /// 修复前的状态：本字段整个不存在于这个反序列化镜像里，manifest 声明的
+    /// `rateLimit` 会被 serde 静默丢弃——这正是本字段要堵上的缺口。
+    #[serde(rename = "rateLimit", default)]
+    pub rate_limit: Option<gs_core::RateLimitConfig>,
     #[serde(rename = "errorMap", default)]
     pub error_map: HashMap<String, String>,
     #[serde(rename = "stopCondition")]
@@ -437,6 +451,10 @@ struct TimeConfigJson {
     raw_time_convention: Option<RawTimeConventionJson>,
     #[serde(rename = "timezoneSource")]
     timezone_source: Option<TimezoneSourceJson>,
+    /// 记录时间字符串的书写格式，消费点见 [`parse_record_time`]——插件声明
+    /// 什么格式，就只按那一种解析，不再依次尝试多种格式。
+    #[serde(rename = "rawFormat")]
+    raw_format: Option<RawTimeFormatJson>,
 }
 
 /// 对应 `gs_core::RawTimeConvention`。这里单独声明一份而不是直接依赖
@@ -449,6 +467,20 @@ struct TimeConfigJson {
 enum RawTimeConventionJson {
     ServerLocal,
     ClientLocalized,
+}
+
+/// 对应 `gs_core::RawTimeFormat`，理由同 [`RawTimeConventionJson`] 顶部说明
+/// ——本文件不直接复用 `gs_core` 的判别联合，一律单独声明一份只做反序列化的
+/// 镜像。两个变体都是空 payload，可以派生 `Copy`，方便按值传给
+/// [`parse_record_time`]/[`AuthkeyApiPipeline::normalize_time`] 而不必操心
+/// 借用生命周期。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+#[serde(tag = "kind")]
+enum RawTimeFormatJson {
+    #[serde(rename = "spaceSeparated")]
+    SpaceSeparated {},
+    #[serde(rename = "isoLocal")]
+    IsoLocal {},
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -555,6 +587,18 @@ pub const REACHED_KNOWN_THRESHOLD: u32 = 2;
 /// 单独测试这条判断本身。
 pub fn should_stop_reached_known(consecutive_zero_pages: u32) -> bool {
     consecutive_zero_pages >= REACHED_KNOWN_THRESHOLD
+}
+
+/// 即将请求的 `page` 是否命中"每 N 页额外停顿一次"（`RateLimitPolicy::
+/// batch_pause`）的触发点，检查发生在该页请求真正发出**之前**——与三方
+/// 参考实现的顺序一致（`getData.js` 的 `if (page % 10 === 0) { await sleep(1) }`
+/// 在 `getGachaLog(...)` 调用之前），语义是"翻到第 N/2N/3N... 页之前先歇一下"，
+/// 不是"翻完这些页之后再歇"。`every_n_pages` 为 0 会导致取模 panic，但这个
+/// 不变量在构造期已经由 `validate_declared_batch_size` 保证，这里不重复
+/// 判断——与 `should_stop_reached_known` 同样的理由抽成独立函数：脱离完整
+/// pipeline 单独测试这条判断本身。
+pub fn should_batch_pause(page: u32, every_n_pages: u32) -> bool {
+    page % every_n_pages == 0
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -795,6 +839,24 @@ fn validate_batch_record_keys_length(
     Ok(())
 }
 
+/// `collect.params.rateLimit.batchSize` 若声明，必须非零——0 无法构成
+/// 合法的"每 N 页停顿一次"间隔，会让采集循环里的
+/// [`should_batch_pause`] 取模运算除零 panic。校验放在构造期（同
+/// [`validate_endpoint_override_segment`] 的理由），声明不合法直接拒绝
+/// 启动，不留到某次真实翻页时才崩溃。
+fn validate_declared_batch_size(
+    plugin_id: &str,
+    batch_size: Option<u32>,
+) -> Result<(), PipelineError> {
+    if batch_size == Some(0) {
+        return Err(PipelineError::Config(format!(
+            "插件 \"{plugin_id}\" 声明的 collect.params.rateLimit.batchSize 不能是 0——\
+             0 无法构成合法的\"每 N 页停顿一次\"间隔"
+        )));
+    }
+    Ok(())
+}
+
 /// 把 `url` 路径部分的最后一段替换成 `new_segment`，查询串（含明文
 /// authkey）原样保留。
 ///
@@ -860,46 +922,46 @@ fn parse_timezone_offset_hours(value: &Value) -> Option<i32> {
     }
 }
 
-/// 解析 `fields.time`（不带时区的记录时间字符串），兼容两种已实测出现过的
-/// 线格式：
-/// - `"YYYY-MM-DD HH:MM:SS"`（空格分隔）——米哈游三游三个参考实现的真实
-///   响应格式，历史行为不变，第一优先尝试。
-/// - `"YYYY-MM-DDTHH:MM:SS"`（ISO 8601，`T` 分隔）——`fixtures/wuwa/
-///   raw_response/*.json` 的记录时间用这个格式，但这**不是**已经抓包证实
-///   的鸣潮 API 线格式，而是本地存档字段（C# `DateTime`，Newtonsoft 默认
-///   序列化产物）的形状，真实线格式仍未验证（`fixtures/wuwa/meta.toml`
-///   "已知未验证项：API 的 Time 线格式"一节）。在证实之前两种都按"可能"
-///   处理，不赌哪一种——`hooks.deriveRecordKeys`（JS 侧）已经靠"先规范化
-///   再哈希"让 `record_key` 与线格式无关，但 `occurred_at`/`tz_origin`
-///   这两个字段是 Rust 侧现算的，同一份不确定性在这里必须单独兜住，否则
-///   M2-S6 引入的采集/导入两条路径联调（`gs-host` 的 `import_batch`，都
-///   要经过这个函数）第一次真跑 wuwa 真实 fixture 就会全军覆没——不是
-///   假设性风险，是本次实现时的真实报错。
+/// 解析 `fields.time`（不带时区的记录时间字符串），按 `raw_format` 声明的
+/// **那一种**格式解析，不再依次尝试多种格式。
 ///
-/// ⚠️ **本函数是一处已知的能力边界违规，当前实现是止血不是终局。**
+/// # 这里曾经是一处已修复的能力边界违规
 ///
-/// 按 `00-实施总览.md` §11.5 的判断依据——「这段逻辑换一个游戏还成立吗？」
-/// ——「解析一个日期时间字符串」的**算法**换一个游戏依然成立，归 Rust；但
-/// 「这个游戏的时间用什么格式书写」是**游戏知识**，归 TS 声明。同一条边界
-/// 在本 crate 里已经有正确的先例：`log_scan.rs` 的异或解混淆没有把
-/// `0xA5`/`0xEF`/跳 3 字节写死在 Rust 里，而是从插件声明的
-/// [`crate::log_scan::LogDecodeSpec`] 读参数。时间格式与它完全对称，却在
-/// M1 阶段被直接硬编码成了米哈游三游的空格格式。
+/// 修复前的实现依次尝试空格分隔与 ISO `T` 分隔两种格式，哪种能解析就用哪种
+/// ——这只是把硬编码从"一种格式"变成"两种格式"，第三个用其它格式的游戏
+/// 还会再撞一次，而且更隐蔽：只要两种格式都能解析成功且解析出的时刻恰好
+/// 一致，插件声明与真实数据不符这个信号会被静默吞掉，直到某天两种格式解析
+/// 出不同时刻才会暴露（那时候数据库里可能已经攒了一批错误时间戳）。按
+/// `00-实施总览.md` §11.5 的判据——「这段逻辑换一个游戏还成立吗？」——
+/// 「解析一个日期时间字符串」的**算法**换一个游戏依然成立，归 Rust；但
+/// 「这个游戏的时间用什么格式书写」是**游戏知识**，理应由插件在
+/// `time.rawFormat` 声明，Rust 侧只认那一种。收口方式对齐本 crate 已有的
+/// 正确先例——`log_scan.rs` 的 `LogDecodeSpec`：算法留在 Rust，具体取值
+/// （这里是格式字符串）从插件声明读，见 [`crate::log_scan::LogDecodeSpec`]。
 ///
-/// M2 撞上这条边界，正是本阶段「证伪」要找的东西：**它不是破坏性变更**
-/// （加一个可选的格式声明是纯增量），但它是「宿主里藏着游戏专属知识」的
-/// 实例。现在这个「依次尝试两种格式」的写法只是把硬编码从一种变成两种，
-/// 第三个用其它格式的游戏还会再撞一次。正确的收口是让插件在 manifest 里
-/// 声明格式（对齐 `LogDecodeSpec` 的形态），已单独立项，不在 M2-S6 范围内
-/// ——S7 做证伪判定时须把这条计入。
+/// # 为什么改成严格匹配、不再兜底
 ///
-/// 两种格式互斥、不会误判：分隔符不同，用错格式解析必然失败而不是解析出
-/// 另一个时刻；`chrono::NaiveDateTime::parse_from_str` 要求整串被完全消费，
-/// 不接受尾部残留。
-fn parse_record_time(raw_time: &str) -> Result<chrono::NaiveDateTime, PipelineError> {
-    chrono::NaiveDateTime::parse_from_str(raw_time, "%Y-%m-%d %H:%M:%S")
-        .or_else(|_| chrono::NaiveDateTime::parse_from_str(raw_time, "%Y-%m-%dT%H:%M:%S"))
-        .map_err(|err| PipelineError::Json(format!("无法解析记录时间 \"{raw_time}\"：{err}")))
+/// 现在声明 `isoLocal` 就只解析 ISO，遇到空格格式直接报错。理由：
+/// `fixtures/wuwa/meta.toml` "已知未验证项：API 的 Time 线格式"记录的空白
+/// ——鸣潮插件声明的 `isoLocal` 来自本地存档格式，API 真实线格式尚未抓包
+/// 验证。若这个声明与真实数据不符，严格解析会在**首次真实采集**时报出
+/// 明确错误，而不是被"多种格式都试一遍"的兜底悄悄吸收掉——错的声明应该
+/// 报错，不应该被吸收成"反正解析出来了"。
+fn parse_record_time(
+    raw_time: &str,
+    raw_format: RawTimeFormatJson,
+) -> Result<chrono::NaiveDateTime, PipelineError> {
+    let (pattern, kind_label) = match raw_format {
+        RawTimeFormatJson::SpaceSeparated {} => ("%Y-%m-%d %H:%M:%S", "spaceSeparated"),
+        RawTimeFormatJson::IsoLocal {} => ("%Y-%m-%dT%H:%M:%S", "isoLocal"),
+    };
+    chrono::NaiveDateTime::parse_from_str(raw_time, pattern).map_err(|err| {
+        PipelineError::Json(format!(
+            "无法解析记录时间 \"{raw_time}\"：插件声明的 time.rawFormat 是 \"{kind_label}\"\
+             （对应格式 {pattern}），按该格式解析失败：{err}——请检查插件 manifest 里 \
+             time.rawFormat 的声明是否与真实数据一致"
+        ))
+    })
 }
 
 // ============================================================
@@ -964,6 +1026,10 @@ pub struct AuthkeyApiPipeline<'rt> {
     /// 两处那样"连解析是否正确都没人验证过"。
     #[allow(dead_code)]
     raw_time_convention: Option<RawTimeConventionJson>,
+    /// `time.rawFormat` 声明，构造期已套用默认值——省略时是
+    /// `RawTimeFormatJson::SpaceSeparated {}`（原神/星铁/绝区零现有行为
+    /// 不变），消费点见 [`Self::normalize_time`]/[`parse_record_time`]。
+    raw_format: RawTimeFormatJson,
     /// 卡池 id -> 该卡池覆盖的请求端点路径段，来自 `banners[].endpointOverride`。
     /// 只收录声明了该字段的卡池，未声明的卡池走 `params.request.url` 的
     /// 默认端点。
@@ -1081,6 +1147,14 @@ impl<'rt> AuthkeyApiPipeline<'rt> {
 
         let timezone_source = parsed.time.as_ref().and_then(|t| t.timezone_source.clone());
         let raw_time_convention = parsed.time.as_ref().and_then(|t| t.raw_time_convention);
+        // 默认值在构造期就套用，而不是留到 parse_record_time 每次调用时再判断
+        // ——原神/星铁/绝区零都没有声明 rawFormat，默认解析成
+        // `SpaceSeparated`，历史行为不变。
+        let raw_format = parsed
+            .time
+            .as_ref()
+            .and_then(|t| t.raw_format)
+            .unwrap_or(RawTimeFormatJson::SpaceSeparated {});
 
         let has_derive_record_key = plugin_runtime.has(plugin_id, "hooks.deriveRecordKey")?;
         let has_derive_record_keys = plugin_runtime.has(plugin_id, "hooks.deriveRecordKeys")?;
@@ -1096,6 +1170,20 @@ impl<'rt> AuthkeyApiPipeline<'rt> {
                 .map_err(|err| PipelineError::Config(err.to_string()))?,
             None => DEFAULT_PAGE_SIZE,
         };
+
+        // rateLimit：逐字段取更温和者合并注入策略与插件声明，完整规则见
+        // `RateLimitPolicy::merged_with_declared` 的文档。校验必须先于合并
+        // ——batchSize=0 一旦被 min() 选中会让采集循环除零 panic。
+        validate_declared_batch_size(
+            plugin_id,
+            parsed
+                .collect
+                .params
+                .rate_limit
+                .as_ref()
+                .and_then(|declared| declared.batch_size),
+        )?;
+        let rate_limit = rate_limit.merged_with_declared(parsed.collect.params.rate_limit.as_ref());
 
         let error_map = parsed
             .collect
@@ -1129,6 +1217,7 @@ impl<'rt> AuthkeyApiPipeline<'rt> {
             item_id_source: parsed.item_id_source,
             timezone_source,
             raw_time_convention,
+            raw_format,
             endpoint_override_by_banner,
             has_derive_record_key,
             has_derive_record_keys,
@@ -1643,11 +1732,15 @@ impl<'rt> AuthkeyApiPipeline<'rt> {
     /// 毫秒时间戳。`tz_offset_hours` 为 `None` 时说明拿不到可信的时区来源
     /// （既没有 `computed` 也没有其余两种声明），归一化为 `Assumed` 而不是
     /// 悄悄假设某个时区——错的时区好过悄悄编一个看起来对的时区。
+    ///
+    /// `raw_format` 是插件声明（或默认值）的记录时间格式，原样转发给
+    /// [`parse_record_time`]——本函数不再自己猜格式。
     fn normalize_time(
         raw_time: &str,
         tz_offset_hours: Option<i32>,
+        raw_format: RawTimeFormatJson,
     ) -> Result<(i64, TzOrigin, Option<i32>), PipelineError> {
-        let naive = parse_record_time(raw_time)?;
+        let naive = parse_record_time(raw_time, raw_format)?;
         match tz_offset_hours {
             Some(hours) => {
                 let utc_seconds = naive.and_utc().timestamp() - i64::from(hours) * 3600;
@@ -1850,7 +1943,7 @@ impl<'rt> AuthkeyApiPipeline<'rt> {
             };
 
             let (occurred_at, tz_origin, tz_offset_min) =
-                Self::normalize_time(&fields.time, tz_offset_hours)?;
+                Self::normalize_time(&fields.time, tz_offset_hours, self.raw_format)?;
 
             // 此处直接用 fields.banner_id，**不再**二次判别 banner_identity：
             // `Query` 模式下这个字段已经在第一阶段 extractRecord 之后被换成
@@ -1919,6 +2012,13 @@ impl<'rt> AuthkeyApiPipeline<'rt> {
         let stop_reason;
 
         loop {
+            // 批处理限速：翻到第 N/2N/3N... 页之前先额外歇一下，检查发生在
+            // 本页请求发出之前——与三方参考实现的顺序一致，见
+            // `should_batch_pause` 与 `RateLimitPolicy::batch_pause` 的文档。
+            if should_batch_pause(page, self.rate_limit.batch_pause.every_n_pages) {
+                std::thread::sleep(self.rate_limit.batch_pause.delay);
+            }
+
             let url = self.build_page_url(credential_url, banner_id, page)?;
             // §7.8.3：必须校验替换完成之后的最终 URL，且必须在真正发起请求
             // （下面的 fetch_with_retry）之前——晚一步就等于请求已经发出去
@@ -2096,6 +2196,49 @@ impl<'rt> AuthkeyApiPipeline<'rt> {
             locator,
         )?)
     }
+
+    /// 用 `credential.chromiumCache` 声明的 `gameDir`/`urlPattern`，从游戏的
+    /// Chromium 磁盘缓存里扫出凭据 URL——组合调用
+    /// [`crate::cache_scan::scan_game_cache`]。原神/星铁/绝区零走这条分支。
+    ///
+    /// ⚠️ **本方法补的是一处对称性破损，不是新功能。** `CredentialSource`
+    /// 判别联合的两个分支此前只有一个接进了 pipeline：`logFile` 有
+    /// [`Self::resolve_log_credential`]（M2-S3 建），`chromiumCache` 没有对应
+    /// 方法，`scan_game_cache` 是个自由函数，唯一的调用方是测试代码——测试
+    /// 自己解构 `credential()` 拿到 `game_dir` 再直接调它。
+    ///
+    /// 后果是 manifest 里声明的 `credential.gameDir` **在生产代码里从来没有
+    /// 被读出来过**。它长期躲过 HC-4「声明必被消费」门，是因为该门的消费判定
+    /// 曾经把**文档注释**里的字段名也算作消费（`cache_scan.rs` 恰好有两处注释
+    /// 提到 `game_dir`）；M2-S7 修掉注释顶替之后这条红线立刻亮了。
+    ///
+    /// 这与 §4.6.1 裁定「同一个判别联合的两个分支实现必须对称」是同一条原则，
+    /// 只是那次谈的是 crate 落点，这次发生在 pipeline 方法这一层。
+    ///
+    /// 拒绝语义与 [`Self::resolve_log_credential`] 一致：喂进来的插件若不是
+    /// `chromiumCache`，直接报错，而不是静默退化去扫别的东西。
+    pub fn resolve_cache_credential(
+        &self,
+        locator: &dyn InstalledGameLocator,
+    ) -> Result<Option<String>, PipelineError> {
+        let CredentialJson::ChromiumCache {
+            game_dir,
+            url_pattern,
+        } = &self.params.credential
+        else {
+            return Err(PipelineError::Config(format!(
+                "插件 \"{}\" 的 credential 未声明为 chromiumCache，无法走缓存扫描解析凭据",
+                self.plugin_id
+            )));
+        };
+        let compiled_pattern = url_pattern.compile()?;
+        Ok(crate::cache_scan::scan_game_cache(
+            &self.plugin_id,
+            game_dir,
+            &compiled_pattern,
+            locator,
+        )?)
+    }
 }
 
 #[cfg(test)]
@@ -2105,6 +2248,9 @@ mod tests {
     use std::cell::RefCell;
     use std::collections::HashMap as StdHashMap;
     use std::collections::VecDeque;
+    use std::time::Duration;
+
+    use crate::rate_limit::BackoffKind;
 
     /// `(url, body, headers)`——一次被记录下来的 POST 请求全貌，供
     /// `collect_banner_dispatches_post_request_...` 一类测试断言占位符替换
@@ -2398,17 +2544,15 @@ mod tests {
             AuthkeyApiPipeline::new("genshin", &runtime, RateLimitPolicy::zero_delay_for_tests())
                 .expect("应当能构造 pipeline");
 
-        let CredentialJson::ChromiumCache {
-            game_dir,
-            url_pattern,
-        } = pipeline.credential()
-        else {
+        let CredentialJson::ChromiumCache { game_dir, .. } = pipeline.credential() else {
             panic!("genshin 声明的凭据来源应当是 chromiumCache");
         };
-        let compiled_pattern = url_pattern.compile().expect("urlPattern 应当能编译成功");
 
         // 按 game_dir（"YuanShen_Data/webCaches"）声明的相对片段，把 fixture
-        // 样本放到 scan_game_cache 期望的目录结构下。
+        // 样本放到 scan_game_cache 期望的目录结构下。这里读 `game_dir` 是为了
+        // **搭出测试目录**，不是为了替生产代码解析凭据——扫描本身走下面的
+        // `resolve_cache_credential`，与 `logFile` 分支走
+        // `resolve_log_credential` 对称。
         let dir = TestDir::new("cache-scan-e2e");
         let data2_path = dir.path().join(game_dir).join("Cache/Cache_Data/data_2");
         std::fs::create_dir_all(data2_path.parent().unwrap()).unwrap();
@@ -2420,10 +2564,10 @@ mod tests {
 
         let locator =
             crate::cache_scan::StaticGameLocator::new().with_install_root("genshin", dir.path());
-        let credential_url =
-            crate::cache_scan::scan_game_cache("genshin", game_dir, &compiled_pattern, &locator)
-                .expect("扫描不应报错")
-                .expect("应当能从 fixture 样本里扫出凭据 URL");
+        let credential_url = pipeline
+            .resolve_cache_credential(&locator)
+            .expect("扫描不应报错")
+            .expect("应当能从 fixture 样本里扫出凭据 URL");
         assert!(credential_url.contains("getGachaLog"));
         assert!(credential_url.contains("authkey=FAKE_AUTHKEY_FOR_FIXTURE_ONLY"));
         let lang = crate::cache_scan::extract_query_param(&credential_url, "lang");
@@ -3185,22 +3329,66 @@ mod tests {
         assert_eq!(parse_timezone_offset_hours(&serde_json::json!(null)), None);
     }
 
-    /// 空格分隔（米哈游三游真实响应格式）与 ISO 8601 `T` 分隔（鸣潮
-    /// `raw_response/*.json` fixture 的形状）两种线格式都必须能解析出
-    /// 同一个时刻——这是 `fixtures/wuwa/meta.toml` "已知未验证项：API 的
-    /// Time 线格式"一节记录的不确定性在 Rust 侧的直接后果，两种都要接住。
+    // ============================================================
+    // parse_record_time：按声明的单一格式解析，不再依次尝试
+    // ============================================================
+
     #[test]
-    fn parse_record_time_accepts_both_space_and_iso_t_separated_formats() {
-        let space_separated =
-            parse_record_time("2026-06-18 21:15:32").expect("空格分隔格式应当能解析");
-        let iso_t_separated =
-            parse_record_time("2026-06-18T21:15:32").expect("ISO T 分隔格式应当能解析");
-        assert_eq!(space_separated, iso_t_separated);
+    fn parse_record_time_accepts_iso_local_when_declared() {
+        let parsed = parse_record_time("2026-06-18T21:15:32", RawTimeFormatJson::IsoLocal {})
+            .expect("声明 isoLocal 时 ISO 字符串应当能解析");
+        assert_eq!(
+            parsed,
+            chrono::NaiveDate::from_ymd_opt(2026, 6, 18)
+                .unwrap()
+                .and_hms_opt(21, 15, 32)
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn parse_record_time_accepts_space_separated_when_declared() {
+        let parsed = parse_record_time("2026-06-18 21:15:32", RawTimeFormatJson::SpaceSeparated {})
+            .expect("声明 spaceSeparated 时空格分隔字符串应当能解析");
+        assert_eq!(
+            parsed,
+            chrono::NaiveDate::from_ymd_opt(2026, 6, 18)
+                .unwrap()
+                .and_hms_opt(21, 15, 32)
+                .unwrap()
+        );
+    }
+
+    /// ★ 严格匹配的核心行为：声明 `isoLocal` 时空格分隔格式必须报错，不再
+    /// 像修复前那样依次尝试两种格式后"反正能解析出来就算数"。
+    #[test]
+    fn parse_record_time_rejects_space_separated_when_iso_local_declared() {
+        let err = parse_record_time("2026-06-18 21:15:32", RawTimeFormatJson::IsoLocal {})
+            .expect_err("声明 isoLocal 时空格分隔格式应当报错，不能被静默兜底接受");
+        let message = err.to_string();
+        assert!(
+            message.contains("2026-06-18 21:15:32") && message.contains("isoLocal"),
+            "错误信息应当包含原始字符串与声明的 kind，实际：{message}"
+        );
+    }
+
+    /// 对称的另一半：声明 `spaceSeparated` 时 ISO 格式必须报错。
+    #[test]
+    fn parse_record_time_rejects_iso_local_when_space_separated_declared() {
+        let err = parse_record_time("2026-06-18T21:15:32", RawTimeFormatJson::SpaceSeparated {})
+            .expect_err("声明 spaceSeparated 时 ISO 格式应当报错，不能被静默兜底接受");
+        let message = err.to_string();
+        assert!(
+            message.contains("2026-06-18T21:15:32") && message.contains("spaceSeparated"),
+            "错误信息应当包含原始字符串与声明的 kind，实际：{message}"
+        );
     }
 
     #[test]
     fn parse_record_time_rejects_unrecognized_format() {
-        assert!(parse_record_time("18/06/2026 21:15:32").is_err());
+        assert!(
+            parse_record_time("18/06/2026 21:15:32", RawTimeFormatJson::SpaceSeparated {}).is_err()
+        );
     }
 
     /// apiField 声明且响应体确实带该字段：时区应当正确换算，`tz_origin`
@@ -3466,6 +3654,34 @@ mod tests {
         let pipeline = AuthkeyApiPipeline::new("genshin", &runtime, RateLimitPolicy::default())
             .expect("应当能构造 pipeline");
         assert_eq!(pipeline.raw_time_convention, None);
+    }
+
+    // ============================================================
+    // A4 · rawFormat
+    // ============================================================
+
+    /// 未声明 `time.rawFormat`：默认套用 `SpaceSeparated`，genshin 现有
+    /// manifest 从未声明过这个字段，历史行为不能变。
+    #[test]
+    fn manifest_parsing_defaults_raw_format_to_space_separated_when_absent() {
+        let runtime = PluginRuntime::new().expect("插件运行时应当能正常启动");
+        let pipeline = AuthkeyApiPipeline::new("genshin", &runtime, RateLimitPolicy::default())
+            .expect("应当能构造 pipeline");
+        assert_eq!(pipeline.raw_format, RawTimeFormatJson::SpaceSeparated {});
+    }
+
+    /// 声明 `time.rawFormat: { kind: "isoLocal" }`：pipeline 应当原样存下这个
+    /// 声明——这是 `parse_record_time` 真正读取到插件意图的唯一路径。
+    #[test]
+    fn manifest_parsing_captures_declared_raw_format() {
+        let runtime = PluginRuntime::new().expect("插件运行时应当能正常启动");
+        let manifest_value = genshin_manifest_with(|v| {
+            v["time"] = serde_json::json!({ "rawFormat": { "kind": "isoLocal" } });
+        });
+        let pipeline =
+            AuthkeyApiPipeline::from_manifest_json_for_test("genshin", &runtime, manifest_value)
+                .expect("应当能构造 pipeline");
+        assert_eq!(pipeline.raw_format, RawTimeFormatJson::IsoLocal {});
     }
 
     // ============================================================
@@ -3838,6 +4054,51 @@ mod tests {
         assert!(url.ends_with("a=1"), "应当扫到唯一一行里的 URL：{url}");
     }
 
+    /// 与 `resolve_log_credential_rejects_when_credential_is_not_log_file`
+    /// 对称：`credential` 不是 `chromiumCache` 时同样直接拒绝。两个分支的
+    /// 拒绝语义必须一致，否则「宿主按 `credential()` 的判别联合自行路由」
+    /// 这条约定在其中一边会失去兜底。
+    #[test]
+    fn resolve_cache_credential_rejects_when_credential_is_not_chromium_cache() {
+        let runtime = PluginRuntime::new().expect("插件运行时应当能正常启动");
+        let manifest_value = genshin_manifest_with(|v| {
+            v["collect"]["params"]["credential"] = serde_json::json!({
+                "kind": "logFile",
+                "logPath": "Client/Saved/Logs/Client.log",
+                "urlPattern": { "source": "https://example.com/record", "flags": "" }
+            });
+        });
+        let pipeline =
+            AuthkeyApiPipeline::from_manifest_json_for_test("genshin", &runtime, manifest_value)
+                .expect("应当能构造 pipeline");
+        let locator = crate::cache_scan::StaticGameLocator::new();
+        let result = pipeline.resolve_cache_credential(&locator);
+        assert!(
+            matches!(result, Err(PipelineError::Config(_))),
+            "credential 不是 chromiumCache 时应当报 Config 错误，实际：{result:?}"
+        );
+    }
+
+    /// 游戏未登记安装目录时，`CacheScanError::GameNotInstalled` 应当经由
+    /// `From<CacheScanError> for PipelineError` 传播出来——与 `logFile`
+    /// 分支的同名测试对称。
+    #[test]
+    fn resolve_cache_credential_propagates_game_not_installed_error() {
+        let runtime = PluginRuntime::new().expect("插件运行时应当能正常启动");
+        let pipeline = AuthkeyApiPipeline::new("genshin", &runtime, RateLimitPolicy::default())
+            .expect("应当能构造 pipeline");
+        // 空 locator：任何 game_id 都查不到安装目录。
+        let locator = crate::cache_scan::StaticGameLocator::new();
+        let result = pipeline.resolve_cache_credential(&locator);
+        let Err(PipelineError::Config(message)) = result else {
+            panic!("未登记安装目录时应当报 Config 错误，实际：{result:?}");
+        };
+        assert!(
+            message.contains("genshin"),
+            "错误信息应当点名是哪个游戏没登记：{message}"
+        );
+    }
+
     /// `credential` 不是 `logFile`（genshin 真实声明是 `chromiumCache`）时
     /// 应当直接拒绝，不静默退化去扫别的东西。
     #[test]
@@ -4144,5 +4405,199 @@ mod tests {
             "banner_key 与 pity_group 必须取自同一来源：全部记录的 pity_group 都应是查询参数 \
              \"301\" 对应的 groupA，不能有记录因为响应里的 gacha_type=400 而被错误地判给 groupB"
         );
+    }
+
+    // ============================================================
+    // collect.params.rateLimit（M2-S6 之后的缺口修复）：manifest 声明的
+    // 限速参数曾经完全不进反序列化路径——AuthkeyParamsJson 没有 rateLimit
+    // 字段，serde 静默丢弃了它。以下用例既验证合并逻辑本身（与
+    // rate_limit.rs 的单元测试互补：这里从"真实 manifest JSON 文本"出发，
+    // 证明字段确实穿过了反序列化 + 合并两层，不是只在 RateLimitPolicy
+    // 内部测试通过而 pipeline.rs 仍然没接上），也验证接线路径上新增的
+    // 构造期校验（batchSize=0 拒绝启动）。
+    // ============================================================
+
+    /// 用 `from_manifest_value`（私有，测试模块作为祖先模块可直接调用）而
+    /// 不是 `from_manifest_json_for_test`——后者把注入策略写死成
+    /// `RateLimitPolicy::zero_delay_for_tests()`，delay 类字段已经是下界，
+    /// 无法构造"声明比注入更短"的场景。这里需要自己控制注入值。
+    #[test]
+    fn declared_rate_limit_longer_per_page_delay_flows_through_deserialization_and_merge() {
+        let runtime = PluginRuntime::new().expect("插件运行时应当能正常启动");
+        let manifest_value = genshin_manifest_with(|v| {
+            v["collect"]["params"]["rateLimit"] = serde_json::json!({ "perPageDelayMs": 9000 });
+        });
+        let pipeline = AuthkeyApiPipeline::from_manifest_value(
+            "genshin",
+            &runtime,
+            manifest_value,
+            RateLimitPolicy::default(), // 注入 300ms
+        )
+        .expect("应当能构造 pipeline");
+        assert_eq!(
+            pipeline.rate_limit.per_page_delay,
+            Duration::from_millis(9000)
+        );
+    }
+
+    /// 本任务的核心场景：插件声明的延迟比注入值更短，不能被采纳——证明
+    /// "合并"而不是"覆盖"这条口径在真实反序列化路径上也成立，不只是
+    /// `RateLimitPolicy::merged_with_declared` 单测里成立。
+    ///
+    /// ⚠️ **必须同时声明一个"插件会赢"的字段，否则这条测试名不副实。**
+    /// 只断言 `per_page_delay == 300ms` 的话，两种截然不同的实现会产生
+    /// **完全相同**的观测结果：
+    ///   1. 正确执行了 `max(300, 10)`，插件值因更激进而落选；
+    ///   2. `rateLimit` 整个对象根本没被解析（本任务修的就是这个缺口），
+    ///      注入值原样穿过。
+    ///
+    /// 变异测试实测过这一点——把 `rateLimit` 的解析整个退回不接线，这条
+    /// 测试**依然通过**。所以这里补上 `retry.maxAttempts: 2`（比注入的 5
+    /// 更保守，插件应当赢）：两条断言合起来才同时证明了"declared 确实被
+    /// 解析到了"与"更激进的那个字段没被采纳"，缺一条都留有上述歧义。
+    #[test]
+    fn declared_rate_limit_shorter_per_page_delay_cannot_relax_injected_policy() {
+        let runtime = PluginRuntime::new().expect("插件运行时应当能正常启动");
+        let manifest_value = genshin_manifest_with(|v| {
+            v["collect"]["params"]["rateLimit"] = serde_json::json!({
+                "perPageDelayMs": 10,
+                "retry": { "maxAttempts": 2 },
+            });
+        });
+        let pipeline = AuthkeyApiPipeline::from_manifest_value(
+            "genshin",
+            &runtime,
+            manifest_value,
+            RateLimitPolicy::default(), // 注入 300ms / 5 次，前者比声明的 10ms 更温和
+        )
+        .expect("应当能构造 pipeline");
+        // ① 更激进的声明（10ms < 300ms）没被采纳。
+        assert_eq!(
+            pipeline.rate_limit.per_page_delay,
+            Duration::from_millis(300)
+        );
+        // ② 但 declared 确实被解析到了——更保守的 maxAttempts 赢了。没有这
+        //    一条，①单独成立并不能排除"整个 rateLimit 没接线"。
+        assert_eq!(
+            pipeline.rate_limit.retry.max_attempts, 2,
+            "declared 未被解析：若 rateLimit 整个对象没接进反序列化路径，这里会是注入的 5"
+        );
+    }
+
+    /// genshin 场景零影响：真实插件（`plugins/genshin/manifest.ts`）没有声明
+    /// `rateLimit`，走注册表路径（`AuthkeyApiPipeline::new`，不是测试专用的
+    /// `from_manifest_value`），合并结果必须与注入值逐字段相等——历史行为
+    /// 不受本次改动影响。
+    #[test]
+    fn genshin_plugin_without_declared_rate_limit_is_unaffected_by_merge() {
+        let runtime = PluginRuntime::new().expect("插件运行时应当能正常启动");
+        let injected = RateLimitPolicy::default();
+        let pipeline =
+            AuthkeyApiPipeline::new("genshin", &runtime, injected).expect("应当能构造 pipeline");
+        assert_eq!(pipeline.rate_limit, injected);
+    }
+
+    /// 完整往返：manifest 同时声明 `perPageDelayMs`/`batchSize`/
+    /// `batchDelayMs`/`retry.maxAttempts`/`retry.backoff`/`retry.delayMs`
+    /// 六个子字段，逐一核对合并结果——防止某个字段的 serde `rename`
+    /// （如 `delayMs`/`maxAttempts`）与 `packages/gs-plugin-kit/manifest.ts`
+    /// 的实际 camelCase 键名不一致却在只测单字段的用例里被漏掉。
+    #[test]
+    fn declared_rate_limit_all_subfields_round_trip_through_merge() {
+        let runtime = PluginRuntime::new().expect("插件运行时应当能正常启动");
+        let manifest_value = genshin_manifest_with(|v| {
+            v["collect"]["params"]["rateLimit"] = serde_json::json!({
+                "perPageDelayMs": 800,
+                "batchSize": 4,
+                "batchDelayMs": 2500,
+                "retry": {
+                    "maxAttempts": 2,
+                    "backoff": "exponential",
+                    "delayMs": 6000,
+                },
+            });
+        });
+        let pipeline = AuthkeyApiPipeline::from_manifest_value(
+            "genshin",
+            &runtime,
+            manifest_value,
+            RateLimitPolicy::default(),
+        )
+        .expect("应当能构造 pipeline");
+
+        assert_eq!(
+            pipeline.rate_limit.per_page_delay,
+            Duration::from_millis(800)
+        );
+        assert_eq!(pipeline.rate_limit.batch_pause.every_n_pages, 4);
+        assert_eq!(
+            pipeline.rate_limit.batch_pause.delay,
+            Duration::from_millis(2500)
+        );
+        assert_eq!(pipeline.rate_limit.retry.max_attempts, 2);
+        assert_eq!(pipeline.rate_limit.retry.backoff, BackoffKind::Exponential);
+        assert_eq!(pipeline.rate_limit.retry.delay, Duration::from_millis(6000));
+    }
+
+    #[test]
+    fn validate_declared_batch_size_rejects_zero() {
+        let result = validate_declared_batch_size("genshin", Some(0));
+        assert!(
+            result.is_err(),
+            "batchSize=0 无法构成合法的停顿间隔，必须拒绝"
+        );
+        assert!(result.unwrap_err().to_string().contains("batchSize"));
+    }
+
+    #[test]
+    fn validate_declared_batch_size_accepts_absent_or_nonzero() {
+        assert!(validate_declared_batch_size("genshin", None).is_ok());
+        assert!(validate_declared_batch_size("genshin", Some(1)).is_ok());
+        assert!(validate_declared_batch_size("genshin", Some(10)).is_ok());
+    }
+
+    /// 构造期集成测试：manifest 声明 `batchSize: 0` 必须在 pipeline 构造阶段
+    /// 就被拒绝，而不是留到某次真实翻页时除零 panic。
+    #[test]
+    fn manifest_declaring_zero_batch_size_is_rejected_at_construction() {
+        let runtime = PluginRuntime::new().expect("插件运行时应当能正常启动");
+        let manifest_value = genshin_manifest_with(|v| {
+            v["collect"]["params"]["rateLimit"] = serde_json::json!({ "batchSize": 0 });
+        });
+        let result =
+            AuthkeyApiPipeline::from_manifest_json_for_test("genshin", &runtime, manifest_value);
+        // `AuthkeyApiPipeline` 没有派生 `Debug`（生命周期参数携带
+        // `&PluginRuntime`，没有必要为了这一处测试断言给生产类型加派生），
+        // 因此不能用 `unwrap_err()`（要求 `Ok` 分支也实现 `Debug`），改用
+        // `match` 显式处理两个分支。
+        match result {
+            Err(err) => assert!(err.to_string().contains("batchSize")),
+            Ok(_) => panic!("batchSize=0 应当在构造期被拒绝"),
+        }
+    }
+
+    // ============================================================
+    // should_batch_pause：纯函数，脱离完整 pipeline 单独验证触发点
+    // ============================================================
+
+    #[test]
+    fn should_batch_pause_triggers_on_exact_multiples() {
+        assert!(should_batch_pause(10, 10));
+        assert!(should_batch_pause(20, 10));
+        assert!(should_batch_pause(30, 10));
+    }
+
+    #[test]
+    fn should_batch_pause_does_not_trigger_between_multiples() {
+        assert!(!should_batch_pause(1, 10));
+        assert!(!should_batch_pause(9, 10));
+        assert!(!should_batch_pause(11, 10));
+    }
+
+    #[test]
+    fn should_batch_pause_every_page_when_interval_is_one() {
+        // 插件把 batchSize 合并成 1（"每页都停顿"）是合法边界值，不是 0。
+        assert!(should_batch_pause(1, 1));
+        assert!(should_batch_pause(2, 1));
     }
 }

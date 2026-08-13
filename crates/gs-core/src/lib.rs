@@ -17,7 +17,8 @@ mod record_key;
 
 pub use collect::{
     BackoffKind, ErrorSemantic, GameClientSize, HostEnv, PreconditionLevel, PreconditionStatus,
-    RateLimitConfig, RawTimeConvention, RetryConfig, StopCondition, TimeConfig, TimezoneSource,
+    RateLimitConfig, RawTimeConvention, RawTimeFormat, RetryConfig, StopCondition, TimeConfig,
+    TimezoneSource,
 };
 pub use error::{AcquireError, Dependency, GsError, NetworkError, NoCredentialReason};
 pub use pity::{GuaranteeRule, PityGroup, ProbabilityCurve};

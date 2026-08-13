@@ -2,10 +2,19 @@
  * fixture 契约测试助手 + 静态契约检查。
  *
  * 完整流程（`assertPluginFixture`）：每个插件在 `fixtures/<game>/` 下提供
- * 脱敏样本，跑一遍完整流程：读取 `raw_response/` 下的样本响应 → 依次跑插件的
+ * 脱敏样本，跑一遍完整流程：按 `<bannerId>_page_<n>[_后缀].json` 的约定解析
+ * `raw_response/` 下的样本文件名、按卡池分组 → 卡池内按页序依次跑插件的
  * `collect.params.extractList` / `fields.extractRecord` / 各 `hooks.*` →
  * 过 `../schema` 的 `unifiedRecordFieldsSchema` 运行时校验 → 对比
  * `fixtures/<game>/expected/normalized.json`（插件 SDK 文档第 6.3 节）。
+ *
+ * ⚠️ **按「单卡池单页」调用 `hooks.deriveRecordKeys`，不合批**——这是对齐
+ * 宿主真实行为（`crates/paradigms/gs-p-authkey/src/pipeline.rs` 的
+ * `collect_banner`/`derive_record_keys_for_page`）的硬约束：宿主一次只采集
+ * 一个卡池，卡池内部逐页处理，每页各调一次 `deriveRecordKeys`，从不跨页、
+ * 更不跨卡池合批。早先的实现把 `raw_response/` 下全部文件不分卡池拼成一批
+ * 只调一次，对「序位参与 record_key」的插件（鸣潮）算出的批次分组与生产
+ * 环境不等价，验证的是一个生产中不会出现的批次形态。
  *
  * 本文件是 `package.json` 对外导出的契约入口（`"./testkit"`），插件作者会
  * import 它，因此刻意不做任何 IO——`assertPluginFixture` 需要读文件，但读取
@@ -263,6 +272,50 @@ function deriveFixtureRecordKeys(hooks: PluginHooks | undefined, allFields: Unif
   });
 }
 
+/** `raw_response/` 下单个样本文件按约定格式解析出的卡池归属与页序。 */
+interface ParsedResponseFileName {
+  fileName: string;
+  bannerId: string;
+  pageIndex: number;
+}
+
+/**
+ * `raw_response/<bannerId>_page_<n>[_后缀].json`——如 `"301_page_1.json"`、
+ * `"301_page_3_empty.json"`、`"1_page_1.json"`。后缀（下划线之后、`.json`
+ * 之前的部分）纯粹是给人看的展示信息（如 genshin 用 `_empty` 标记空页
+ * fixture），不参与解析。
+ */
+const RESPONSE_FILE_NAME_PATTERN = /^([A-Za-z0-9]+)_page_(\d+)(?:_[A-Za-z0-9]+)?\.json$/;
+
+/**
+ * 解析响应样本文件名，取出该文件属于哪个卡池、是第几页——`assertPluginFixture`
+ * 要按「单卡池单页」调用 `deriveRecordKeys`（见本文件头部说明），就必须先知道
+ * 这两件事，而它们通常不在响应体本身里（鸣潮的响应元素甚至不携带可还原的
+ * 卡池 id，见 `plugins/wuwa/manifest.ts` 的 `fields.extractRecord` 注释），
+ * 只能靠文件名约定表达。
+ *
+ * 解析失败直接抛错、附上期望格式，**不静默回退成"当作一批处理"**——静默
+ * 回退等于这层校验从未存在过，是本项目反复记录的失效模式（门通过是因为它
+ * 什么都没检查），早先"全部文件合成一批"的实现正是这个模式的实例。
+ */
+function parseResponseFileName(fileName: string): ParsedResponseFileName {
+  const match = RESPONSE_FILE_NAME_PATTERN.exec(fileName);
+  if (!match) {
+    throw new Error(
+      `响应样本文件名 "${fileName}" 不符合约定格式 "<bannerId>_page_<n>[_后缀].json"` +
+        `（如 "301_page_1.json"、"301_page_3_empty.json"）——assertPluginFixture 需要从` +
+        "文件名解析出所属卡池与页序，才能模拟宿主 collect_banner「单卡池单页」调用 " +
+        "hooks.deriveRecordKeys 的真实行为，不能静默当成一批处理。",
+    );
+  }
+  const [, bannerId, pageIndexText] = match;
+  if (bannerId === undefined || pageIndexText === undefined) {
+    // 不应发生：两个捕获组都是正则里非可选的部分，`match` 成立即保证两者存在。
+    throw new Error(`内部错误：文件名 "${fileName}" 匹配成功但捕获组缺失`);
+  }
+  return { fileName, bannerId, pageIndex: Number(pageIndexText) };
+}
+
 /**
  * 对指定插件跑一遍 fixture 契约测试。
  *
@@ -270,19 +323,26 @@ function deriveFixtureRecordKeys(hooks: PluginHooks | undefined, allFields: Unif
  * 1. 先跑 `checkResolveTimezoneContract` / `checkCountDrawsContract`——这两条
  *    不需要样本数据，manifest/hooks 声明本身有问题应当最先暴露。
  * 2. 读取 `fixtureDir/meta.toml`（取 `[account]` 小节）与
- *    `fixtureDir/raw_response/*.json`（按文件名排序，模拟分页顺序）。
- * 3. 对每个响应文件：跑 `collect.params.extractList` 取出本页记录数组，
- *    对每条记录跑 `fields.extractRecord` → schema 校验 → 可选的
- *    `hooks.transformRecord` → 再次校验，收集进跨全部响应文件的样本数组。
- * 4. 全部样本收齐后，批量算出 `recordKey`：`hooks.deriveRecordKeys`
- *    （整批一次调用）优先，其次 `hooks.deriveRecordKey`（逐条调用），
- *    都未声明则退化到各自的 `stableId`——**不能逐条算**，`deriveRecordKeys`
- *    需要同时看到"这一批里的其余记录"才能算出序位，理由见
- *    `PluginHooks.deriveRecordKeys` 的文档。再算（若时区来源是 `computed`）
- *    `hooks.resolveTimezone`。
- * 5. 用第 3～4 步统计出的「样本是否全部有 stableId」调用
+ *    `fixtureDir/raw_response/*.json`，按 `parseResponseFileName` 解析出的
+ *    卡池 id 分组、组内按页序排序——对齐宿主 `collect_banner` 一次只采集
+ *    一个卡池、卡池内部逐页处理的调用形状。
+ * 3. 按「卡池 → 页」顺序处理每个响应文件：跑 `collect.params.extractList`
+ *    取出本页记录数组，对每条记录跑 `fields.extractRecord` → schema 校验 →
+ *    可选的 `hooks.transformRecord` → 再次校验 → 若 manifest 声明了
+ *    `collect.params.bannerIdentity === "query"`，把 `bannerId` 覆盖成本页
+ *    所属的卡池 id（时机对齐宿主 `build_records`：在 `extractRecord`/
+ *    `transformRecord` 之后、`deriveRecordKeys` 之前，见该覆盖分支旁的
+ *    注释）。
+ * 4. **每页各自**批量算出这一页的 `recordKey`：`hooks.deriveRecordKeys`
+ *    （整批一次调用，输入只是这一页的记录）优先，其次 `hooks.deriveRecordKey`
+ *    （逐条调用），都未声明则退化到各自的 `stableId`——**不能逐条算**，
+ *    `deriveRecordKeys` 需要同时看到"这一页里的其余记录"才能算出序位，理由
+ *    见 `PluginHooks.deriveRecordKeys` 的文档。再算（若时区来源是
+ *    `computed`）`hooks.resolveTimezone`。
+ * 5. 用全部页面汇总出的「样本是否全部有 stableId」调用
  *    `checkDeriveRecordKeyContract`——这一条必须等样本跑完才有意义。
- * 6. 读取 `fixtureDir/expected/normalized.json`，与第 4 步的结果逐条深比较。
+ * 6. 读取 `fixtureDir/expected/normalized.json`，与第 4 步按「卡池 → 页 →
+ *    页内原始顺序」拼接的结果逐条深比较。
  *
  * 本 Stage 只支持声明了 `collect.params.extractList` 的范式（目前唯一实现
  * 是 `credentialedApi`）——按**能力**（是否有 `extractList` 可跑）判断，
@@ -312,7 +372,7 @@ export async function assertPluginFixture(
         "尚无可运行的 fixture 契约测试实现。",
     );
   }
-  const { extractList } = plugin.manifest.collect.params;
+  const { extractList, bannerIdentity } = plugin.manifest.collect.params;
   const { extractRecord } = plugin.manifest.fields;
 
   const metaText = await reader.readText(`${fixtureDir}/meta.toml`);
@@ -329,49 +389,88 @@ export async function assertPluginFixture(
     throw new Error(`fixture 目录 "${fixtureDir}/raw_response" 下没有任何样本响应文件`);
   }
 
-  // 第一阶段：跑完 extractList/extractRecord/transformRecord，收齐跨全部
-  // 响应文件的样本 fields——deriveRecordKeys（批处理钩子）需要整批数据
-  // 一起传给插件，不能逐条调用。
+  // 按 <bannerId>_page_<n>[_后缀].json 解析文件名、按卡池分组，组内按页序
+  // 排序——见 parseResponseFileName 与本文件头部对齐宿主行为的说明。解析
+  // 失败在这里直接抛出，不会往下走到任何一次 extractList/extractRecord。
+  const parsedFileNames = responseFileNames.map(parseResponseFileName);
+  const pagesByBanner = new Map<string, ParsedResponseFileName[]>();
+  for (const parsed of parsedFileNames) {
+    const pages = pagesByBanner.get(parsed.bannerId) ?? [];
+    pages.push(parsed);
+    pagesByBanner.set(parsed.bannerId, pages);
+  }
+  for (const pages of pagesByBanner.values()) {
+    pages.sort((a, b) => a.pageIndex - b.pageIndex);
+  }
+  const bannerIds = [...pagesByBanner.keys()].sort();
+
+  // 第一阶段：按「卡池 → 页」的顺序跑完 extractList/extractRecord/
+  // transformRecord/bannerIdentity 覆盖，按页分组收集 fields——
+  // deriveRecordKeys（批处理钩子）需要同一页的整批数据一起传给插件，
+  // 不能逐条调用，也不能跨页/跨卡池合批（本文件头部说明）。
   const timezoneRequired = plugin.manifest.time?.timezoneSource?.kind === "computed";
+  const pageBatches: Array<{ fileName: string; fields: UnifiedRecordFields[] }> = [];
   const allFields: UnifiedRecordFields[] = [];
 
-  for (const fileName of responseFileNames) {
-    const rawText = await reader.readText(`${fixtureDir}/raw_response/${fileName}`);
-    let response: unknown;
-    try {
-      response = JSON.parse(rawText);
-    } catch (error) {
-      throw new Error(`解析样本响应 "${fileName}" 失败：${String(error)}`);
+  for (const bannerId of bannerIds) {
+    const pages = pagesByBanner.get(bannerId);
+    if (!pages) {
+      // 不应发生：bannerIds 就是从 pagesByBanner 的 key 集合取出的。
+      throw new Error(`内部错误：卡池 "${bannerId}" 的分组在 pagesByBanner 中丢失`);
     }
-
-    const list = extractList(response);
-    if (!Array.isArray(list)) {
-      throw new Error(`插件 "${plugin.manifest.id}" 的 extractList 在样本 "${fileName}" 上没有返回数组`);
-    }
-
-    for (const rawRecord of list) {
-      let fields = extractRecord(rawRecord);
-      const parsed = unifiedRecordFieldsSchema.safeParse(fields);
-      if (!parsed.success) {
-        throw new Error(
-          `样本 "${fileName}" 中的一条记录未通过 unifiedRecordFieldsSchema 校验：${parsed.error.message}`,
-        );
+    for (const { fileName } of pages) {
+      const rawText = await reader.readText(`${fixtureDir}/raw_response/${fileName}`);
+      let response: unknown;
+      try {
+        response = JSON.parse(rawText);
+      } catch (error) {
+        throw new Error(`解析样本响应 "${fileName}" 失败：${String(error)}`);
       }
-      fields = parsed.data as UnifiedRecordFields;
 
-      if (plugin.hooks?.transformRecord) {
-        const transformCtx: TransformContext = { bannerId: fields.bannerId };
-        fields = plugin.hooks.transformRecord(fields, transformCtx);
-        const reparsed = unifiedRecordFieldsSchema.safeParse(fields);
-        if (!reparsed.success) {
+      const list = extractList(response);
+      if (!Array.isArray(list)) {
+        throw new Error(`插件 "${plugin.manifest.id}" 的 extractList 在样本 "${fileName}" 上没有返回数组`);
+      }
+
+      const pageFields: UnifiedRecordFields[] = [];
+      for (const rawRecord of list) {
+        let fields = extractRecord(rawRecord);
+        const parsed = unifiedRecordFieldsSchema.safeParse(fields);
+        if (!parsed.success) {
           throw new Error(
-            `样本 "${fileName}" 的记录经 hooks.transformRecord 处理后未通过校验：${reparsed.error.message}`,
+            `样本 "${fileName}" 中的一条记录未通过 unifiedRecordFieldsSchema 校验：${parsed.error.message}`,
           );
         }
-        fields = reparsed.data as UnifiedRecordFields;
+        fields = parsed.data as UnifiedRecordFields;
+
+        if (plugin.hooks?.transformRecord) {
+          const transformCtx: TransformContext = { bannerId: fields.bannerId };
+          fields = plugin.hooks.transformRecord(fields, transformCtx);
+          const reparsed = unifiedRecordFieldsSchema.safeParse(fields);
+          if (!reparsed.success) {
+            throw new Error(
+              `样本 "${fileName}" 的记录经 hooks.transformRecord 处理后未通过校验：${reparsed.error.message}`,
+            );
+          }
+          fields = reparsed.data as UnifiedRecordFields;
+        }
+
+        // bannerIdentity: "query" 时，在 extractRecord（及可能的
+        // transformRecord）之后、deriveRecordKeys 之前，把 bannerId 换成
+        // 本页文件名解析出的卡池 id——时机对齐宿主 build_records（见该方法
+        // 文档："提前到这里之后……deriveRecordKeys/banner_key/pity_group
+        // 三处天然一致"）：晚一步（比如落库前才覆盖）会让 deriveRecordKeys
+        // 读到与卡池无关的占位值，record_key 就少了卡池这一维。未声明或
+        // 声明 "response" 时不覆盖——原神会混池、必须信响应，现有行为不变。
+        if (bannerIdentity === "query") {
+          fields = { ...fields, bannerId };
+        }
+
+        pageFields.push(fields);
+        allFields.push(fields);
       }
 
-      allFields.push(fields);
+      pageBatches.push({ fileName, fields: pageFields });
     }
   }
 
@@ -379,23 +478,29 @@ export async function assertPluginFixture(
   const sampleWithStableId = allFields.filter((fields) => Boolean(fields.stableId)).length;
   checkDeriveRecordKeyContract(plugin.hooks, sampleCount > 0 && sampleWithStableId === sampleCount);
 
-  // 第二阶段：批量算出全部样本记录的 record_key，再拼上（若需要）时区偏移。
-  const recordKeys = deriveFixtureRecordKeys(plugin.hooks, allFields);
-  const normalizedRecords: NormalizedFixtureRecord[] = allFields.map((fields, index) => {
-    const recordKey = recordKeys[index];
-    if (recordKey === undefined) {
-      // 不应发生：deriveFixtureRecordKeys 已经保证返回值与 allFields 等长；
-      // 这里只是让 noUncheckedIndexedAccess 下标访问的类型收窄成立，同时
-      // 留一道防线，而不是用非空断言假装"肯定不会错"。
-      throw new Error(`内部错误：record_key 数组在下标 ${index} 处缺失（itemId="${fields.itemId}"）`);
+  // 第二阶段：**每页各自**算出这一页的 record_key，不跨页/跨卡池合批——
+  // 与宿主 derive_record_keys_for_page 的调用形状一致，再拼上（若需要）
+  // 时区偏移。
+  const normalizedRecords: NormalizedFixtureRecord[] = [];
+  for (const { fileName, fields: pageFields } of pageBatches) {
+    const pageRecordKeys = deriveFixtureRecordKeys(plugin.hooks, pageFields);
+    for (let i = 0; i < pageFields.length; i++) {
+      const fields = pageFields[i];
+      const recordKey = pageRecordKeys[i];
+      if (fields === undefined || recordKey === undefined) {
+        // 不应发生：deriveFixtureRecordKeys 已经保证返回值与 pageFields 等长；
+        // 这里只是让 noUncheckedIndexedAccess 下标访问的类型收窄成立，同时
+        // 留一道防线，而不是用非空断言假装"肯定不会错"。
+        throw new Error(`内部错误：样本 "${fileName}" 第 ${i + 1} 条记录或其 record_key 缺失`);
+      }
+      const normalized: NormalizedFixtureRecord = { fields, recordKey };
+      if (timezoneRequired) {
+        // 上面的 checkResolveTimezoneContract 已经保证 hooks.resolveTimezone 存在。
+        normalized.timezoneOffsetHours = plugin.hooks?.resolveTimezone?.(fields, timezoneCtx);
+      }
+      normalizedRecords.push(normalized);
     }
-    const normalized: NormalizedFixtureRecord = { fields, recordKey };
-    if (timezoneRequired) {
-      // 上面的 checkResolveTimezoneContract 已经保证 hooks.resolveTimezone 存在。
-      normalized.timezoneOffsetHours = plugin.hooks?.resolveTimezone?.(fields, timezoneCtx);
-    }
-    return normalized;
-  });
+  }
 
   const expectedText = await reader.readText(`${fixtureDir}/expected/normalized.json`);
   let expected: NormalizedFixture;

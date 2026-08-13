@@ -25,6 +25,7 @@
  */
 
 import type { PluginHooks, PluginManifest } from "../manifest";
+import type { UnifiedRecordFields } from "../types/index.ts";
 import {
   assertPluginFixture,
   checkCountDrawsContract,
@@ -141,7 +142,10 @@ const minimalFixturePlugin = {
 
 const minimalFixtureFiles = {
   "fixtures/self-test/meta.toml": '[account]\nuid = "100000000"\n',
-  "fixtures/self-test/raw_response/page_1.json": '{"list":[{"id":"1","name":"测试物品"}]}',
+  // 文件名按 "<bannerId>_page_<n>[_后缀].json" 约定命名——bannerId 取 "301"，
+  // 与下面 extractRecord 返回的 bannerId 字面量一致（本插件未声明
+  // bannerIdentity，不会被覆盖，文件名里的 bannerId 只用于 testkit 分组）。
+  "fixtures/self-test/raw_response/301_page_1.json": '{"list":[{"id":"1","name":"测试物品"}]}',
   "fixtures/self-test/expected/normalized.json": JSON.stringify({
     records: [
       {
@@ -323,7 +327,7 @@ const selfCheckCases: SelfCheckCase[] = [
 
       const batchFixtureFiles = {
         "fixtures/self-test-batch/meta.toml": '[account]\nuid = "100000000"\n',
-        "fixtures/self-test-batch/raw_response/page_1.json": JSON.stringify({
+        "fixtures/self-test-batch/raw_response/standard_page_1.json": JSON.stringify({
           list: [{ name: "共鸣者A" }, { name: "共鸣者B" }],
         }),
         "fixtures/self-test-batch/expected/normalized.json": JSON.stringify({
@@ -372,7 +376,7 @@ const selfCheckCases: SelfCheckCase[] = [
       };
       const files = {
         "fixtures/self-test-batch-broken/meta.toml": '[account]\nuid = "100000000"\n',
-        "fixtures/self-test-batch-broken/raw_response/page_1.json": JSON.stringify({
+        "fixtures/self-test-batch-broken/raw_response/standard_page_1.json": JSON.stringify({
           list: [{ name: "共鸣者A" }, { name: "共鸣者B" }],
         }),
       };
@@ -381,6 +385,213 @@ const selfCheckCases: SelfCheckCase[] = [
         () => assertPluginFixture(brokenBatchPlugin, "fixtures/self-test-batch-broken", reader),
         "长度必须一致",
       );
+    },
+  },
+
+  // ============================================================
+  // testkit 与宿主行为对齐修复：文件名约定 + bannerIdentity 覆盖 +
+  // 按「单卡池单页」调用 deriveRecordKeys（2026-08-13）
+  // ============================================================
+
+  {
+    name: "assertPluginFixture：响应样本文件名不符合命名约定时应报错，并给出期望格式",
+    run: async () => {
+      const files = {
+        "fixtures/self-test-bad-filename/meta.toml": '[account]\nuid = "100000000"\n',
+        // 不带 "<bannerId>_page_<n>" 前缀——不符合约定格式，不能静默当成一批
+        // 处理，必须直接报错并说明期望的命名形式。
+        "fixtures/self-test-bad-filename/raw_response/response.json": '{"list":[]}',
+      };
+      const reader = makeInMemoryReader(files);
+      await expectThrows(
+        () => assertPluginFixture(minimalFixturePlugin, "fixtures/self-test-bad-filename", reader),
+        "<bannerId>_page_<n>",
+      );
+    },
+  },
+  {
+    name: 'assertPluginFixture：bannerIdentity: "query" 时，bannerId 被覆盖成文件名解析出的卡池 id',
+    run: async () => {
+      const queryBannerPlugin = {
+        manifest: {
+          ...baseManifest,
+          collect: {
+            paradigm: "credentialedApi" as const,
+            params: {
+              credential: { kind: "manual" as const },
+              request: { url: "https://example.invalid/{{credential}}" },
+              allowedHosts: ["example.invalid"],
+              extractList: (response: unknown) => (response as { list: unknown[] }).list,
+              bannerIdentity: "query" as const,
+            },
+          },
+          fields: {
+            extractRecord: (raw: unknown) => {
+              const record = raw as { id: string };
+              // 故意返回一个与真实卡池无关的占位值——模拟鸣潮响应不携带可
+              // 还原卡池身份的情形，见 plugins/wuwa/manifest.ts 同款占位串
+              // 旁的注释。若覆盖没有生效，下面的 expected 会因这个占位值
+              // 对不上而报错。
+              return {
+                itemId: record.id,
+                time: "2026-01-01 00:00:00",
+                bannerId: "not-derivable-from-response",
+                count: 1,
+                stableId: record.id,
+              };
+            },
+          },
+        },
+        hooks: { deriveRecordKey: (record) => `${record.bannerId}:${record.itemId}` } satisfies PluginHooks,
+      };
+      const files = {
+        "fixtures/self-test-banner-query/meta.toml": '[account]\nuid = "100000000"\n',
+        "fixtures/self-test-banner-query/raw_response/42_page_1.json": '{"list":[{"id":"1"}]}',
+        "fixtures/self-test-banner-query/expected/normalized.json": JSON.stringify({
+          records: [
+            {
+              fields: { itemId: "1", time: "2026-01-01 00:00:00", bannerId: "42", count: 1, stableId: "1" },
+              recordKey: "42:1",
+            },
+          ],
+        }),
+      };
+      const reader = makeInMemoryReader(files);
+      await expectNotThrows(() =>
+        assertPluginFixture(queryBannerPlugin, "fixtures/self-test-banner-query", reader),
+      );
+    },
+  },
+  {
+    name: "assertPluginFixture：未声明 bannerIdentity（默认 response）时，bannerId 保留 extractRecord 原值，不被文件名覆盖",
+    run: async () => {
+      const responseBannerPlugin = {
+        manifest: {
+          ...baseManifest,
+          collect: {
+            paradigm: "credentialedApi" as const,
+            params: {
+              credential: { kind: "manual" as const },
+              request: { url: "https://example.invalid/{{credential}}" },
+              allowedHosts: ["example.invalid"],
+              extractList: (response: unknown) => (response as { list: unknown[] }).list,
+              // bannerIdentity 不声明——默认 "response"，原神现有行为不变。
+            },
+          },
+          fields: {
+            extractRecord: (raw: unknown) => {
+              const record = raw as { id: string };
+              return {
+                itemId: record.id,
+                time: "2026-01-01 00:00:00",
+                bannerId: "raw-response-value",
+                count: 1,
+                stableId: record.id,
+              };
+            },
+          },
+        },
+        hooks: { deriveRecordKey: (record) => `${record.bannerId}:${record.itemId}` } satisfies PluginHooks,
+      };
+      const files = {
+        "fixtures/self-test-banner-response/meta.toml": '[account]\nuid = "100000000"\n',
+        // 文件名解析出的卡池 id 是 "99"，与 extractRecord 返回的 bannerId 不
+        // 同——未声明 bannerIdentity 时不应覆盖，最终应保留 "raw-response-value"。
+        "fixtures/self-test-banner-response/raw_response/99_page_1.json": '{"list":[{"id":"1"}]}',
+        "fixtures/self-test-banner-response/expected/normalized.json": JSON.stringify({
+          records: [
+            {
+              fields: {
+                itemId: "1",
+                time: "2026-01-01 00:00:00",
+                bannerId: "raw-response-value",
+                count: 1,
+                stableId: "1",
+              },
+              recordKey: "raw-response-value:1",
+            },
+          ],
+        }),
+      };
+      const reader = makeInMemoryReader(files);
+      await expectNotThrows(() =>
+        assertPluginFixture(responseBannerPlugin, "fixtures/self-test-banner-response", reader),
+      );
+    },
+  },
+  {
+    name: "assertPluginFixture：deriveRecordKeys 按卡池分别调用，不跨卡池合批",
+    run: async () => {
+      // 用一个会记录每次调用参数的 deriveRecordKeys，断言它被调用了两次
+      // （每个卡池各一次），且每次的输入只包含该卡池自己的记录——这正是
+      // 宿主 collect_banner「一次只采集一个卡池」的真实调用形状，早先"全部
+      // 文件合成一批只调一次"的实现验证的是一个生产中不会出现的批次。
+      const callArgs: UnifiedRecordFields[][] = [];
+      const twoBannerPlugin = {
+        manifest: {
+          ...baseManifest,
+          collect: {
+            paradigm: "credentialedApi" as const,
+            params: {
+              credential: { kind: "manual" as const },
+              request: { url: "https://example.invalid/{{credential}}" },
+              allowedHosts: ["example.invalid"],
+              extractList: (response: unknown) => (response as { list: unknown[] }).list,
+            },
+          },
+          fields: {
+            extractRecord: (raw: unknown) => {
+              const record = raw as { id: string; bannerId: string };
+              return { itemId: record.id, time: "2026-01-01 00:00:00", bannerId: record.bannerId, count: 1 };
+            },
+          },
+        },
+        hooks: {
+          deriveRecordKeys: (records: UnifiedRecordFields[]): string[] => {
+            callArgs.push(records);
+            return records.map((record, index) => `${record.bannerId}:${index}`);
+          },
+        } satisfies PluginHooks,
+      };
+      const files = {
+        "fixtures/self-test-two-banners/meta.toml": '[account]\nuid = "100000000"\n',
+        "fixtures/self-test-two-banners/raw_response/1_page_1.json": JSON.stringify({
+          list: [
+            { id: "a", bannerId: "1" },
+            { id: "b", bannerId: "1" },
+          ],
+        }),
+        "fixtures/self-test-two-banners/raw_response/2_page_1.json": JSON.stringify({
+          list: [{ id: "c", bannerId: "2" }],
+        }),
+        "fixtures/self-test-two-banners/expected/normalized.json": JSON.stringify({
+          records: [
+            { fields: { itemId: "a", time: "2026-01-01 00:00:00", bannerId: "1", count: 1 }, recordKey: "1:0" },
+            { fields: { itemId: "b", time: "2026-01-01 00:00:00", bannerId: "1", count: 1 }, recordKey: "1:1" },
+            { fields: { itemId: "c", time: "2026-01-01 00:00:00", bannerId: "2", count: 1 }, recordKey: "2:0" },
+          ],
+        }),
+      };
+      const reader = makeInMemoryReader(files);
+      await expectNotThrows(() =>
+        assertPluginFixture(twoBannerPlugin, "fixtures/self-test-two-banners", reader),
+      );
+
+      if (callArgs.length !== 2) {
+        throw new Error(`期望 deriveRecordKeys 被调用 2 次（每个卡池各一次），实际调用了 ${callArgs.length} 次`);
+      }
+      const firstCall = callArgs[0];
+      const secondCall = callArgs[1];
+      if (!firstCall || !secondCall) {
+        // 不应发生：上面已经断言 callArgs.length === 2。
+        throw new Error(`内部错误：callArgs 缺少预期的调用记录：${JSON.stringify(callArgs)}`);
+      }
+      if (firstCall.length !== 2 || firstCall.some((record) => record.bannerId !== "1")) {
+        throw new Error(`第一次调用应只包含卡池 "1" 的 2 条记录，实际：${JSON.stringify(firstCall)}`);
+      }
+      if (secondCall.length !== 1 || secondCall.some((record) => record.bannerId !== "2")) {
+        throw new Error(`第二次调用应只包含卡池 "2" 的 1 条记录，实际：${JSON.stringify(secondCall)}`);
+      }
     },
   },
 ];

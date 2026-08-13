@@ -899,7 +899,10 @@
       "pityTarget": "5"
     },
     "time": {
-      "rawTimeConvention": "serverLocal"
+      "rawTimeConvention": "serverLocal",
+      "rawFormat": {
+        "kind": "isoLocal"
+      }
     },
     "preconditions": [
       {

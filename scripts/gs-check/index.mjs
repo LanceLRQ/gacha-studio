@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // pnpm gs:check —— 插件层「改用 TypeScript 而非 Rust」这个架构决策的
-// 机械验证装置。依次跑七道门：
+// 机械验证装置。依次跑八道门：
 //   HC-1 编译期打包（禁止运行时动态加载）
 //   HC-2 能力窄口（IPC 表面收窄，凭据不过 IPC）
 //   HC-3 类型生成（codegen + git diff 必须为空）
@@ -10,6 +10,9 @@
 //   SANI fixture 脱敏工具自检（gs-sanitize 规则反例测试，不属于 HC 编号
 //        序列——它验证的是通用安全工具本身的正确性，不是插件 TS 化这个
 //        架构决策，与 FMT 同类归属，见该门文件头注释）
+//   FIXRS 插件真实 fixture 必须流过 Rust 侧（跨语言覆盖率下限，不属于 HC
+//        编号序列——它验证的是"两侧测试覆盖率不能只各自全绿"这件事，与
+//        插件 TS 化架构决策无关，归属同 SANI/FMT，见该门文件头注释）
 //   FMT  cargo fmt --all --check（格式化一致性，不属于 HC 编号序列）
 // 任一门失守都应该退回 Rust 插件方案，所以这不是普通 lint，是持续门禁——
 // CI 平台还没定不能作为暂缓的理由，本脚本就是本地可跑、真实生效的替代。
@@ -20,6 +23,7 @@ import { run as runCodegenDiff } from './checks/codegen-diff.mjs';
 import { run as runDeclarationConsumption } from './checks/declaration-consumption.mjs';
 import { run as runTemplateTypecheck } from './checks/template-typecheck.mjs';
 import { run as runSanitizeSelfCheck } from './checks/sanitize-self-check.mjs';
+import { run as runRustFixtureFlow } from './checks/rust-fixture-flow.mjs';
 import { run as runCargoFmt } from './checks/cargo-fmt.mjs';
 import { renderResult, renderSummary } from './lib/report.mjs';
 
@@ -34,6 +38,7 @@ async function main() {
   results.push(await runDeclarationConsumption());
   results.push(await runTemplateTypecheck());
   results.push(await runSanitizeSelfCheck());
+  results.push(await runRustFixtureFlow());
   results.push(await runCargoFmt());
 
   for (const result of results) {

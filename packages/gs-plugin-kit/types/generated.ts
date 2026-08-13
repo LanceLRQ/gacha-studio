@@ -106,8 +106,15 @@ export type RetryConfig = { maxAttempts?: number, backoff?: BackoffKind, delayMs
 export type BackoffKind = "fixed" | "exponential";
 export type ErrorSemantic = "authkeyExpired" | "rateLimited" | "unknown";
 export type StopCondition = { "kind": "emptyPage", } | { "kind": "cursorExhausted", } | { "kind": "reachedKnown", } | { "kind": "singleRequest", };
-export type TimeConfig = { rawTimeConvention?: RawTimeConvention, timezoneSource?: TimezoneSource, };
+export type TimeConfig = { rawTimeConvention?: RawTimeConvention, timezoneSource?: TimezoneSource, 
+/**
+ * 记录时间字符串的书写格式，见 [`RawTimeFormat`] 的文档。省略时由 L1
+ * 范式层套用 `RawTimeFormat::SpaceSeparated` 默认值——米哈游三游的
+ * manifest 不需要为了这个新字段改一行。
+ */
+rawFormat?: RawTimeFormat, };
 export type RawTimeConvention = "serverLocal" | "clientLocalized";
+export type RawTimeFormat = { "kind": "spaceSeparated", } | { "kind": "isoLocal", };
 export type TimezoneSource = { "kind": "apiField", field: string, } | { "kind": "staticTable", 
 /**
  * 从响应体的哪个字段读取查表键（如绝区零的 `region`），语义与

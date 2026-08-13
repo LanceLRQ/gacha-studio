@@ -262,12 +262,12 @@ fn assert_record_keys_match_across_paths(banner_id: &str, raw_response_fixture: 
 
 #[test]
 fn record_keys_are_identical_across_collect_and_import_paths_for_pool_1() {
-    assert_record_keys_match_across_paths("1", "fixtures/wuwa/raw_response/pool_1.json");
+    assert_record_keys_match_across_paths("1", "fixtures/wuwa/raw_response/1_page_1.json");
 }
 
 #[test]
 fn record_keys_are_identical_across_collect_and_import_paths_for_pool_10() {
-    assert_record_keys_match_across_paths("10", "fixtures/wuwa/raw_response/pool_10.json");
+    assert_record_keys_match_across_paths("10", "fixtures/wuwa/raw_response/10_page_1.json");
 }
 
 /// 声明 `timezoneSource: apiField` 的插件在导入路径下必须 fail closed——

@@ -25,9 +25,9 @@ use gs_core::{
     DrawCountingConfig, ErrorSemantic, GachaRecord, GameClientSize, GuaranteeRule, HostEnv,
     HttpMethod, LocalizedText, MetaState, MetadataEntry, NetworkError, NoCredentialReason,
     PityGroup, Platform, PreconditionLevel, PreconditionStatus, ProbabilityCurve, RareEventRef,
-    RaritySpec, RateLimitConfig, RawTimeConvention, RecordKey, RecordSource, RequestTemplate,
-    RetentionPolicy, RetryConfig, StopCondition, TimeConfig, TimezoneSource, TzOrigin,
-    UnifiedRecordFields,
+    RaritySpec, RateLimitConfig, RawTimeConvention, RawTimeFormat, RecordKey, RecordSource,
+    RequestTemplate, RetentionPolicy, RetryConfig, StopCondition, TimeConfig, TimezoneSource,
+    TzOrigin, UnifiedRecordFields,
 };
 use std::fs;
 use std::path::PathBuf;
@@ -88,6 +88,7 @@ fn main() {
         ("StopCondition", StopCondition::decl(&cfg)),
         ("TimeConfig", TimeConfig::decl(&cfg)),
         ("RawTimeConvention", RawTimeConvention::decl(&cfg)),
+        ("RawTimeFormat", RawTimeFormat::decl(&cfg)),
         ("TimezoneSource", TimezoneSource::decl(&cfg)),
         ("PreconditionLevel", PreconditionLevel::decl(&cfg)),
         ("PreconditionStatus", PreconditionStatus::decl(&cfg)),

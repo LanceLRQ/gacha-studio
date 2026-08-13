@@ -371,9 +371,9 @@ export const manifest = {
       return {
         itemId,
         time: toNonEmptyString(record.time) ?? "",
-        // ⚠️ **本字段不由响应决定**——`fixtures/wuwa/raw_response/pool_1.json`
+        // ⚠️ **本字段不由响应决定**——`fixtures/wuwa/raw_response/1_page_1.json`
         // 真实样本证实，PoolType=1 的响应记录里 `cardPoolType` 取值是中文
-        // 展示标签 `"角色精准调谐"`，**不是** `"1"`；只有 `pool_10.json`
+        // 展示标签 `"角色精准调谐"`，**不是** `"1"`；只有 `10_page_1.json`
         // （PoolType=10）恰好降级成了数字字符串 `"10"`。也就是说
         // `cardPoolType` 多数情况下不是 `WUWA_POOL_TYPES` 表的 id，直接拿它
         // 当 bannerId 会产出一个不匹配任何 `banners[].id`/
@@ -477,6 +477,27 @@ export const manifest = {
     // `Models/GachaData.cs` 的 `Time` 字段与 fixture 样本的形态一致，这一点
     // 与"是否知道具体时区偏移"是两回事，不受下面这条缺口影响，予以保留。
     rawTimeConvention: "serverLocal",
+
+    // rawFormat: "isoLocal" —— 取值来自 `fixtures/wuwa/raw_response/*.json`
+    // 与 `fixtures/wuwa/archive/wwgacha_archive.json` 的形状（`"2100-01-06
+    // T22:53:07"` 这类 `YYYY-MM-DDTHH:MM:SS`），即本地存档字段（C#
+    // `DateTime`，Newtonsoft 默认序列化产物）的形态。
+    //
+    // ⚠️ **API 真实线格式仍未验证**，这不是遗漏，是如实标注的空白——完整
+    // 查证过程见 `fixtures/wuwa/meta.toml`"已知未验证项：API 的 Time
+    // 线格式"一节：`Models/GachaData.cs` 里 `Time` 是 `DateTime` 强类型，
+    // API 发来的原始线格式在反序列化那一刻就被吃掉了，反推不出来；
+    // `docs/_internal/capture/` 下没有鸣潮抓包样本。声明 `isoLocal` 赌的是
+    // "本地存档的格式大概率与 API 一致"，如果这个假设错了，Rust 侧
+    // `parse_record_time` 现在改成了严格匹配（不再依次尝试多种格式），会在
+    // 首次真实采集时明确报错，而不是被静默兜底吸收掉——参见 gs-core::
+    // RawTimeFormat 文档"为什么改成严格匹配"一节。
+    //
+    // ⚠️ **已知褶皱**：鸣潮同时有两条数据来源共用这一份声明——采集走 API
+    // （格式未验证），导入走本地存档（ISO，确定）。若将来证实 API 发的是
+    // 别的格式，这一个 rawFormat 就不够用了，需要按数据来源分别声明；现在
+    // 样本数为 1，按三次法则不为此设计机制，只在这里记一笔。
+    rawFormat: { kind: "isoLocal" },
 
     // ⚠️ timezoneSource 刻意不声明（而不是填 "computed"）。三个可选形态逐一
     // 排除，不是漏填：

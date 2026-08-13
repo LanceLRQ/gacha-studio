@@ -83,15 +83,20 @@ sanitizedBy = "主进程手工裁样 + 脱敏，随后过 gs-sanitize 复核 + �
 # 真实采集产出的 key 与预期全不相同——不报错，只会全量重复入库。
 #
 # 应对：插件的 deriveRecordKeys **先把时间规范化再哈希**，让 key 与线格式
-# 无关。raw_response/pool_1_slash_time.json 就是这条保护的机械验证——它与
-# pool_1.json 是同一批记录、只把时间换成斜杠写法，两者产出的 key 数组必须
+# 无关。variants/pool_1_slash_time.json 就是这条保护的机械验证——它与
+# 1_page_1.json 是同一批记录、只把时间换成斜杠写法，两者产出的 key 数组必须
 # 逐项相同。
 
 [[samples]]
-path = "raw_response/pool_1.json"
+path = "raw_response/1_page_1.json"
 count = 17
 note = """
-PoolType=1（角色活动唤取）。刻意选中真实存档里最难的几种情形：
+PoolType=1（角色活动唤取）。文件名前缀 "1" 即 PoolType id——命名约定见
+`packages/gs-plugin-kit/testkit/index.ts` 的 `parseResponseFileName`
+（"<bannerId>_page_<n>[_后缀].json"），本文件原名 pool_1.json，2026-08-13
+随 M2-S6 之后的 testkit 对齐修复改名，理由见下方「testkit 模型不一致」一节。
+
+刻意选中真实存档里最难的几种情形：
   - 同秒同物品 5 连碰撞组 ×1 —— 全库最大的碰撞组，组内记录逐字段完全相同，
     只能靠序位区分
   - 十连组 ×1（10 条同秒记录）—— 十连天然同秒，是碰撞的主要来源
@@ -104,36 +109,46 @@ apiData.Data.Reverse() 翻成正序才使用，本地存档存的是翻转后的
 path = "variants/pool_1_slash_time.json"
 count = 17
 note = """
-与 pool_1.json 同一批记录，只把 time 从 ISO 改成 `2099/01/01 00:00:00` 斜杠
-写法。用于断言 record_key 与时间线格式无关，见上方「已知未验证项」。
+与 raw_response/1_page_1.json 同一批记录，只把 time 从 ISO 改成
+`2099/01/01 00:00:00` 斜杠写法。用于断言 record_key 与时间线格式无关，见
+上方「已知未验证项」。本文件不受下方命名约定约束——它不在 `raw_response/`
+下，`assertPluginFixture` 不会读取它，见下一段。
 
-⚠️ **刻意放在 `variants/` 而不是 `raw_response/`**：`assertPluginFixture` 会把
-`raw_response/*.json` 下的**全部**文件按文件名排序后拼成**一批**，只调一次
-`hooks.deriveRecordKeys`（`packages/gs-plugin-kit/testkit/index.ts` 的流程说明
-第 3~4 步）。本文件与 pool_1.json 是同一批记录，合批后规范化时间逐条相同，会
-互相干扰彼此的「批次内序位」计数——实测两批第一条记录合批后算出的 key 并不
-相等。那样的 expected 快照固化的是一个**生产中不会出现**的人造批次。
+⚠️ **刻意放在 `variants/` 而不是 `raw_response/`，即使 testkit 已改成按
+「单卡池单页」调用 `deriveRecordKeys`（见下方「testkit 模型不一致」一节，
+已修复）**：本文件与 1_page_1.json 是**同一个卡池**的同一批记录，若真的
+按约定重命名放进 `raw_response/`（例如 "1_page_2.json"），testkit 会把它
+当成卡池 1 的第 2 页、与 1_page_1.json 的记录合并成一批调用一次
+`deriveRecordKeys`，测的是"同一批记录混合两种时间写法"，不是"同一批记录
+分别用两种时间写法各跑一次、结果应相同"——后者才是"线格式无关"这条不变量
+真正要验证的东西。因此继续放在 `variants/`，由
+`plugins/wuwa/hooks.test.ts` 的用例 5 **独立读取、独立调用两次**
+`deriveRecordKeys` 再比较。
 
-因此本文件移出 `raw_response/`，改由 `plugins/wuwa/hooks.test.ts` 的用例 5
-**独立读取、独立调用两次** `deriveRecordKeys` 再比较——这才是「线格式无关」
-这条不变量真正被验证的方式。
-
-> 📌 顺带记下一个 testkit 层面的模型不一致（不在 M2-S4 范围内，另行处理）：
-> `assertPluginFixture` 把**所有卡池**的响应合成一批调用 `deriveRecordKeys`，
-> 而宿主真实行为是 `derive_record_keys_for_page` **逐页、且在单个卡池内**调用
-> （`crates/paradigms/gs-p-authkey/src/pipeline.rs` 的 `collect_banner`），
-> 从不跨卡池合批。对鸣潮这种「序位参与 record_key」的插件，两者算出的序位
-> 分组并不等价，契约测试因此比生产环境更严苛（也更不真实）。
+> 📌 **testkit 模型不一致，已于 2026-08-13 修复**（原记在这里，不悄悄划掉，
+> 按本目录一贯的过程记录惯例保留）：早先 `assertPluginFixture` 把
+> `raw_response/*.json` 下**全部文件**（不分卡池）合成一批只调一次
+> `deriveRecordKeys`，且完全没做 `bannerIdentity: "query"` 覆盖
+> （`fields.bannerId` 全部是 manifest 里的占位常量）；而宿主真实行为是
+> `derive_record_keys_for_page` **逐页、且在单个卡池内**调用，`bannerId`
+> 在 `deriveRecordKeys` 之前已被换成真实卡池 id
+> （`crates/paradigms/gs-p-authkey/src/pipeline.rs` 的 `collect_banner`/
+> `build_records`）。两处不一致意味着契约测试固化的 record_key 在生产环境
+> 里永远不会出现。修复后 testkit 按 `<bannerId>_page_<n>[_后缀].json` 解析
+> 文件名分组，`raw_response/pool_1.json`/`pool_10.json` 因此改名为
+> `1_page_1.json`/`10_page_1.json`，`expected/normalized.json` 已按修复后
+> 的真实行为重新生成（`bannerId` 现在是 "1"/"10"，不再是占位常量）。
 """
 
 [[samples]]
-path = "raw_response/pool_10.json"
+path = "raw_response/10_page_1.json"
 count = 6
 note = """
-PoolType=10（角色联动唤取）。取它是因为 CardPoolType 在这个池上**降级成了
-数字字符串 "10"** 而不是中文名——工具的映射表跟不上新卡池时的真实表现。
-这条印证「以 PoolType 数字为主键、CardPoolType 仅作展示」不是假设性设计：
-把中文名当键，同一个池会在不同工具版本下分裂成两个。
+PoolType=10（角色联动唤取）。文件名前缀 "10" 即 PoolType id，原名
+pool_10.json，改名理由同上一条样本。取它是因为 CardPoolType 在这个池上
+**降级成了数字字符串 "10"** 而不是中文名——工具的映射表跟不上新卡池时的
+真实表现。这条印证「以 PoolType 数字为主键、CardPoolType 仅作展示」不是
+假设性设计：把中文名当键，同一个池会在不同工具版本下分裂成两个。
 """
 
 [[samples]]
