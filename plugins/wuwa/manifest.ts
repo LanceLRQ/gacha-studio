@@ -99,29 +99,59 @@ function extractGachaRecordList(response: unknown): unknown[] {
  * 13 项 `PoolType` 表，逐字段取自 `Services/ConfigService.cs:29-43` 原样表格：
  *   `(PoolType, 名称, 是否新手池, 5★硬保底, 4★硬保底, 保底是否继承)`
  *
- * 本表只保留真正用得上的两列（id / displayName / hardPity5Star）。4★ 硬保底
- * 恒为 10（见下方 `WUWA_4STAR_HARD_PITY`），不再需要逐行区分。「是否新手池」
- * 「保底是否继承」两列目前的插件契约里没有对应字段可以承载，「是否继承」
- * 这一列即使有字段也无法正确实现，见下方 `pityGroups` 一节的"已知缺口"说明。
+ * 本表保留真正用得上的三列：id / displayName / hardPity5Star，外加
+ * `fiveStarGuaranteeKind`（本插件自行归纳，不在 `ConfigService.cs` 原表里，
+ * 见下方单独说明）。4★ 硬保底恒为 10（见下方 `WUWA_4STAR_HARD_PITY`），不再
+ * 需要逐行区分。「是否新手池」「保底是否继承」两列目前的插件契约里没有对应
+ * 字段可以承载，「是否继承」这一列即使有字段也无法正确实现，见下方
+ * `pityGroups` 一节的"已知缺口"说明。
+ *
+ * `fiveStarGuaranteeKind` 取值依据（`docs/_internal/milestones/
+ * 03-M2-鸣潮插件与抽象证伪.md` §4.4："角色池 50/50，武器池必中不歪"）：
+ *   - 5 个「角色」池（id 1/3/8/10/12）取 `fiftyFifty`——依据是把 §4.4「角色池
+ *     50/50」这条通用结论按「角色卡池」大类应用，不是对常驻/新旅/联动/忆旅
+ *     这些子类型逐一单独验证过。
+ *   - 5 个「武器」池（id 2/4/9/11/13）取 `alwaysRateUp`——同上，按「武器卡池」
+ *     大类应用。
+ *
+ *   ⚠️ 严格说，只有「角色活动唤取」「武器活动唤取」（id 1/2）这两个子类型
+ *   在 §4.4 里有直接对照，其余 8 个是**同类推广**。推广本身是合理的领域推断
+ *   （担保规则在鸣潮里按物品大类而非按卡池子类型划分），但它没有逐池实测
+ *   背书——若日后某个子类型被发现规则不同，改这一列即可，不必动任何逻辑。
+ *   - 3 个「新手」池（id 5/6/7）取 `none`——**没有任何实测依据**，只是沿用
+ *     此前用池名字符串匹配时的现状（池名不含"角色"也不含"武器"，匹配不上
+ *     任何一支才落到 `none`），逐行标注 `// 无实测依据，沿用现状`。
+ *
+ * 之前是从 `pool.name` 用 `.includes("角色")`/`.includes("武器")` 现场推导
+ * 这个值，这里改成显式列出——显示名是给人看的，不该承担"决定保底语义"这个
+ * 职责：改一个字、或出现同时含/都不含这两个词的池名，语义会静默改变；固化
+ * 成表格后每一行的取值直接可读，不用跳到别处反推。
  */
 const WUWA_POOL_TYPES = [
-  { id: "1", name: "角色活动唤取", hardPity5Star: 80 },
-  { id: "2", name: "武器活动唤取", hardPity5Star: 80 },
-  { id: "3", name: "角色常驻唤取", hardPity5Star: 80 },
-  { id: "4", name: "武器常驻唤取", hardPity5Star: 80 },
-  { id: "5", name: "新手唤取", hardPity5Star: 50 },
-  { id: "6", name: "新手自选唤取", hardPity5Star: 80 },
-  { id: "7", name: "新手自选唤取（感恩定向唤取）", hardPity5Star: 1 },
-  { id: "8", name: "角色新旅唤取", hardPity5Star: 80 },
-  { id: "9", name: "武器新旅唤取", hardPity5Star: 80 },
-  { id: "10", name: "角色联动唤取", hardPity5Star: 80 },
-  { id: "11", name: "武器联动唤取", hardPity5Star: 80 },
-  { id: "12", name: "角色忆旅唤取", hardPity5Star: 80 },
-  { id: "13", name: "武器忆旅唤取", hardPity5Star: 80 },
+  { id: "1", name: "角色活动唤取", hardPity5Star: 80, fiveStarGuaranteeKind: "fiftyFifty" },
+  { id: "2", name: "武器活动唤取", hardPity5Star: 80, fiveStarGuaranteeKind: "alwaysRateUp" },
+  { id: "3", name: "角色常驻唤取", hardPity5Star: 80, fiveStarGuaranteeKind: "fiftyFifty" },
+  { id: "4", name: "武器常驻唤取", hardPity5Star: 80, fiveStarGuaranteeKind: "alwaysRateUp" },
+  { id: "5", name: "新手唤取", hardPity5Star: 50, fiveStarGuaranteeKind: "none" }, // 无实测依据，沿用现状
+  { id: "6", name: "新手自选唤取", hardPity5Star: 80, fiveStarGuaranteeKind: "none" }, // 无实测依据，沿用现状
+  { id: "7", name: "新手自选唤取（感恩定向唤取）", hardPity5Star: 1, fiveStarGuaranteeKind: "none" }, // 无实测依据，沿用现状
+  { id: "8", name: "角色新旅唤取", hardPity5Star: 80, fiveStarGuaranteeKind: "fiftyFifty" },
+  { id: "9", name: "武器新旅唤取", hardPity5Star: 80, fiveStarGuaranteeKind: "alwaysRateUp" },
+  { id: "10", name: "角色联动唤取", hardPity5Star: 80, fiveStarGuaranteeKind: "fiftyFifty" },
+  { id: "11", name: "武器联动唤取", hardPity5Star: 80, fiveStarGuaranteeKind: "alwaysRateUp" },
+  { id: "12", name: "角色忆旅唤取", hardPity5Star: 80, fiveStarGuaranteeKind: "fiftyFifty" },
+  { id: "13", name: "武器忆旅唤取", hardPity5Star: 80, fiveStarGuaranteeKind: "alwaysRateUp" },
 ] as const;
 
 /** 4★ 硬保底，全部 13 项 PoolType 共用同一个值（`ConfigService.cs` 第 5 列恒为 10）。 */
 const WUWA_4STAR_HARD_PITY = 10;
+
+/** `fiveStarGuaranteeKind` → 实际 `GuaranteeRule` 字面量对象（P2 表）。 */
+const WUWA_FIVE_STAR_GUARANTEE_BY_KIND = {
+  fiftyFifty: { kind: "fiftyFifty" as const },
+  alwaysRateUp: { kind: "alwaysRateUp" as const },
+  none: { kind: "none" as const },
+} as const;
 
 /**
  * 从日志行提取 gachaLink 的正则，逐字取自参考实现
@@ -153,23 +183,31 @@ const WUWA_GACHA_LINK_PATTERN = /(https?.*\/aki\/gacha\/index\.html#\/record[\?=
  *   1~60 抽：命中率在 0.5%~1.9% 之间波动，该文档判定为小样本噪声，
  *            六个分桶均值 ≈0.93%，四舍五入取 1% 作为 base
  *   61~70 抽：6.9%（317 个样本、22 次命中）
- *   71~80 抽：48.1%（27 个样本、13 次命中，置信区间极宽）
+ *   71~80 抽：48.1%（27 个样本、13 次命中，**置信区间极宽**——样本量小，
+ *             这个数字本身就有很大不确定性，不要当成精确值使用）
  *
- * `table` 的两个值对应 [61~70 抽, 71~80 抽] 两个区间、区间内取常数——这是该
- * 审计文档 §3.4 给出的第二个建议方案（"若无外部数据源，则 Progressive
- * 只声明分段区间而非逐抽精确值"），不是逐抽精确概率表。
+ * `crates/gs-analysis/src/pity.rs` 的 `evaluate_curve` 对 `Progressive` 的
+ * 语义是「`table` 每个元素对应一抽」：`pull_index <= start` 时取 `base`，
+ * `pull_index > start` 时取 `table[pull_index - start - 1]`（即 `table[0]`
+ * 对应第 `start + 1` 抽），下标越界钳制到最后一个元素——这条曲线现在会被
+ * 真实消费，不再是占位声明。按这个语义，下面 20 个元素是把上面两个 10 抽
+ * 分桶**逐抽展开**：第 61~70 抽（`table[0..9]`）取 6.9%，第 71~80 抽
+ * （`table[10..19]`）取 48.1%。
  *
- * ⚠️ **当前不会被任何执行路径消费**：`crates/gs-analysis/src/pity.rs` 的
- * `evaluate_curve` 对 `Progressive` 分支目前恒返回 `Unsupported`（"具体数值
- * 要等 M2 用真实概率表校准后再实现"）。声明这条曲线是为了让类型层面能表达
- * "这是一条渐进曲线，形状已知、精确值未知"这个状态，把逐抽精确标定的工作
- * 留给 M2-S5，不在这里假装已经标定完成。
+ * ⚠️ **这是分段常数展开，不是逐抽标定**：桶内每一抽取同一个值是一个显式的
+ * 建模选择，信息量与原始分桶数据完全相同，没有凭空编造任何新信息；但真实
+ * 曲线在桶内大概率是单调上升的（越接近保底命中率越高），分段常数会让桶的
+ * 前几抽概率偏高、后几抽偏低，这是已知的近似误差，不是错误数据。等有逐抽
+ * 精细样本（尤其是 71~80 抽这一桶，27 个样本撑不起精确曲线）再替换。
  */
 const WUWA_FIVE_STAR_PROGRESSIVE_CURVE = {
   kind: "progressive" as const,
   base: 0.01,
   start: 60,
-  table: [0.069, 0.481],
+  // 10 个 6.9%（第 61~70 抽）+ 10 个 48.1%（第 71~80 抽），对应上方注释的
+  // 分段常数展开。用 Array.fill 拼接而非手写 20 个字面量，避免数错个数，
+  // 也让「10 + 10」这个分桶结构在代码里保持可见。
+  table: [...Array(10).fill(0.069), ...Array(10).fill(0.481)],
 };
 
 /**
@@ -404,42 +442,33 @@ export const manifest = {
   //
   // 「保底是否继承」（参考实现里联动池 10/11 传 inherit=false，其余默认
   // true）没有字段承载，且即使有字段也做不到——见下方大段"已知缺口"说明。
-  pityGroups: WUWA_POOL_TYPES.flatMap((pool) => {
-    // 角色/武器 50/50 与必中不歪的判定依据：任务下达时给出的实测事实
-    // "大保底：角色 50/50，武器必中不歪"，只针对 5★ 这一档；4★ 没有对应
-    // 描述，见下方单独处理。
-    const fiveStarGuarantee = pool.name.includes("武器")
-      ? ({ kind: "alwaysRateUp" as const })
-      : pool.name.includes("角色")
-        ? ({ kind: "fiftyFifty" as const })
-        : ({ kind: "none" as const });
-
-    return [
-      {
-        key: `${pool.id}-5star`,
-        members: [pool.id],
-        hardPity: pool.hardPity5Star,
-        curve: fiveStarCurve(pool),
-        guarantee: fiveStarGuarantee,
-        // pityTarget 不填：回落 rarity.pityTarget = "5"。
-      },
-      {
-        key: `${pool.id}-4star`,
-        members: [pool.id],
-        hardPity: WUWA_4STAR_HARD_PITY,
-        pityTarget: "4",
-        // 4★ 软保底/渐进概率数值没有任何来源给出分桶命中率（真实存档实测
-        // 只统计了 4★ 出货间隔的最小/最大/均值，见
-        // `AUDIT-2026-08-12-M2鸣潮真实存档实测.md` §3.2，没有像 5★ 那样的
-        // 逐抽命中率分桶数据），用 custom 占位——不编造没有分桶数据支撑的
-        // 曲线形状。
-        curve: { kind: "custom" as const, id: `wuwa-unconfirmed-4star-pool-${pool.id}` },
-        // 4★ 是否有类似 5★ 的"角色/武器必中不歪"规则未经证实，不套用 5★ 的
-        // 规则，如实标注为未知。
-        guarantee: { kind: "none" as const },
-      },
-    ];
-  }),
+  pityGroups: WUWA_POOL_TYPES.flatMap((pool) => [
+    {
+      key: `${pool.id}-5star`,
+      members: [pool.id],
+      hardPity: pool.hardPity5Star,
+      curve: fiveStarCurve(pool),
+      // 取值依据见上方 WUWA_POOL_TYPES 表格注释（角色/武器/新手三类的
+      // fiveStarGuaranteeKind 判定依据与"无实测依据"标注都在那里）。
+      guarantee: WUWA_FIVE_STAR_GUARANTEE_BY_KIND[pool.fiveStarGuaranteeKind],
+      // pityTarget 不填：回落 rarity.pityTarget = "5"。
+    },
+    {
+      key: `${pool.id}-4star`,
+      members: [pool.id],
+      hardPity: WUWA_4STAR_HARD_PITY,
+      pityTarget: "4",
+      // 4★ 软保底/渐进概率数值没有任何来源给出分桶命中率（真实存档实测
+      // 只统计了 4★ 出货间隔的最小/最大/均值，见
+      // `AUDIT-2026-08-12-M2鸣潮真实存档实测.md` §3.2，没有像 5★ 那样的
+      // 逐抽命中率分桶数据），用 custom 占位——不编造没有分桶数据支撑的
+      // 曲线形状。
+      curve: { kind: "custom" as const, id: `wuwa-unconfirmed-4star-pool-${pool.id}` },
+      // 4★ 是否有类似 5★ 的"角色/武器必中不歪"规则未经证实，不套用 5★ 的
+      // 规则，如实标注为未知。
+      guarantee: { kind: "none" as const },
+    },
+  ]),
 
   rarity: { ladder: ["3", "4", "5"], pityTarget: "5" },
 

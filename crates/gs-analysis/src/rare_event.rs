@@ -8,7 +8,7 @@
 //! 输出里挑出命中的那些 pull——两套计数逻辑漂移正是这个项目明确要防的事
 //! （存储数据模型设计文档 §七.4 附近的裁定）。
 
-use crate::pity::analyze_pity_group;
+use crate::pity::{analyze_pity_group, effective_pity_target};
 use gs_core::{GachaRecord, PityGroup, RaritySpec};
 use gs_storage::{NewRareEvent, SnapshotOrigin};
 
@@ -52,10 +52,15 @@ pub struct DerivedRareEvents {
 /// 列表，写 `Some(false)` 会把"不知道"伪装成"没歪"，污染后续
 /// `GuaranteeRule::FiftyFifty` 状态机的判断（存储数据模型设计文档 §4.2）。
 ///
-/// `rarity` 直接取 `rarity.pity_target` 而不是读 `pull.rarity`——两者在
-/// `is_pity_hit` 为真的 pull 上必然相等（`analyze_pity_group` 判定命中的
-/// 依据正是 `rarity_code == rarity.pity_target`），前者不需要处理
-/// `Option` 解包，接口更直接。
+/// `rarity` 取 [`effective_pity_target`] 算出的有效目标，而不是直接读
+/// `rarity.pity_target` 或 `pull.rarity`——`analyze_pity_group` 判定命中
+/// 用的正是 `effective_pity_target(group, rarity)`（`group.pity_target`
+/// 显式声明时优先，缺省才回落到 `rarity.pity_target`），这里必须复用
+/// 同一个值才能保证"判定命中的目标"与"写进 `rare_event.rarity` 的值"
+/// 一致。这条逻辑曾经在两处各写了一遍 `unwrap_or` 表达式，这里当时漏改
+/// 成了裸 `rarity.pity_target`：鸣潮 4★ 组命中判定按 "4" 走，写进库里的
+/// 却是 "5"，是一个真实存在过的 bug，现在改成共用 [`effective_pity_target`]，
+/// 两处不可能再各自漂移。
 ///
 /// `extra`：当 `pull.unknown_rarity_since_last_hit > 0`（这次命中前跳过
 /// 过未知稀有度记录）时写 `{"unknown_rarity_skipped": N}`，否则留 `None`
@@ -84,7 +89,7 @@ pub fn derive_rare_events(
                 pity_group: group.key.clone(),
                 occurred_at: pull.occurred_at,
                 item_id: pull.item_id,
-                rarity: rarity.pity_target.clone(),
+                rarity: effective_pity_target(group, rarity).to_string(),
                 pity_count: Some(i64::from(pull.pulls_since_last_hit)),
                 is_rate_up: None,
                 origin: SnapshotOrigin::Derived,
@@ -297,6 +302,54 @@ mod tests {
         assert_eq!(
             parsed["unknown_rarity_skipped"], 1,
             "hit_b 前恰好跳过了 1 条未知稀有度记录，这是它的 pity_count 可能偏低的直接证据"
+        );
+    }
+
+    #[test]
+    fn derive_rare_events_writes_effective_pity_target_not_rarity_spec_when_group_overrides() {
+        // 回归测试：鸣潮 4★ 组显式声明 group.pity_target = "4"，与该卡池
+        // rarity.pity_target = "5" 不同。此前 derive_rare_events 直接写
+        // rarity.pity_target，命中判定明明按 "4" 走，写进库里的却是 "5"——
+        // 这是曾经真实发生过的 bug（见 derive_rare_events 文档），这条测试
+        // 锁死它不再复发。
+        use gs_core::{GuaranteeRule, ProbabilityCurve};
+
+        let spec = RaritySpec {
+            ladder: vec!["3".to_string(), "4".to_string(), "5".to_string()],
+            pity_target: "5".to_string(),
+        };
+        let group = PityGroup {
+            key: "wuwaStandard4Star".to_string(),
+            members: vec!["standard".to_string()],
+            hard_pity: 10,
+            curve: ProbabilityCurve::Flat { base: 0.06 },
+            guarantee: GuaranteeRule::None {},
+            pity_target: Some("4".to_string()), // 显式覆盖，与 rarity.pity_target 不同
+        };
+        let records = vec![
+            record(1, 7, "standard", "wuwaStandard4Star", 1, "武器A", Some("3")),
+            record(
+                2,
+                7,
+                "standard",
+                "wuwaStandard4Star",
+                2,
+                "四星角色B",
+                Some("4"),
+            ),
+        ];
+
+        let derived = derive_rare_events(&group, &spec, &records);
+
+        assert_eq!(
+            derived.events.len(),
+            1,
+            "第 2 条 4★ 记录应命中该组的保底目标"
+        );
+        assert_eq!(
+            derived.events[0].rarity, "4",
+            "写入的 rarity 必须跟随 group.pity_target 算出的有效目标，\
+             而不是静默回落到 rarity.pity_target 的 \"5\""
         );
     }
 }

@@ -40,19 +40,18 @@ impl PityCounter {
 
 /// [`ProbabilityCurve`] 在某一抽位置上的取值结果。
 ///
-/// 不用裸 `f64` 作返回类型：`Progressive`（鸣潮渐进概率）与 `Custom`
-/// （宿主注册的自定义曲线）本 Stage 都不实现具体数学模型——`Progressive`
-/// 的查表数据要等 M2 用真实概率表校准，`Custom` 的公式本就不在 Rust 侧、
-/// 由宿主运行时按 `id` 分派。用枚举而不是 `Option<f64>`/`Result<f64, _>`，
-/// 是因为调用方需要知道"为什么没有数值"（哪条曲线、什么原因），而不只是
-/// "没有"。
+/// 不用裸 `f64` 作返回类型：`Custom`（宿主注册的自定义曲线）的公式本就不在
+/// Rust 侧、由宿主运行时按 `id` 分派，分析引擎本身无法算出数值；
+/// `Progressive` 也可能不可算——`table` 声明为空数组时同样没有任何一档
+/// 取值可用。用枚举而不是 `Option<f64>`/`Result<f64, _>`，是因为调用方
+/// 需要知道"为什么没有数值"（哪条曲线、什么原因），而不只是"没有"。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum CurveEvaluation {
     /// 曲线给出的具体单抽概率。
     Value(f64),
-    /// 该曲线分支本 Stage 未实现，携带原因说明供调用方展示或记日志，
+    /// 该曲线分支算不出具体数值，携带原因说明供调用方展示或记日志，
     /// 不是 panic——`ProbabilityCurve` 从第一天就要能表达这几种曲线，
-    /// 但"表达得出"和"算得出来"是两件事，未实现不代表类型设计有问题。
+    /// 但"表达得出"和"算得出来"是两件事，算不出不代表类型设计有问题。
     Unsupported(&'static str),
 }
 
@@ -62,12 +61,26 @@ pub enum CurveEvaluation {
 /// `SoftPity { base, start, step }` 的语义照抄 `gs_core::pity` 模块文档：
 /// "`start` 抽之前概率恒为 `base`，之后每抽按 `step` 递增"——即
 /// `pull_index <= start` 时取 `base`，`pull_index > start` 时每多一抽
-/// 加一份 `step`。`step` 的类型是 `u32`，取值语义是"百分点"而不是原始小数
-/// （如 `step: 0.06` 表示每抽 +6 个百分点，对应 `gs_core::pity` 模块自身的 round-trip
-/// 测试用例，那组取值明显是照着原神"74 抽起每抽 +6%"的公开说法写的）。
-/// 结果按 `min(1.0)` 钳制，但**不在这里应用硬保底**——"抽到 `hard_pity`
-/// 必出"是 `PityGroup.hard_pity` 的语义，与概率曲线是两个独立的机制，
-/// 由 [`analyze_pity_group`] 的调用方按需再叠加判断，不混进曲线取值里。
+/// 加一份 `step`。`step` 与 `base` **同单位**，都是概率分数（如
+/// `step: 0.06` 表示每抽 +6% 而不是 +6 个百分点整数）——这个字段曾经是
+/// `u32` 百分点表示，与 `base`/`table` 的 `f64` 分数混了两种单位，而生成的
+/// TS 两者都是 `number`，插件写 `0.06` 或 `6` 都能过类型检查（类型本身在
+/// 诱导这个错误），故统一改成 `f64`，语义随之与 `base` 对齐。
+///
+/// `Progressive { base, start, table }` 的语义照抄 `gs_core::pity` 模块
+/// 文档："`start` 抽之前概率恒为 `base`，之后按 `table` 里显式给出的每一档
+/// 概率取值"——即 `pull_index <= start` 时取 `base`；`pull_index > start`
+/// 时取 `table[pull_index - start - 1]`（`table[0]` 对应第 `start + 1`
+/// 抽）。下标超出 `table` 长度时钳制到最后一个元素，不是回落 `base` 也不是
+/// panic：`table` 只需要覆盖到硬保底为止，硬保底之后的抽数正常流程不会
+/// 出现，真出现了，用最后一档（曲线上最高的概率）比用 `base`（最低概率）
+/// 更接近事实。`table` 为空数组是声明本身的问题（渐进曲线却一档取值都没
+/// 给），返回 `Unsupported` 而不是静默回落到 `base`。
+///
+/// 两条曲线的结果都按 `min(1.0)` 钳制，但**不在这里应用硬保底**——"抽到
+/// `hard_pity` 必出"是 `PityGroup.hard_pity` 的语义，与概率曲线是两个独立
+/// 的机制，由 [`analyze_pity_group`] 的调用方按需再叠加判断，不混进曲线
+/// 取值里。
 pub fn evaluate_curve(curve: &ProbabilityCurve, pull_index: u32) -> CurveEvaluation {
     match curve {
         ProbabilityCurve::Flat { base } => CurveEvaluation::Value(*base),
@@ -82,10 +95,20 @@ pub fn evaluate_curve(curve: &ProbabilityCurve, pull_index: u32) -> CurveEvaluat
             };
             CurveEvaluation::Value(value.min(1.0))
         }
-        ProbabilityCurve::Progressive { .. } => CurveEvaluation::Unsupported(
-            "鸣潮渐进概率是查表曲线，具体数值要等 M2 用真实概率表校准后再实现，\
-             不能沿用米哈游软保底的等差公式硬凑",
-        ),
+        ProbabilityCurve::Progressive { base, start, table } => {
+            if pull_index <= *start {
+                return CurveEvaluation::Value(*base);
+            }
+            let Some(&last) = table.last() else {
+                return CurveEvaluation::Unsupported(
+                    "Progressive 曲线声明了空 table，没有任何一档可用的取值——\
+                     这是声明本身的问题，不能静默回落到 base",
+                );
+            };
+            let index = (pull_index - start - 1) as usize;
+            let value = table.get(index).copied().unwrap_or(last);
+            CurveEvaluation::Value(value.min(1.0))
+        }
         ProbabilityCurve::Custom { .. } => CurveEvaluation::Unsupported(
             "custom 曲线的公式不在 Rust 侧定义，由宿主运行时按 id 分派到具体实现，\
              分析引擎本身不解析",
@@ -229,6 +252,19 @@ pub struct PityGroupReport {
     pub next_pull_probability: CurveEvaluation,
 }
 
+/// 计算 `group` 在保底判定/派生事件写入时应使用的目标稀有度码：
+/// `group.pity_target` 显式声明时优先生效，缺省回落到 `rarity.pity_target`。
+///
+/// 只在这一处计算，`analyze_pity_group`（判定命中）与
+/// `crate::rare_event::derive_rare_events`（写入 `rare_event.rarity`）
+/// 两个调用方共用——这条选择逻辑此前在两处各写了一遍 `unwrap_or`
+/// 表达式，`derive_rare_events` 那份当时漏改，导致鸣潮 4★ 组命中判定按
+/// "4" 走、却把 "5"（`rarity.pity_target`）写进了库里。同一个语义只能有
+/// 一份实现，这是唯一能防止两处再次漂移的办法。
+pub(crate) fn effective_pity_target<'a>(group: &'a PityGroup, rarity: &'a RaritySpec) -> &'a str {
+    group.pity_target.as_deref().unwrap_or(&rarity.pity_target)
+}
+
 /// 计算一个 [`PityGroup`] 的完整保底报告。
 ///
 /// `records` 应当是同一 `pity_group` 下的全部记录（如
@@ -243,11 +279,11 @@ pub fn analyze_pity_group(
     rarity: &RaritySpec,
     records: &[GachaRecord],
 ) -> PityGroupReport {
-    // 命中判定目标：`group.pity_target` 显式声明时优先生效，缺省回落到
-    // `rarity.pity_target`——米哈游三游只有一档保底，从不声明这个字段，
-    // 行为与改动前完全一致。鸣潮的 4★ 硬保底组会显式填 "4"，与该卡池
-    // `rarity.pity_target`（通常是 "5"）不同，两套独立计数靠这里区分。
-    let pity_target = group.pity_target.as_deref().unwrap_or(&rarity.pity_target);
+    // 命中判定目标：见 `effective_pity_target` 文档——米哈游三游只有一档
+    // 保底，从不声明 `group.pity_target`，行为与改动前完全一致；鸣潮的
+    // 4★ 硬保底组会显式填 "4"，与该卡池 `rarity.pity_target`（通常是 "5"）
+    // 不同，两套独立计数靠这里区分。
+    let pity_target = effective_pity_target(group, rarity);
 
     let mut pulls = Vec::with_capacity(records.len());
     let mut unknown_rarity_count = 0u32;
@@ -381,19 +417,10 @@ mod tests {
     }
 
     #[test]
-    fn evaluate_curve_progressive_and_custom_compile_but_are_unsupported() {
-        // 本 Stage 不实现具体数学模型，但 match 必须能穷尽全部分支——
-        // 这条测试本身就是"类型能编译通过"这条验收标准的证据。
-        let progressive = ProbabilityCurve::Progressive {
-            base: 0.008,
-            start: 66,
-            table: vec![0.008, 0.02],
-        };
-        assert!(matches!(
-            evaluate_curve(&progressive, 70),
-            CurveEvaluation::Unsupported(_)
-        ));
-
+    fn evaluate_curve_custom_compiles_but_is_always_unsupported() {
+        // custom 曲线的公式不在 Rust 侧定义，恒为 Unsupported；这条测试
+        // 同时也是"match 能穷尽 ProbabilityCurve 全部分支从而编译通过"
+        // 这条验收标准的证据。
         let custom = ProbabilityCurve::Custom {
             id: "wuwa-progressive-v1".to_string(),
         };
@@ -401,6 +428,75 @@ mod tests {
             evaluate_curve(&custom, 1),
             CurveEvaluation::Unsupported(_)
         ));
+    }
+
+    /// 测试用的 Progressive 曲线：`start` 前恒为 `base`，之后依次取
+    /// `table` 里的三档，第 4 档起没有数据（用于验证越界钳制）。
+    fn progressive_test_curve() -> ProbabilityCurve {
+        ProbabilityCurve::Progressive {
+            base: 0.008,
+            start: 66,
+            table: vec![0.02, 0.05, 0.12],
+        }
+    }
+
+    #[test]
+    fn evaluate_curve_progressive_is_flat_up_to_and_including_start() {
+        let curve = progressive_test_curve();
+        assert_eq!(evaluate_curve(&curve, 1), CurveEvaluation::Value(0.008));
+        assert_eq!(evaluate_curve(&curve, 66), CurveEvaluation::Value(0.008));
+    }
+
+    #[test]
+    fn evaluate_curve_progressive_takes_first_table_entry_right_after_start() {
+        let curve = progressive_test_curve();
+        // start + 1 抽对应 table[0]，不是 table[1]——off-by-one 是这条曲线
+        // 最容易写错的地方。
+        assert_eq!(evaluate_curve(&curve, 67), CurveEvaluation::Value(0.02));
+    }
+
+    #[test]
+    fn evaluate_curve_progressive_takes_middle_table_entry() {
+        let curve = progressive_test_curve();
+        // start + 2 抽对应 table[1]，验证不是只有第一档能取对。
+        assert_eq!(evaluate_curve(&curve, 68), CurveEvaluation::Value(0.05));
+    }
+
+    #[test]
+    fn evaluate_curve_progressive_clamps_to_last_entry_when_index_overflows() {
+        let curve = progressive_test_curve();
+        // table 长度 3，start + 4 抽（第 4 档）已经越界，钳制到最后一个
+        // 元素 table[2] = 0.12，不是回落 base、也不是 panic。
+        assert_eq!(evaluate_curve(&curve, 70), CurveEvaluation::Value(0.12));
+        // 远超 table 长度时同样钳制到最后一个元素，不随抽数继续变化。
+        assert_eq!(evaluate_curve(&curve, 1000), CurveEvaluation::Value(0.12));
+    }
+
+    #[test]
+    fn evaluate_curve_progressive_empty_table_is_unsupported_but_base_still_works() {
+        let curve = ProbabilityCurve::Progressive {
+            base: 0.008,
+            start: 66,
+            table: vec![],
+        };
+        // start 之前不受空 table 影响，仍然正常返回 base。
+        assert_eq!(evaluate_curve(&curve, 66), CurveEvaluation::Value(0.008));
+        // start 之后没有任何一档可用取值，声明本身有问题，报 Unsupported
+        // 而不是静默回落到 base。
+        assert!(matches!(
+            evaluate_curve(&curve, 67),
+            CurveEvaluation::Unsupported(_)
+        ));
+    }
+
+    #[test]
+    fn evaluate_curve_progressive_caps_at_one() {
+        let curve = ProbabilityCurve::Progressive {
+            base: 0.008,
+            start: 1,
+            table: vec![1.5],
+        };
+        assert_eq!(evaluate_curve(&curve, 2), CurveEvaluation::Value(1.0));
     }
 
     fn record(
