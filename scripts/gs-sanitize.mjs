@@ -66,6 +66,39 @@ const LONG_NUMERIC_ID_SERIAL_CAPACITY = 10 ** LONG_NUMERIC_ID_SERIAL_WIDTH;
  * 一量级，真实 id 撞进占位族的概率可忽略。10000 的容量也留了充分余量：
  * 当前已知最大样本是星铁 fixture 的 23 个不同 id，10000 是它的 400 多倍。
  */
+/** 本工具自己写出的占位族：前缀 + 定宽序号。 */
+const LONG_NUMERIC_ID_PLACEHOLDER_RE = new RegExp(
+  `^${LONG_NUMERIC_ID_PLACEHOLDER_PREFIX}\\d{${LONG_NUMERIC_ID_SERIAL_WIDTH}}$`,
+);
+
+/**
+ * fixture 里**手工构造**的合成 ID 形态：`<2 位前缀><≥12 个连续 0><1~5 位序号>`。
+ *
+ * 为什么需要这条：`long-numeric-id` 是一张"疑似雪花 ID"的启发式网，它认得出
+ * 本工具自己写的占位族，却认不出人手写的合成值。fixture 作者按游戏选前缀
+ * （原神 14、星铁 15、绝区零 19/29）正是为了让样本一眼能分辨属于哪个游戏，
+ * 这个可读性有价值、不该为了迁就工具而放弃。不识别的后果是扫描对三个 fixture
+ * 分别报 24/72/59 处命中，全是合成值——门禁一样建不起来，只是原因换了一个。
+ *
+ * 为什么这样放宽是安全的：真实服务端雪花 ID 由时间戳位 + 机器位 + 序列位拼成，
+ * 中段出现 **12 个以上连续 0** 的概率约 10^-11 量级，可忽略。而当前仓库里 51 个
+ * 合成 ID 实测最短零串是 15 个，`0{12,}` 还留了余量。
+ *
+ * ⚠️ **`0{12,}` 里的 12 是冗余参数，不要以为它在防守。** 正则两端锚定，而本规则
+ * 只对 19 位及以上的串生效，于是 `零串长度 = 总长 - 2 - 序号长度 ≥ 19 - 2 - 5 = 12`
+ * ——长度算术已经强制了 12，把它改成 `0{4,}` 判定结果一个都不变（已穷举验证：
+ * 19~24 位范围内两者判定不同的值为 0 个，对应的变异测试也确实不会变红）。
+ *
+ * **真正承重的参数是序号那个 `\d{1,5}`。** 谁要放宽识别范围，必须动的是它，
+ * 而且自检里有一条用例专门钉住它（「零串够长但序号超出 5 位」），改宽会红。
+ * 这里保留 `0{12,}` 只是为了让形态读起来自解释；把它当成第二道防线是错的。
+ *
+ * ⚠️ 这是一条**刻意放宽的识别规则**，不是漏洞：它换来的是扫描模式对已脱敏
+ * fixture 真正归零，从而 `gs-sanitize <dir>` 能作为 CI 密钥扫描门禁使用。
+ * 代价是一个符合该形态的真实 ID 会被放过——但那样的 ID 实际上不存在。
+ */
+const SYNTHETIC_LONG_ID_RE = /^\d{2}0{12,}\d{1,5}$/;
+
 function formatLongNumericIdPlaceholder(serial) {
   if (serial < 0 || serial >= LONG_NUMERIC_ID_SERIAL_CAPACITY) {
     throw new Error(
@@ -157,10 +190,10 @@ const RULES = [
     // 对所有规则走同一套机制——不写这条也能"碰巧"成立（`value === undefined`
     // 恒假，靠上面 pattern 里的负向先行断言兜住），但那是巧合不是设计，
     // 自检里对 RULES 的循环断言也就失去了对这条规则的实际约束力。
-    isPlaceholder: (value) =>
-      new RegExp(
-        `^${LONG_NUMERIC_ID_PLACEHOLDER_PREFIX}\\d{${LONG_NUMERIC_ID_SERIAL_WIDTH}}$`,
-      ).test(value),
+    //
+    // 除本工具自己写出的占位族外，还识别**手工构造的合成 ID**——见
+    // SYNTHETIC_LONG_ID_RE 的说明。
+    isPlaceholder: (value) => LONG_NUMERIC_ID_PLACEHOLDER_RE.test(value) || SYNTHETIC_LONG_ID_RE.test(value),
   },
   {
     id: 'uid-field',
@@ -364,13 +397,25 @@ function scanText(text, rules = RULES) {
 function applyRules(text, rules = RULES, longNumericIdMapper = createLongNumericIdMapper()) {
   let result = text;
   for (const rule of rules) {
-    if (rule.id === 'long-numeric-id') {
-      result = result.replace(rule.pattern, (matchedText) => longNumericIdMapper(matchedText));
-    } else if (rule.wholeMatchIsSensitive) {
-      result = result.replace(rule.pattern, () => rule.placeholder);
-    } else {
-      result = result.replace(rule.pattern, (full, prefix) => `${prefix}${rule.placeholder}`);
-    }
+    // 扫描忽略的东西，写入也必须原样放过——否则会出现「dry-run 报告干净、
+    // --write 却改了字节」这种两条路径各说各话的状态，用户没有任何办法判断
+    // 一个目录到底脱敏完没有。两边共用 isAlreadyPlaceholder，一致性由构造
+    // 保证，不靠两处实现碰巧同步（自检里有一条专门锁死这个不变量）。
+    //
+    // 对单值占位的规则，这个跳过在行为上是恒等的（把占位值替换成它自己），
+    // 加它是为了让不变量成立于全部规则；对 long-numeric-id 这种族占位的规则
+    // 则是必需的：不跳过的话，一个已被识别为合成值的 ID 会被映射器重新编号。
+    result = result.replace(rule.pattern, (...args) => {
+      // replace 回调的参数是 (match, ...捕获组, offset, string)。本文件所有
+      // 正则都不含具名捕获组（只有 (?<=…) / (?<!…) 这类环视），因此末尾没有
+      // groups 对象，去掉最后两个即为 [完整匹配, ...捕获组]，与 matchAll 产出
+      // 的 match 数组下标语义一致，可以直接喂给 isAlreadyPlaceholder。
+      const match = args.slice(0, -2);
+      if (isAlreadyPlaceholder(rule, match)) return match[0];
+      if (rule.id === 'long-numeric-id') return longNumericIdMapper(match[0]);
+      if (rule.wholeMatchIsSensitive) return rule.placeholder;
+      return `${match[1]}${rule.placeholder}`;
+    });
   }
   return result;
 }
@@ -403,6 +448,18 @@ function isProbablyText(buffer) {
   // 简单启发式：出现 NUL 字节就当二进制处理，跳过（fixture 目录理论上不该有
   // 二进制文件，但防御一下比因为读取失败中断整个扫描更安全）。
   return !buffer.includes(0);
+}
+
+/**
+ * 读取一个文件的文本内容；判定为二进制时返回 `null`。
+ *
+ * 抽出来是为了让 CLI 的 `main()` 与 SANI 门（gs-check/checks/sanitize-self-check.mjs）
+ * 共用同一套「什么算可扫描的文本」判定。两处各写一份的话，门禁和命令行迟早
+ * 会对同一个目录给出不同的扫描结论，而那种不一致最难排查。
+ */
+function readFileText(filePath) {
+  const buffer = readFileSync(filePath);
+  return isProbablyText(buffer) ? buffer.toString('utf8') : null;
 }
 
 function main(argv) {
@@ -443,9 +500,8 @@ function main(argv) {
   const longNumericIdMapper = createLongNumericIdMapper();
 
   for (const filePath of files) {
-    const buffer = readFileSync(filePath);
-    if (!isProbablyText(buffer)) continue;
-    const text = buffer.toString('utf8');
+    const text = readFileText(filePath);
+    if (text === null) continue;
     const findings = scanText(text);
     if (findings.length === 0) continue;
 
@@ -488,4 +544,4 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   main(process.argv);
 }
 
-export { scanText, applyRules, RULES, createLongNumericIdMapper };
+export { scanText, applyRules, RULES, createLongNumericIdMapper, collectFiles, readFileText };

@@ -197,26 +197,42 @@ const cases = [
     },
   },
   {
-    name: 'long-numeric-id 占位族排除边界：20 位数字，前 19 位恰好是占位族第 0 号成员，第 20 位多一位数字，仍必须被识别为需要脱敏的真实值',
+    name: 'long-numeric-id 放过边界：零串够长但序号超出 5 位的值不得被当作合成 ID 放过',
     run: () => {
-      // "1000000000000000000" 是占位族第 0 号成员（与旧版固定占位值字面量
-      // 相同，见 gs-sanitize.mjs 文件头注释）；拼接一位 "9" 得到 20 位数字，
-      // 前 19 位恰好落在占位族区间——用来验证负向先行断言没有因为
-      // "长得像占位族" 就连带放过更长的真实 id。
-      const placeholderMember0 = '1000000000000000000';
-      const boundaryValue = `${placeholderMember0}9`;
+      // ⚠️ 本用例的探针值在 2026-08-14 换过一次，缘由如实记录：
+      //
+      // 原探针是 `1000000000000000000` + `"9"`（20 位，前 19 位恰好是占位族第
+      // 0 号成员），断言它"仍必须被识别为需要脱敏的真实值"。加入合成 ID 识别
+      // （SYNTHETIC_LONG_ID_RE）后这个前提不再成立——该值含 17 个连续 0，按
+      // 新契约它**本来就是**一个合成值，被放过是正确行为，不是回归。
+      //
+      // 但用例要守的东西没变：**放过的判定不能过宽**。换一个真正落在边界外的
+      // 探针——零串长度达标（12 个）但序号有 6 位，超出 `\d{1,5}` 的上限，
+      // 因此整体形态不匹配、必须仍被命中。这条同时锁住了序号宽度这个参数：
+      // 如果有人把 `\d{1,5}` 放宽成 `\d+`，本用例会红。
+      const boundaryValue = `10${'0'.repeat(12)}123456`;
       expectEqual(boundaryValue.length, 20, '测试前提：边界值必须是 20 位');
 
       const sample = `{"stableId":${boundaryValue}}`;
       const findings = scanText(sample, RULES).filter((f) => f.rule.id === 'long-numeric-id');
       expect(
         findings.length > 0,
-        '20 位数字（前 19 位恰好是占位族成员）仍应被 long-numeric-id 命中，不能因为"长得像占位族"就连带放过',
+        '零串达标但序号 6 位（超出 1~5 位上限）的值不匹配合成 ID 形态，必须仍被 long-numeric-id 命中',
       );
-      expectEqual(findings[0].matchedText, boundaryValue, '命中的应是完整的 20 位数字，而不是被截断成占位族那 19 位');
+      expectEqual(findings[0].matchedText, boundaryValue, '命中的应是完整的 20 位数字，而不是被截断');
 
       const sanitized = applyRules(sample, RULES, createLongNumericIdMapper());
       expect(!sanitized.includes(boundaryValue), '脱敏后不应再包含原始的 20 位边界值');
+
+      // 对照：同样 20 位、同样以 10 开头，但序号只有 5 位 → 匹配合成形态 → 放过。
+      // 两条并排，证明分界线确实落在序号宽度上，而不是别的什么地方。
+      const recognized = `10${'0'.repeat(13)}12345`;
+      expectEqual(recognized.length, 20, '测试前提：对照值也必须是 20 位');
+      expectEqual(
+        scanText(`{"stableId":${recognized}}`, RULES).filter((f) => f.rule.id === 'long-numeric-id').length,
+        0,
+        '序号 5 位的同长度值应匹配合成 ID 形态而被放过',
+      );
     },
   },
 
@@ -665,6 +681,55 @@ const cases = [
           `规则 ${rule.id} 把自己的占位值重新命中了——扫描模式将永远不归零。` +
             `脱敏后文本：${sanitized}`,
         );
+      }
+    },
+  },
+  {
+    // ★ 不变量：dry-run 与 --write 必须对"什么已经脱敏过"给出同一个答案。
+    // 两者一旦分叉，用户就再没有办法判断一个目录到底干净没有：扫描报 0，
+    // --write 却仍然改字节（或者反过来）。scanText 与 applyRules 共用
+    // isAlreadyPlaceholder 就是为了让这件事由构造保证，本用例负责锁死它。
+    name: '扫描/写入一致性：扫描忽略的值，--write 必须原样放过',
+    run: () => {
+      const cases = [
+        // 本工具自己写出的占位族
+        ['"id":"1000000000000000000"', 'long-numeric-id 占位族第 0 号'],
+        ['"id":"1000000000000009999"', 'long-numeric-id 占位族末号'],
+        // 手工构造的合成 ID（fixture 现行约定，按游戏选前缀）
+        ['"id":"1400000000000000010"', '原神 fixture 合成 ID'],
+        ['"id":"1500000000000000001"', '星铁 fixture 合成 ID'],
+        ['"id":"2900000000000000003"', '绝区零 fixture 合成 ID'],
+        // 其余规则的单值占位
+        ['{"UID": 100000000}', 'uid-field 占位值'],
+        ['authkey=FAKE_AUTHKEY_FOR_FIXTURE_ONLY', 'authkey 占位值'],
+        ['"Cookie":"FAKE_COOKIE_FOR_FIXTURE_ONLY"', 'cookie 占位值'],
+      ];
+      for (const [sample, label] of cases) {
+        expectEqual(scanText(sample).length, 0, `${label} 不应被扫描报告为命中（样本：${sample}）`);
+        expectEqual(applyRules(sample), sample, `${label} 被 --write 改动了，与扫描结论不一致（样本：${sample}）`);
+      }
+
+      // 反向：一个**不**符合合成形态的真实感 ID 必须两边都认为需要脱敏，
+      // 否则上面的一致性可能是"两边都彻底失效"换来的假绿灯。
+      const realLooking = '"id":"1712345678901234567"';
+      expect(scanText(realLooking).length > 0, '真实感雪花 ID 必须被扫描命中');
+      expect(applyRules(realLooking) !== realLooking, '真实感雪花 ID 必须被 --write 替换');
+    },
+  },
+  {
+    name: '合成 ID 识别：符合 <2位前缀><≥12个0><1~5位序号> 的值被放过，其余不放过',
+    run: () => {
+      const recognized = ['1400000000000000010', '1500000000000000023', '2900000000000000003'];
+      for (const id of recognized) {
+        expectEqual(scanText(`"id":"${id}"`).length, 0, `${id} 应被识别为合成 ID`);
+      }
+      // 零串不够长 → 不识别（防止把判定放得比声称的更宽）
+      const notRecognized = [
+        ['1712345678901234567', '真实感雪花 ID，无长零串'],
+        ['1400000000010000010', '最长零串仅 10 个，未达 12 个下限'],
+      ];
+      for (const [id, why] of notRecognized) {
+        expect(scanText(`"id":"${id}"`).length > 0, `${id} 不应被当作合成 ID（${why}）`);
       }
     },
   },
