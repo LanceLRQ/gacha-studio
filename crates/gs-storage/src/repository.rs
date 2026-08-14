@@ -534,6 +534,88 @@ impl<'conn> Repository<'conn> {
         rows_into_records(rows)
     }
 
+    /// 按 `(account_id, banner_key)` 精确匹配、`occurred_raw` 落在
+    /// `[range_start, range_end]`（两端都闭合）区间内的 `gacha_record` 行，
+    /// `GROUP BY occurred_raw, item_id` 返回区间内每一秒、每个 item_id 的
+    /// 出现次数。
+    ///
+    /// 供 `gs-host` 的导入流程判断"本批覆盖的时间区间内，哪些秒的记录集合
+    /// 与库中已有记录不一致"——鸣潮这类声明了批处理 `hooks.deriveRecordKeys`
+    /// 的插件，`record_key` 含有"同一秒内第几次出现"这个序位分量，序位的
+    /// 正确性建立在"每次都能看到这一秒的完整记录集合"这个前提上。查这个
+    /// 前提是否成立，只能靠"这一秒库里已有的记录，与本次要落库的记录，按
+    /// item_id 分组后条数是否相等"这个间接信号——存储层本身不知道"序位"这
+    /// 回事（`seq_in_batch` 列恒为 `None`，见
+    /// `gs_p_authkey::pipeline::AuthkeyApiPipeline::build_records` 里那一行
+    /// 旁的注释），这道检查因此必须落在调用方（导入流程），本方法只负责把
+    /// 判断需要的原始计数如实吐出来。
+    ///
+    /// 一次区间查询、不逐秒查询：一批导入记录可能覆盖几个月，落在几千个
+    /// 不同的秒上，调用方若对每一秒都单独查一次库，往返次数会随批次大小
+    /// 线性增长；`GROUP BY occurred_raw, item_id` 让整个区间只需要一次
+    /// 查询、一次全表扫描（走 `(account_id, banner_key, occurred_raw)` 前缀
+    /// 索引时是范围扫描），调用方在内存里按 `occurred_raw` 分组即可逐秒
+    /// 比对。
+    ///
+    /// 为什么按 `occurred_raw` 而不是 `occurred_at`：`occurred_raw` 是插件
+    /// `extractRecord` 产出的原始时间字符串，与批处理 hook（TS 侧
+    /// `deriveRecordKeys`）用来分组的 `record.time` 字节级对应——同一次
+    /// `extractRecord` 遍历产出的同一份数据分别喂给了这两处消费者。
+    /// `occurred_at` 则要先经过 `tz_offset_hours` 换算，这个偏移量在两次
+    /// 导入/采集之间不保证稳定（`computed` 插件按 UID 逐条算、`apiField`/
+    /// `staticTable` 插件依赖调用方能否拿到页级响应体或存档自带的偏移量），
+    /// 用它做"是否同一秒"的判据本身就不稳定，同一条实际记录可能因为两次
+    /// 换算用了不同的偏移量而被判成"不同秒"。两种 `rawFormat` 声明
+    /// （`SpaceSeparated`: `%Y-%m-%d %H:%M:%S`，`IsoLocal`:
+    /// `%Y-%m-%dT%H:%M:%S`）都是零填充定宽格式，字符串精确相等本身就等价
+    /// 于同一秒、字符串序也等价于时间序（区间查询的 `>=`/`<=` 因此可以直接
+    /// 对字符串比较）——前提是同一批记录用的是同一种 `rawFormat`，这在构造
+    /// 期是常量，对同一次调用天然成立。
+    ///
+    /// 区间两端都闭合（`>= range_start AND <= range_end`）：调用方传入的是
+    /// 本批记录里实际出现过的最早/最晚 `occurred_raw`，这两个值本身就是
+    /// 需要参与比对的秒，闭区间不会漏查它们；若误写成开区间或半开区间，
+    /// 会在批次恰好只覆盖单一秒（`range_start == range_end`）时查出一个
+    /// 空区间，调用方永远查不到库里那一秒的记录，检查形同虚设。
+    ///
+    /// 为什么返回 `Vec<(String, String, i64)>` 而不是替调用方转成嵌套
+    /// `HashMap`：本方法只做"读 + 映射成领域类型"，不掺业务判断——"哪些
+    /// item_id 算不一致""库中有但本批没有的算不算"这类判断是调用方的职责，
+    /// 同 [`Self::unknown_banners`]/[`Self::integrity_report`] 的一贯风格：
+    /// 这两个方法同样只把查询结果原样吐给调用方，不在存储层预判调用方会
+    /// 怎么用这份数据。
+    pub fn count_records_by_occurred_raw_range(
+        &self,
+        account_id: i64,
+        banner_key: &str,
+        range_start: &str,
+        range_end: &str,
+    ) -> Result<Vec<(String, String, i64)>, GsError> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT occurred_raw, item_id, COUNT(*) FROM gacha_record \
+                 WHERE account_id = ?1 AND banner_key = ?2 \
+                 AND occurred_raw >= ?3 AND occurred_raw <= ?4 \
+                 GROUP BY occurred_raw, item_id",
+            )
+            .map_err(storage_err)?;
+        let rows = stmt
+            .query_map(
+                params![account_id, banner_key, range_start, range_end],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                },
+            )
+            .map_err(storage_err)?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(storage_err)
+    }
+
     // ------------------------------------------------------------------
     // rare_event
     // ------------------------------------------------------------------

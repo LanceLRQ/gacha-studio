@@ -1293,6 +1293,17 @@ impl<'rt> AuthkeyApiPipeline<'rt> {
         )
     }
 
+    /// `hooks.deriveRecordKeys`（批处理版本）是否已声明——供 `gs-host` 的
+    /// 导入流程判断是否要启用"同秒内序位漂移"检查，见该 crate `import`
+    /// 模块文档"同秒内序位漂移的 fail-closed"一节的完整论证。开关必须绑定
+    /// 这个布尔量本身，不能写成 `plugin_id == "wuwa"` 这类硬编码——只有
+    /// 声明了这个批处理 hook 的插件，`record_key` 才含有"同一秒内第几次
+    /// 出现"的序位分量，判据要跟着声明走，不是跟着某个具体插件的名字走
+    /// （哪怕现在唯一这么声明的插件就是鸣潮）。
+    pub fn has_derive_record_keys(&self) -> bool {
+        self.has_derive_record_keys
+    }
+
     /// 单个 banner 落库时使用的**主**保底组 key。`GachaRecord.pity_group` 是
     /// 单值列，一个 banner 若同时属于多个组（鸣潮 5★/4★），只能落一个——
     /// 这里取声明顺序中的**第一个**（genshin 现有行为不变：它的每个 banner
@@ -1965,6 +1976,17 @@ impl<'rt> AuthkeyApiPipeline<'rt> {
                 occurred_raw: fields.time.clone(),
                 tz_origin,
                 tz_offset_min,
+                // seq_in_batch 恒为 None：TS 侧 hooks.deriveRecordKeys 算出
+                // 的组内序位只喂进哈希参与计算、算完即弃，没有任何字段把它
+                // 带出来落库，这一列在库里没有任何东西能与 record_key 互证。
+                // gs-host 导入流程新增的"同秒内序位漂移"检查（见该 crate
+                // import 模块文档"同秒内序位漂移的 fail-closed"一节）因此
+                // 退而求其次，只能靠"这一秒同 item_id 的条数是否与库中已有
+                // 记录一致"这个间接信号把关——这条信号是充分条件：同一分组
+                // 内逐字段完全相同的记录彼此可互换（见
+                // validate_batch_record_keys_not_combined_with_reached_known_
+                // stop_condition 的文档与鸣潮真实存档审计的论证），条数一致
+                // 就足以保证落库结果正确。
                 seq_in_batch: None,
                 item_id: fields.item_id.clone(),
                 item_type: fields.item_type.clone(),
