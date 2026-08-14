@@ -1,16 +1,14 @@
 //! 迁移机制在 `Storage` 入口处的集成验证：空库能跑到最新版本，
 //! 重复打开同一个文件数据库不报错（幂等，不会尝试重复建表）。
 
+mod common;
+
 use gs_storage::Storage;
 use std::fs;
 
 #[test]
 fn opens_a_fresh_file_database_and_reaches_latest_schema_version() {
-    let path = std::env::temp_dir().join(format!(
-        "gs-storage-migration-test-{}-{}.sqlite3",
-        std::process::id(),
-        line!()
-    ));
+    let path = common::temp_db_path("migration");
     let _ = fs::remove_file(&path);
     let path_str = path.to_str().expect("临时路径应当是合法 UTF-8");
 

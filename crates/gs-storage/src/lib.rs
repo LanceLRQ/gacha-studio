@@ -8,6 +8,7 @@
 //! 版本管理见 [`migrations`] 模块（`PRAGMA user_version` + 编译期内嵌 SQL）；
 //! 读写接口见 [`repository`] 模块。
 
+mod backup;
 mod credential_guard;
 mod migrations;
 pub mod repository;
@@ -15,6 +16,7 @@ pub mod repository;
 use gs_core::GsError;
 use rusqlite::Connection;
 
+pub use backup::BackupKind;
 pub use repository::{
     Account, IntegrityRow, NewAccount, NewBannerMeta, NewBannerSnapshot, NewCollectSession,
     NewRareEvent, NewRawPayload, RareEventRow, Repository, SnapshotOrigin, UnknownBannerRow,
@@ -22,6 +24,11 @@ pub use repository::{
 
 /// SQLite 连接的封装：负责开启连接、设置宿主要求的 pragma、把 schema
 /// 推进到最新版本。
+///
+/// 不持有自己的文件路径：`open` 只在建连接那一刻用一次路径，之后的备份/
+/// 回滚操作（见 `backup` 模块）都要求调用方显式传入目标目录——保持
+/// `Storage` 无状态，"备份放哪"是调用方（`gs-host`/`src-tauri`）的平台决策，
+/// 不是这一层该记住的事。
 pub struct Storage {
     conn: Connection,
 }

@@ -9,7 +9,10 @@ description = "SQLite 存储引擎"
 [dependencies]
 gs-core.workspace = true
 # bundled：静态链接 SQLite，避免依赖系统库版本，保证构建可复现。
-rusqlite = { version = "0.40", features = ["bundled", "limits"] }
+# backup：启用官方 Online Backup API（`rusqlite::backup`），备份/回滚模块
+# （src/backup.rs）依赖它做页级复制——不走"拷贝数据库文件"这条路，理由见
+# 该文件顶部说明。
+rusqlite = { version = "0.40", features = ["bundled", "limits", "backup"] }
 # 复用 gs-core 已有的 Serialize/Deserialize 实现做「枚举 <-> SQL TEXT 列」的
 # 双向转换（见 src/repository.rs 的 enum_to_sql / enum_from_sql），不手写一份
 # 平行的字符串映射表——手写映射表会在 gs-core 的枚举变体改名时悄悄失配，

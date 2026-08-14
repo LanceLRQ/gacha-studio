@@ -8,7 +8,33 @@
 #![allow(dead_code)]
 
 use gs_core::{GachaRecord, MetaState, RecordKey, RecordSource, TzOrigin};
-use gs_storage::{NewAccount, Repository};
+use gs_storage::{NewAccount, Repository, Storage};
+use std::path::PathBuf;
+
+/// 生成一个不与其他测试冲突的临时数据库文件路径，调用方负责用完后
+/// `fs::remove_file` 清理。用进程 id + 纳秒时间戳拼路径：`label` 区分不同
+/// 测试文件（方便在临时目录里定位是谁留下的），pid + 纳秒时间戳保证同一
+/// `label` 下反复调用（同一个测试函数需要多个独立临时库）也不会撞名。
+pub fn temp_db_path(label: &str) -> PathBuf {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    std::env::temp_dir().join(format!(
+        "gs-storage-{label}-{}-{nanos}.sqlite3",
+        std::process::id()
+    ))
+}
+
+/// 打开一个全新的临时文件数据库，返回 `(Storage, 文件路径)`。调用方用完后
+/// 应 `fs::remove_file(&path)` 清理，避免临时目录堆积测试产物。
+pub fn open_temp_storage(label: &str) -> (Storage, PathBuf) {
+    let path = temp_db_path(label);
+    let _ = std::fs::remove_file(&path);
+    let path_str = path.to_str().expect("临时路径应当是合法 UTF-8");
+    let storage = Storage::open(path_str).expect("应当成功打开临时文件数据库");
+    (storage, path)
+}
 
 /// 建一个测试账号，返回自增 `id`。`gacha_record.account_id` 有外键约束，
 /// 测试里插记录前必须先有一行账号。
