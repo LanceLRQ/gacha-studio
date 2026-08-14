@@ -5,6 +5,12 @@
 #
 # ⚠️ fixture 里绝不能出现真实 authkey、完整抽卡链接签名、玩家真实 UID、
 # 设备 ID、cookie、token。提交前务必跑一遍 `pnpm gs:sanitize fixtures/__GAME_ID__/`。
+#
+# ★ raw_response/ 下的文件名必须是 `<bannerId>_page_<n>[_后缀].json`
+#   （如 `301_page_1.json`、`301_page_3_empty.json`）。这不是排版偏好：
+#   契约测试要按「单卡池单页」调用 hooks.deriveRecordKeys 才能复现宿主
+#   collect_banner 的真实行为，而卡池 id 与页序通常不在响应体里，只能靠
+#   文件名表达。文件名不符合该格式时测试会直接报错，不会静默当成一批处理。
 
 [game]
 id = "__GAME_ID__"

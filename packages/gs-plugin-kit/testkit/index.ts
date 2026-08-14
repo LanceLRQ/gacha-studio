@@ -137,11 +137,98 @@ export function checkDeriveRecordKeyHooksAreMutuallyExclusive(hooks: PluginHooks
   }
 }
 
-/** 依次跑完四条静态契约检查，任一不满足即抛出对应错误。 */
+/**
+ * 契约检查 5：稀有度与卡池声明自洽——`rarity.pityTarget` 必须是
+ * `rarity.ladder` 里的一档；`pityGroups[].pityTarget`（若声明）同理；
+ * `pityGroups[].members` 引用的卡池必须都在 `banners` 里声明过。
+ *
+ * ## 这修的是什么
+ *
+ * M3 复核时实测发现的盲区：把绝区零的 `rarity` 从正确的
+ * `{ ladder: ["2","3","4"], pityTarget: "4" }` 改成星铁的
+ * `{ ladder: ["3","4","5"], pityTarget: "5" }`，**fixture 契约测试照样全绿**
+ * ——因为此前没有任何一处消费过 `RaritySpec`。类型对、zod 过、样本比对通过，
+ * 声明本身却是错的。
+ *
+ * 真跑起来的后果不是报错而是静默错算：`rank_type: "2"` 的记录会全部掉进
+ * `rarity_distribution` 的 `unrecognized_count`，而 `pity_target = "5"` 在
+ * 一个最高档只有 4 的游戏里永远匹配不上，保底分析恒为零命中。这正是本项目
+ * 反复记录的失效模式（门通过是因为它什么都没检查）在插件声明这一层的实例。
+ *
+ * `members` ⊆ `banners` 这条同源：原神的 `400` 之所以必须声明成独立
+ * `BannerSpec`，就是因为 `pityGroups[].members` 引用了它——引用一个未声明的
+ * 卡池不会报错，只会让那一组保底默默漏掉一半记录。
+ */
+export function checkRarityAndBannerDeclarations(manifest: PluginManifest): void {
+  const ladder = manifest.rarity.ladder;
+  if (ladder.length === 0) {
+    throw new Error(`插件 "${manifest.id}" 的 rarity.ladder 是空数组——稀有度阶梯不可为空。`);
+  }
+  if (!ladder.includes(manifest.rarity.pityTarget)) {
+    throw new Error(
+      `插件 "${manifest.id}" 的 rarity.pityTarget = "${manifest.rarity.pityTarget}" 不在 ` +
+        `rarity.ladder [${ladder.join(", ")}] 之中——保底目标必须是阶梯里真实存在的一档，` +
+        "否则宿主的保底判定（rarity == pity_target）永远不会命中，分析结果恒为零。",
+    );
+  }
+
+  const bannerIds = new Set(manifest.banners.map((b) => b.id));
+  for (const group of manifest.pityGroups ?? []) {
+    if (group.pityTarget !== undefined && !ladder.includes(group.pityTarget)) {
+      throw new Error(
+        `插件 "${manifest.id}" 的 pityGroups["${group.key}"].pityTarget = "${group.pityTarget}" ` +
+          `不在 rarity.ladder [${ladder.join(", ")}] 之中。`,
+      );
+    }
+    for (const member of group.members) {
+      if (!bannerIds.has(member)) {
+        throw new Error(
+          `插件 "${manifest.id}" 的 pityGroups["${group.key}"].members 引用了未声明的卡池 ` +
+            `"${member}"——banners 里没有这个 id。引用未声明卡池不会报错，只会让这一组保底` +
+            "默默漏掉属于该卡池的全部记录（原神 400 集录祈愿必须声明成独立 BannerSpec 就是这个原因）。",
+        );
+      }
+    }
+  }
+}
+
+/**
+ * 契约检查 6：样本里真实出现的取值必须都在声明覆盖范围内。
+ *
+ * 与 {@link checkRarityAndBannerDeclarations} 的分工：那条只看声明内部自洽，
+ * 这条把声明与**真实样本**对上——插件可以写出一份自洽但与自己游戏无关的
+ * 声明，只有拿样本去撞才撞得出来。
+ */
+export function checkDeclarationsCoverSamples(manifest: PluginManifest, records: UnifiedRecordFields[]): void {
+  const ladder = new Set(manifest.rarity.ladder);
+  const unknownRarities = [
+    ...new Set(records.map((r) => r.rarity).filter((v): v is string => v !== undefined)),
+  ].filter((v) => !ladder.has(v));
+  if (unknownRarities.length > 0) {
+    throw new Error(
+      `插件 "${manifest.id}" 的样本里出现了 rarity 取值 [${unknownRarities.join(", ")}]，` +
+        `但 rarity.ladder 只声明了 [${manifest.rarity.ladder.join(", ")}]——` +
+        "宿主会把阶梯外的取值计入 unrecognized_count 而不是报错，稀有度分布会静默少算。",
+    );
+  }
+
+  const bannerIds = new Set(manifest.banners.map((b) => b.id));
+  const unknownBanners = [...new Set(records.map((r) => r.bannerId))].filter((v) => !bannerIds.has(v));
+  if (unknownBanners.length > 0) {
+    throw new Error(
+      `插件 "${manifest.id}" 的样本里出现了未声明的卡池 [${unknownBanners.join(", ")}]，` +
+        `banners 只声明了 [${[...bannerIds].join(", ")}]——卡池表必须覆盖响应里真实会出现的` +
+        "全部取值（原神查 301 会混回 400 的记录，400 因此必须声明）。",
+    );
+  }
+}
+
+/** 依次跑完静态契约检查，任一不满足即抛出对应错误。 */
 export function runStaticContractChecks(plugin: PluginUnderTest, sampleHasStableId = false): void {
   checkResolveTimezoneContract(plugin.manifest, plugin.hooks);
   checkCountDrawsContract(plugin.manifest, plugin.hooks);
   checkDeriveRecordKeyHooksAreMutuallyExclusive(plugin.hooks);
+  checkRarityAndBannerDeclarations(plugin.manifest);
   checkDeriveRecordKeyContract(plugin.hooks, sampleHasStableId);
 }
 
@@ -363,6 +450,7 @@ export async function assertPluginFixture(
   checkResolveTimezoneContract(plugin.manifest, plugin.hooks);
   checkCountDrawsContract(plugin.manifest, plugin.hooks);
   checkDeriveRecordKeyHooksAreMutuallyExclusive(plugin.hooks);
+  checkRarityAndBannerDeclarations(plugin.manifest);
 
   if (!("extractList" in plugin.manifest.collect.params)) {
     throw new Error(
@@ -477,6 +565,10 @@ export async function assertPluginFixture(
   const sampleCount = allFields.length;
   const sampleWithStableId = allFields.filter((fields) => Boolean(fields.stableId)).length;
   checkDeriveRecordKeyContract(plugin.hooks, sampleCount > 0 && sampleWithStableId === sampleCount);
+  // 声明 vs 真实样本。放在这里而不是开头的静态检查里：它需要样本跑完
+  // extractRecord（以及可能的 transformRecord 与 bannerIdentity 覆盖）之后的
+  // 归一化结果，那才是宿主真正拿去落库和分析的取值。
+  checkDeclarationsCoverSamples(plugin.manifest, allFields);
 
   // 第二阶段：**每页各自**算出这一页的 record_key，不跨页/跨卡池合批——
   // 与宿主 derive_record_keys_for_page 的调用形状一致，再拼上（若需要）

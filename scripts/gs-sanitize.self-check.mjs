@@ -29,7 +29,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { scanText, applyRules, RULES } from './gs-sanitize.mjs';
+import { scanText, applyRules, RULES, createLongNumericIdMapper } from './gs-sanitize.mjs';
 
 const SELF_DIR = path.dirname(fileURLToPath(import.meta.url));
 const SANITIZE_SCRIPT_PATH = path.join(SELF_DIR, 'gs-sanitize.mjs');
@@ -85,6 +85,141 @@ function runSanitizeCli(targetDir, extraArgs = []) {
 }
 
 const cases = [
+  // ============================================================
+  // long-numeric-id（本次修复：固定占位值把不同原值折叠成同一个值 →
+  // 按首次出现顺序编号的占位族，见 gs-sanitize.mjs 的
+  // createLongNumericIdMapper 与 applyRules 对该规则 id 的特判分支）
+  // ============================================================
+  {
+    name: 'long-numeric-id 区分度保留：3 个不同的 19 位雪花 ID 替换后仍是 3 个不同值——主进程实测复现：星铁 fixture 23 个不同 id、原神 fixture 8 个不同 id，旧实现 --write 后全部折叠成同一个值，这条用例就是防止再退化',
+    run: () => {
+      const sample = '{"a":1234567890123456789,"b":9876543210987654321,"c":1111111111111111111}';
+      const sanitized = applyRules(sample, RULES, createLongNumericIdMapper());
+      const matches = sanitized.match(/\d{19,}/g) ?? [];
+      expectEqual(matches.length, 3, '替换后应仍有 3 处 19 位以上数字');
+      expectEqual(
+        new Set(matches).size,
+        3,
+        '替换后必须仍是 3 个不同值——折叠成同一个值就是本次要修的缺陷本身（星铁 23→1、原神 8→1）',
+      );
+    },
+  },
+  {
+    name: 'long-numeric-id 跨文件一致：同一个映射器实例处理两段模拟“两个文件”的文本，同一原值在两处必须得到同一占位值',
+    run: () => {
+      const mapper = createLongNumericIdMapper();
+      const fileAText = '{"bannerId":1234567890123456789,"stableId":9876543210987654321}';
+      const fileBText = '{"other":5555555555555555555,"stableId":1234567890123456789}';
+
+      const sanitizedA = applyRules(fileAText, RULES, mapper);
+      const sanitizedB = applyRules(fileBText, RULES, mapper);
+
+      const placeholderInA = sanitizedA.match(/"bannerId":(\d+)/)?.[1];
+      const placeholderInB = sanitizedB.match(/"stableId":(\d+)/)?.[1];
+      expect(Boolean(placeholderInA) && Boolean(placeholderInB), '两段文本替换后都应能提取到占位值，前置断言失败说明正则本身有问题');
+      expectEqual(
+        placeholderInB,
+        placeholderInA,
+        '同一个原始 id（1234567890123456789）在两段文本里必须得到同一个占位值，否则跨文件的 record_key 关联会被破坏',
+      );
+    },
+  },
+  {
+    name: 'long-numeric-id 幂等性（CLI 级）：对同一目录连续跑两次 `node gs-sanitize.mjs --write`，第一次后区分度仍是 3，第二次后文件字节与第一次完全相同',
+    run: () => {
+      const tmpDir = mkdtempSync(path.join(os.tmpdir(), 'gs-sanitize-self-check-longid-'));
+      try {
+        const filePath = path.join(tmpDir, 'sample.json');
+        const original = '{"a":1234567890123456789,"b":9876543210987654321,"c":1111111111111111111}';
+        writeFileSync(filePath, original, 'utf8');
+
+        const firstRun = runSanitizeCli(tmpDir, ['--write']);
+        const afterFirst = readFileSync(filePath, 'utf8');
+        expect(afterFirst !== original, '第一次 --write 应当确实改动了文件内容');
+        expect(/命中 [1-9]/.test(firstRun.stdout), `第一次运行应报告命中数 > 0，实际输出：\n${firstRun.stdout}`);
+        const matchesAfterFirst = afterFirst.match(/\d{19,}/g) ?? [];
+        expectEqual(matchesAfterFirst.length, 3, '第一次 --write 后应仍有 3 处 19 位以上数字');
+        expectEqual(
+          new Set(matchesAfterFirst).size,
+          3,
+          '第一次 --write 后区分度必须仍是 3——CLI 真实调用不能重演“折叠成同一个值”的缺陷',
+        );
+
+        const secondRun = runSanitizeCli(tmpDir, ['--write']);
+        const afterSecond = readFileSync(filePath, 'utf8');
+        expectEqual(afterSecond, afterFirst, '第二次 --write 不应再改变文件内容');
+        void secondRun;
+      } finally {
+        rmSync(tmpDir, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    name: 'long-numeric-id 不可逆：占位值不携带原值的任何一段——特征明显的递增原值替换后，输出中不含它的任何 9 位滑动窗口子串',
+    run: () => {
+      const original = '1234567890123456789'; // 数字递增排列，肉眼易识别，19 位
+      const sample = `{"stableId":${original}}`;
+      const sanitized = applyRules(sample, RULES, createLongNumericIdMapper());
+
+      // 只需检查所有长度为 9 的滑动窗口子串：若输出里出现任何更长的原值
+      // 子串，它内部的 9 位子窗口也必然出现——检查 9 位窗口即可覆盖“任何
+      // 9 位以上子串”这个要求，不需要真的枚举所有更长的长度。
+      for (let start = 0; start + 9 <= original.length; start++) {
+        const window = original.slice(start, start + 9);
+        expect(
+          !sanitized.includes(window),
+          `脱敏输出不应包含原值的 9 位子串 "${window}"（占位值只携带“这是第几个不同值”这一信息，原值的任何一位都不应出现在占位值里）`,
+        );
+      }
+    },
+  },
+  {
+    name: 'long-numeric-id 旧行为反例（防回归核心）：模拟旧实现（固定 replace 成单一占位值）会把 3 个不同原值折叠成 1 个，当前 applyRules 的区分度必须严格优于旧实现且精确等于 3——主进程实测复现：星铁 23→1、原神 8→1',
+    run: () => {
+      const sample = '{"a":1234567890123456789,"b":9876543210987654321,"c":1111111111111111111}';
+
+      // 显式重现旧实现：所有 19 位以上数字统一 replace 成固定值，不做任何区分。
+      const legacyResult = sample.replace(/\d{19,}/g, () => '1000000000000000000');
+      const legacyDistinct = new Set(legacyResult.match(/\d{19,}/g) ?? []).size;
+      expectEqual(
+        legacyDistinct,
+        1,
+        '测试前提：旧实现（固定占位值）下 3 个不同原值必须退化成 1 个——这正是本次要修的缺陷（星铁 23→1、原神 8→1）',
+      );
+
+      const currentResult = applyRules(sample, RULES, createLongNumericIdMapper());
+      const currentDistinct = new Set(currentResult.match(/\d{19,}/g) ?? []).size;
+      expect(
+        currentDistinct > legacyDistinct,
+        `当前实现的区分度（${currentDistinct}）必须严格优于旧实现（${legacyDistinct}）——如果有人把 applyRules 改回旧的固定 placeholder 分支，这条测试会失败`,
+      );
+      expectEqual(currentDistinct, 3, '当前实现应精确保留 3 个不同值，一一对应 3 个不同原值');
+    },
+  },
+  {
+    name: 'long-numeric-id 占位族排除边界：20 位数字，前 19 位恰好是占位族第 0 号成员，第 20 位多一位数字，仍必须被识别为需要脱敏的真实值',
+    run: () => {
+      // "1000000000000000000" 是占位族第 0 号成员（与旧版固定占位值字面量
+      // 相同，见 gs-sanitize.mjs 文件头注释）；拼接一位 "9" 得到 20 位数字，
+      // 前 19 位恰好落在占位族区间——用来验证负向先行断言没有因为
+      // "长得像占位族" 就连带放过更长的真实 id。
+      const placeholderMember0 = '1000000000000000000';
+      const boundaryValue = `${placeholderMember0}9`;
+      expectEqual(boundaryValue.length, 20, '测试前提：边界值必须是 20 位');
+
+      const sample = `{"stableId":${boundaryValue}}`;
+      const findings = scanText(sample, RULES).filter((f) => f.rule.id === 'long-numeric-id');
+      expect(
+        findings.length > 0,
+        '20 位数字（前 19 位恰好是占位族成员）仍应被 long-numeric-id 命中，不能因为"长得像占位族"就连带放过',
+      );
+      expectEqual(findings[0].matchedText, boundaryValue, '命中的应是完整的 20 位数字，而不是被截断成占位族那 19 位');
+
+      const sanitized = applyRules(sample, RULES, createLongNumericIdMapper());
+      expect(!sanitized.includes(boundaryValue), '脱敏后不应再包含原始的 20 位边界值');
+    },
+  },
+
   // ============================================================
   // uid-field
   // ============================================================

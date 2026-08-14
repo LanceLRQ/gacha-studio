@@ -43,11 +43,22 @@ function parseArgs(argv) {
   return { gameId, paradigm };
 }
 
-/** 递归收集目录下所有文件的相对路径（相对 `baseDir`）。 */
+// 遍历模板目录时必须跳过的目录名。`node_modules/` 不在 git 里，但本机跑过
+// 某些 pnpm 命令后会在 templates/plugin/<paradigm>/ 下真实存在（实测：里面
+// 是 .bin/tsc、.bin/tsserver 两个 shim）。不跳过的话它们会被当成模板内容
+// 复制进新插件，导致**生成结果因机器而异**——新克隆的仓库没有这个目录，
+// 生成出来的插件就少两个文件。模板产物必须只由 git 里的模板决定。
+const TEMPLATE_IGNORED_DIRS = new Set(['node_modules']);
+
+/**
+ * 递归收集目录下所有文件的相对路径（相对 `baseDir`），跳过
+ * `TEMPLATE_IGNORED_DIRS` 里的目录。
+ */
 function collectFilesRelative(baseDir) {
   const results = [];
   function walk(current) {
     for (const entry of readdirSync(current, { withFileTypes: true })) {
+      if (entry.isDirectory() && TEMPLATE_IGNORED_DIRS.has(entry.name)) continue;
       const full = path.join(current, entry.name);
       if (entry.isDirectory()) {
         walk(full);

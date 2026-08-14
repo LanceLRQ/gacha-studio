@@ -12,7 +12,9 @@
 //   - authkey=<值>            → authkey=FAKE_AUTHKEY_FOR_FIXTURE_ONLY
 //   - authkey_ver=<值>        → authkey_ver=1
 //   - sign_type=<值>          → sign_type=2
-//   - 19 位及以上纯数字串     → 固定占位值（覆盖雪花 ID）
+//   - 19 位及以上纯数字串     → 按首次出现顺序编号的占位族（覆盖雪花 ID，
+//     见 long-numeric-id 规则定义处：不同原值必须映射到不同占位值，否则
+//     fixture 测不出去重与 record_key 稳定性）
 //   - uid/player_id 字段的数字值（4 位及以上，不限位数）→ 固定占位值
 //     （覆盖米哈游/库洛的玩家 UID；按字段名锚定，位数不设上限——见该规则
 //     定义处的复核订正记录）
@@ -39,7 +41,66 @@ import { pathToFileURL } from 'node:url';
  * 每条规则：`pattern` 必须恰好一个捕获组，捕获「要保留的前缀」（键名 + 分隔符），
  * 真正敏感的部分是紧跟在捕获组之后、被规则整体匹配但未被捕获的部分——
  * 替换时只需要拼回前缀 + 占位值，不需要理解原始敏感值的具体格式。
+ *
+ * `long-numeric-id` 例外：它没有固定 `placeholder` 字段，取而代之的是
+ * `createLongNumericIdMapper` 产出的顺序映射表，由 `applyRules` 对该规则
+ * id 做特判驱动，见下方定义与 `applyRules` 实现。
  */
+
+// long-numeric-id 占位族：前缀（15 位）+ 4 位十进制序号，共 19 位。
+// 覆盖 1000000000000000000 ~ 1000000000000009999，容量 10000 个不同占位值。
+const LONG_NUMERIC_ID_PLACEHOLDER_PREFIX = '100000000000000'; // 15 位：1 后接 14 个 0
+const LONG_NUMERIC_ID_SERIAL_WIDTH = 4; // 4 位十进制序号，容量 10000
+const LONG_NUMERIC_ID_SERIAL_CAPACITY = 10 ** LONG_NUMERIC_ID_SERIAL_WIDTH;
+
+/**
+ * 序号 0 对应的占位值恰好是 `1000000000000000000`——这不是巧合，是刻意设计：
+ * 旧版工具把所有命中都折叠成这一个固定值，新占位族把它收编为族内第 0 号
+ * 成员，保证在旧版工具下已经脱敏过的历史 fixture，在新逻辑下仍然落在占位族
+ * 区间内、仍然被下面的负向先行断言幂等排除（不会被当成"新发现的敏感值"
+ * 再次改写）。
+ *
+ * 为什么占位族不会跟真实雪花 ID 产生歧义：服务端雪花 ID（时间戳位 + 机器位 +
+ * 序列位）分布在整个 19 位数字空间，量级约 10^18 ~ 10^19，不会精确落在
+ * "10^18 起的连续 10000 个值"这个极窄区间内——占位族只占这个空间的十万分之
+ * 一量级，真实 id 撞进占位族的概率可忽略。10000 的容量也留了充分余量：
+ * 当前已知最大样本是星铁 fixture 的 23 个不同 id，10000 是它的 400 多倍。
+ */
+function formatLongNumericIdPlaceholder(serial) {
+  if (serial < 0 || serial >= LONG_NUMERIC_ID_SERIAL_CAPACITY) {
+    throw new Error(
+      `long-numeric-id 占位族容量耗尽（上限 ${LONG_NUMERIC_ID_SERIAL_CAPACITY} 个不同值）：当前扫描到的不同 19 位以上数字超过占位族预留容量，需要扩宽 LONG_NUMERIC_ID_SERIAL_WIDTH。`,
+    );
+  }
+  return `${LONG_NUMERIC_ID_PLACEHOLDER_PREFIX}${String(serial).padStart(LONG_NUMERIC_ID_SERIAL_WIDTH, '0')}`;
+}
+
+/**
+ * 创建 long-numeric-id 规则专用的顺序映射器：调用生命周期内，每个不同的原始
+ * 数字串按首次出现顺序分配一个不同的占位值，重复出现的原值复用已分配的占位值。
+ *
+ * 不用哈希：哈希在密码学意义上应当不可逆，但对 19~20 位十进制数这种短小的数字
+ * 空间，暴力枚举完全可行，哈希等价于没加密——纯粹按出现顺序编号才是真正不可逆
+ * 的方案：占位值只携带"这是第几个不同值"这一信息，原值的任何一位都不出现在
+ * 占位值里。
+ *
+ * 主进程实测复现：修复前所有原值折叠成同一个占位值——星铁 fixture 23 个不同
+ * id 变成 1 个、原神 fixture 8 个变成 1 个，record_key（`${bannerId}:${stableId}`）
+ * 因此全部相同，fixture 测不出去重与 record_key 稳定性。这个映射器就是修复点。
+ */
+function createLongNumericIdMapper() {
+  const assigned = new Map();
+  let nextSerial = 0;
+  return function mapLongNumericId(originalValue) {
+    const existing = assigned.get(originalValue);
+    if (existing !== undefined) return existing;
+    const placeholder = formatLongNumericIdPlaceholder(nextSerial);
+    nextSerial += 1;
+    assigned.set(originalValue, placeholder);
+    return placeholder;
+  };
+}
+
 const RULES = [
   {
     id: 'authkey',
@@ -60,14 +121,36 @@ const RULES = [
     placeholder: '2',
   },
   {
+    // 这条规则没有固定占位值：靠 `createLongNumericIdMapper` 产出的映射表
+    // 决定每个匹配替换成什么，`applyRules` 里对 `rule.id === 'long-numeric-id'`
+    // 有特判分支，不走下面 `wholeMatchIsSensitive` 的通用替换路径。
     id: 'long-numeric-id',
     // 19 位及以上纯数字：覆盖服务端雪花 ID，以及贡献者可能误粘进来的长数字 UID。
-    // 排除掉已经等于占位值本身的情况，保证对已脱敏文件重复运行是幂等的。
-    pattern: /(?<=^|[^\d])(?!1000000000000000000(?:$|[^\d]))(\d{19,})(?=$|[^\d])/g,
+    //
+    // ⚠️ 主进程实测复现的真实缺陷（本次修复的起因）：修复前用固定占位值
+    // `1000000000000000000` 整体替换，星铁 fixture 里 23 个不同的雪花 ID
+    // `--write` 后全部折叠成同一个值，原神 fixture 里 8 个不同 id 也全部
+    // 折叠成同一个值——这些 id 是插件推导 `record_key`
+    //（形如 `${bannerId}:${stableId}`）用的服务端雪花 ID，折叠成同一个值后，
+    // fixture 里一批记录的 record_key 全部相同，fixture 测不出去重逻辑，
+    // 也测不出 record_key 稳定性，是真实的功能性缺陷，不是风格问题。
+    //
+    // 现在改用 `createLongNumericIdMapper`：每个不同的原值按首次出现顺序
+    // 映射到占位族（`LONG_NUMERIC_ID_PLACEHOLDER_PREFIX` + 序号，定义见上方）
+    // 里一个不同的占位值，保留原有的区分度。
+    //
+    // 负向先行断言排除的范围也从"单一固定值"扩成"整个占位族"——占位族是
+    // `100000000000000` 后接 4 位数字（`\d{4}`）的连续区间，覆盖
+    // `1000000000000000000` ~ `1000000000000009999`，保证对已经用占位族
+    // 脱敏过的文件重复运行 `--write` 时，占位族内的任意成员都不会被误判为
+    // "新发现的敏感值"再次改写，是幂等的。
+    pattern: new RegExp(
+      `(?<=^|[^\\d])(?!${LONG_NUMERIC_ID_PLACEHOLDER_PREFIX}\\d{${LONG_NUMERIC_ID_SERIAL_WIDTH}}(?:$|[^\\d]))(\\d{19,})(?=$|[^\\d])`,
+      'g',
+    ),
     reason: '命中 19 位及以上纯数字串（疑似雪花 ID / 长数字 UID）',
-    placeholder: '1000000000000000000',
     // 这条规则的“前缀捕获组”语义与其它规则不同：整个数字串本身就是敏感内容，
-    // 没有需要保留的前缀，替换时直接整体替换（见 applyRule 的特殊处理）。
+    // 没有需要保留的前缀，替换时直接整体替换（见 applyRules 的特殊处理）。
     wholeMatchIsSensitive: true,
   },
   {
@@ -207,11 +290,20 @@ function scanText(text, rules = RULES) {
   return findings;
 }
 
-/** 对文本应用全部规则的替换，返回替换后的文本。`rules` 默认取全量 RULES，理由同 scanText。 */
-function applyRules(text, rules = RULES) {
+/**
+ * 对文本应用全部规则的替换，返回替换后的文本。`rules` 默认取全量 RULES，理由同 scanText。
+ *
+ * `longNumericIdMapper` 默认值是"每次调用不显式传入时创建一个全新映射器"——
+ * JS 默认参数表达式每次调用都会重新求值，天然满足"未显式共享时各调用互不
+ * 干扰"；跨文件需要共享同一映射器时（见 `main()`），调用方显式传入同一个
+ * `createLongNumericIdMapper()` 实例即可。
+ */
+function applyRules(text, rules = RULES, longNumericIdMapper = createLongNumericIdMapper()) {
   let result = text;
   for (const rule of rules) {
-    if (rule.wholeMatchIsSensitive) {
+    if (rule.id === 'long-numeric-id') {
+      result = result.replace(rule.pattern, (matchedText) => longNumericIdMapper(matchedText));
+    } else if (rule.wholeMatchIsSensitive) {
       result = result.replace(rule.pattern, () => rule.placeholder);
     } else {
       result = result.replace(rule.pattern, (full, prefix) => `${prefix}${rule.placeholder}`);
@@ -282,6 +374,10 @@ function main(argv) {
   const files = collectFiles(targetDir);
   let totalFindings = 0;
   let changedFiles = 0;
+  // 同一次 CLI 运行里所有文件共用一个映射器实例：A 文件和 B 文件出现同一个
+  // 原始雪花 ID 时，两处必须得到同一个占位值，否则同一条记录在不同文件里
+  // 会被脱敏成两个看起来不相关的值。
+  const longNumericIdMapper = createLongNumericIdMapper();
 
   for (const filePath of files) {
     const buffer = readFileSync(filePath);
@@ -301,7 +397,7 @@ function main(argv) {
     }
 
     if (write) {
-      const sanitized = applyRules(text);
+      const sanitized = applyRules(text, RULES, longNumericIdMapper);
       if (sanitized !== text) {
         writeFileSync(filePath, sanitized, 'utf8');
         changedFiles += 1;
@@ -329,4 +425,4 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   main(process.argv);
 }
 
-export { scanText, applyRules, RULES };
+export { scanText, applyRules, RULES, createLongNumericIdMapper };

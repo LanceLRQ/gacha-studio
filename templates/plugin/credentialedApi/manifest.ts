@@ -48,8 +48,20 @@ export const manifest = {
         urlPattern: /https:\/\/.+?TODO_API_ENDPOINT[^"]+/,
       },
       request: {
-        // TODO：分页请求模板，"{{credential}}" 是凭据占位符。
-        url: "{{credential}}&page={{page}}",
+        // TODO：分页请求模板。可用占位符：{{credential}}（凭据 URL 原串）、
+        // {{page}}、{{gachaType}}、{{pageSize}}。
+        //
+        // ★ 卡池类型的**参数名就写在这个模板字面量里**，没有单独的声明字段
+        // ——原神/星铁是 "gacha_type"、绝区零是 "real_gacha_type"，各自改
+        // 自己这一行即可。（早期契约有过 typeParam/pageParam 两个字段，
+        // M1-S3 实测确认从未被任何代码路径读取，已删除，见
+        // packages/gs-plugin-kit/manifest.ts 对 request 的说明。）
+        //
+        // 建议采用「凭据原串 + 追加参数」的写法而不是重新拼一个 URL：凭据
+        // URL 里往往带着一些你不需要理解、但服务端要求存在的参数（如星铁的
+        // default_gacha_type、绝区零的 init_log_gacha_base_type），追加式
+        // 写法天然把它们带上。
+        url: "{{credential}}&page={{page}}&gacha_type={{gachaType}}&size={{pageSize}}",
       },
       // TODO：必填、不可为空数组——请求目标 host 白名单，精确匹配、不支持
       // 通配符。宿主会在占位符替换完成之后的最终 URL 上解析 host 并与这里
@@ -61,7 +73,6 @@ export const manifest = {
       // 一个，比如国服 + 国际服）填在这里，完整裁定见
       // docs/_internal/audit/AUDIT-2026-08-12-M2鸣潮纸面填表演练.md §7.8。
       allowedHosts: ["TODO_API_HOST"],
-      // TODO：卡池类型参数名，如原神/星铁 "gacha_type"、绝区零 "real_gacha_type"。
       extractList: extractRecordList,
     },
   },

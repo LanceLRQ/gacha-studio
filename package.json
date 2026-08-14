@@ -11,6 +11,7 @@
     "gs:check:no-dynamic-import": "node scripts/gs-check/checks/no-dynamic-import.mjs",
     "gs:check:ipc-surface": "node scripts/gs-check/checks/ipc-surface.mjs",
     "gs:check:codegen-diff": "node scripts/gs-check/checks/codegen-diff.mjs",
+    "gs:touchpoints": "node scripts/gs-touchpoints.mjs",
     "gs:sanitize": "node scripts/gs-sanitize.mjs",
     "gs:sanitize:self-check": "node scripts/gs-sanitize.self-check.mjs",
     "gs:new-plugin": "node scripts/gs-new-plugin.mjs",

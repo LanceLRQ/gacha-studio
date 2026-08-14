@@ -126,7 +126,10 @@ function isIntegrationTestFile(relPath) {
 }
 
 /** 从源码里找出所有 `#[cfg(test)] mod ... { }` 块的字符偏移区间。 */
-function findCfgTestModuleRegions(source) {
+// 导出给 scripts/gs-touchpoints.mjs 复用：M3 的「Rust 侧零生产代码改动」判据
+// 要判断 crates/ 下的改动行是否全部落在测试区里，用的是与本门完全相同的
+// 「什么算测试代码」定义。两边各写一份必然漂移，共用同一个实现。
+export function findCfgTestModuleRegions(source) {
   const regions = [];
   const pattern = /#\[cfg\(test\)\]\s*mod\s+\w+\b[^{]*\{/g;
   let match = pattern.exec(source);
