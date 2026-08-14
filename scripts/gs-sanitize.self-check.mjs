@@ -499,29 +499,52 @@ const cases = [
   // 幂等性
   // ============================================================
   {
-    name: '幂等性：宽度放开后，占位值自身仍落在新宽度区间内，重复匹配但替换为自身，字节不变',
+    name: '幂等性：宽度放开后，占位值不再被报告为命中，但同宽度的非占位值仍被命中',
     run: () => {
-      // 宽度从"恰好 9 位"/"恰好 32 位"放开到"4 位及以上"/"16 位及以上"后，
-      // 占位值本身（UID 占位值 100000000 是 9 位、ServerID 占位值是 32 位
-      // 十六进制）仍然落在新的宽度区间内，会被规则重新匹配——这是预期行为，
-      // 不是回归：dry-run 会持续报告"命中"（与 access-token/authorization-
-      // header/cookie 三条规则记录的噪音同类），但 --write 替换的结果就是
-      // 占位值本身，字节不变。
+      // ⚠️ 本用例的断言方向在 2026-08-14 被**反转**过，保留缘由：
+      //
+      // 原版断言的是"占位值本身仍会被规则重新匹配到（预期噪音，非回归）"——
+      // 也就是把"扫描永远报告自己写出的占位值"当成可接受的噪音写进了测试。
+      // 后来实测发现这个"噪音"的代价是致命的：9 条规则里 7 条如此，扫描模式
+      // 对任何已脱敏目录都不归零，`gs-sanitize <dir>` 因此无法作为
+      // 「贡献者要求」承诺的 CI 密钥扫描门禁，维护者也没法在几十条命中里
+      // 挑出真正那一条。修复见 gs-sanitize.mjs 的 isAlreadyPlaceholder。
+      //
+      // 本用例原本要证的东西（宽度放开后 --write 仍幂等）没有变，只是"占位值
+      // 被重新命中"这个载体不再成立，改用下面两条断言承载：
+      //   ① 占位值不被报告（新行为）
+      //   ② --write 后字节不变（原有意图）
+      //   ③ 同宽度但非占位值的值仍被命中——**这条是防退化的关键**：光有 ①②，
+      //      规则整个失效（比如正则写错、一个都匹配不上）也会全绿。
       const uidPlaceholderSample = '{"UID": 100000000}';
-      const uidFindings = scanText(uidPlaceholderSample, RULES).filter((f) => f.rule.id === 'uid-field');
-      expect(uidFindings.length > 0, '占位值本身（9 位）在宽度放开后应仍被 uid-field 规则匹配到（预期噪音，非回归）');
+      expectEqual(
+        scanText(uidPlaceholderSample, RULES).filter((f) => f.rule.id === 'uid-field').length,
+        0,
+        'UID 占位值不应被报告为命中——它已经是脱敏后的值',
+      );
       expectEqual(applyRules(uidPlaceholderSample, RULES), uidPlaceholderSample, 'UID 占位值应被替换为自身，字节不变');
+      // ③ 同为 9 位、但不是占位值 → 必须仍被命中，证明规则没有整个失效
+      expect(
+        scanText('{"UID": 812345678}', RULES).some((f) => f.rule.id === 'uid-field'),
+        '同宽度的非占位 UID 必须仍被命中，否则说明规则整个失效了',
+      );
 
       const serverIdPlaceholderSample = '{"ServerID": "a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0"}';
-      const serverIdFindings = scanText(serverIdPlaceholderSample, RULES).filter((f) => f.rule.id === 'server-id-hex');
-      expect(
-        serverIdFindings.length > 0,
-        '占位值本身（32 位 hex）在宽度放开后应仍被 server-id-hex 规则匹配到（预期噪音，非回归）',
+      expectEqual(
+        scanText(serverIdPlaceholderSample, RULES).filter((f) => f.rule.id === 'server-id-hex').length,
+        0,
+        'ServerID 占位值不应被报告为命中——它已经是脱敏后的值',
       );
       expectEqual(
         applyRules(serverIdPlaceholderSample, RULES),
         serverIdPlaceholderSample,
         'ServerID 占位值应被替换为自身，字节不变',
+      );
+      expect(
+        scanText('{"ServerID": "a1b2c3d4e5f60718293a4b5c6d7e8f90"}', RULES).some(
+          (f) => f.rule.id === 'server-id-hex',
+        ),
+        '同宽度的非占位 ServerID 必须仍被命中，否则说明规则整个失效了',
       );
     },
   },
@@ -586,6 +609,82 @@ const cases = [
         applyRules(sample),
         'https://example.invalid/api?authkey=FAKE_AUTHKEY_FOR_FIXTURE_ONLY&authkey_ver=1',
         'applyRules 默认参数下既有规则的替换结果不应变化',
+      );
+    },
+  },
+  {
+    // ★ 这条用例故意**对 RULES 做循环**，而不是把 9 条规则的样本写死。
+    // 起因：实测发现 9 条规则里有 7 条会把自己写出的占位值当成新的敏感值
+    // 再报一遍，导致扫描模式对任何已脱敏目录都不归零（starrail 98 处、
+    // genshin 35 处，全是自己的占位值），CI 密钥扫描门禁因此建不起来。
+    //
+    // 写死样本的版本能挡住这次回归，但挡不住**下一条规则**——新增第 10 条
+    // 规则时，谁也不会记得回来补一条自命中用例。循环断言让"新规则必须不
+    // 自命中"成为结构性约束：漏了就红，不需要任何人记得。
+    name: '占位值不得被自身规则重新命中（对 RULES 循环，新增规则自动纳入）',
+    run: () => {
+      // 每条规则一个能命中它的最小样本。新增规则若未在此登记，下面的
+      // "样本必须真的命中"断言会失败——所以这张表不会悄悄漏掉规则。
+      const samplesByRuleId = {
+        authkey: 'authkey=REAL_LOOKING_VALUE_123',
+        authkey_ver: 'authkey_ver=9',
+        sign_type: 'sign_type=7',
+        'long-numeric-id': '"id":"1712345678901234567"',
+        'uid-field': '"uid":"812345678"',
+        'server-id-hex': '"ServerId":"a1b2c3d4e5f60718293a4b5c6d7e8f90"',
+        'access-token': '"access_token":"eyJhbGciOi.realtoken.sig"',
+        'authorization-header': '"Authorization":"Bearer realvalue123"',
+        cookie: '"Cookie":"ltuid=123;ltoken=abc"',
+      };
+
+      const unregistered = RULES.filter((r) => !(r.id in samplesByRuleId)).map((r) => r.id);
+      expectEqual(
+        unregistered.join(','),
+        '',
+        `以下规则未在本用例的样本表里登记，无法验证其占位值是否自命中：${unregistered.join('、')}。` +
+          '新增规则时必须同时在此补一个能命中它的最小样本。',
+      );
+
+      for (const rule of RULES) {
+        const sample = samplesByRuleId[rule.id];
+
+        // ① 样本确实能命中该规则——否则"脱敏后 0 命中"是因为压根没匹配上，
+        //    这条断言就成了假绿灯。我第一次做这个探测就踩了这个坑：样本里
+        //    没有 access_token/Authorization/Cookie 字段，于是那三条规则报
+        //    0 自命中，把真实的 7 处缺陷误判成了 4 处。
+        expect(
+          scanText(sample, [rule]).length > 0,
+          `样本对规则 ${rule.id} 应当有命中，否则后续断言无意义（样本：${sample}）`,
+        );
+
+        // ② 脱敏一次之后，该规则不得再命中自己写出的占位值。
+        const sanitized = applyRules(sample, [rule]);
+        expectEqual(
+          scanText(sanitized, [rule]).length,
+          0,
+          `规则 ${rule.id} 把自己的占位值重新命中了——扫描模式将永远不归零。` +
+            `脱敏后文本：${sanitized}`,
+        );
+      }
+    },
+  },
+  {
+    name: '扫描模式绿态：全规则样本脱敏一次后，全量扫描命中数为 0',
+    run: () => {
+      const sample = [
+        'authkey=REALKEY123&authkey_ver=9&sign_type=7',
+        '"uid":"812345678"',
+        '"id":"1712345678901234567"',
+        '"ServerId":"a1b2c3d4e5f60718293a4b5c6d7e8f90"',
+        '"access_token":"eyJhbGciOi.realtoken.sig"',
+        '"Authorization":"Bearer realvalue123"',
+        '"Cookie":"ltuid=123;ltoken=abc"',
+      ].join(' ');
+      expectEqual(scanText(sample).length, 9, '原样本应命中全部 9 条规则');
+      expectEqual(
+        scanText(applyRules(sample)).length,
+        0,
+        '脱敏一次后全量扫描必须归零——这是"扫描输出可以作为门禁"的前提',
       );
     },
   },
