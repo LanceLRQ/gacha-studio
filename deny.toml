@@ -1,0 +1,134 @@
+# cargo-deny 配置。
+#
+# 本文件只承担 M0 阶段明确要求的许可门禁：deny GPL / AGPL / LGPL，
+# warn 未知许可（见 `docs/_internal/milestones/01-M0-工程骨架.md` §5.2、
+# `docs/_internal/reference/参考项目与依赖许可合规清单.md` §四待办）。
+# `[bans]` `[advisories]` `[sources]` 三节是 cargo-deny 的必要陪衬（缺失时
+# 会退回内置默认值，不代表关闭检查），配得比较宽松，避免它们喧宾夺主。
+#
+# ⚠️ schema 版本说明：cargo-deny 0.16 起 `[licenses]` 的检查模型整体改了——
+# 旧版 `unlicensed` / `copyleft` / `allow-osi-fsf-free` 等字段已被移除，
+# 现在是纯粹的允许清单模型：**没写进 `allow` 的许可证一律视为拒绝**，
+# 侦测置信度不足或完全查不到许可证同样视为拒绝，不再有单独的"未知许可
+# warn 一下就放行"的开关（本机实测版本：cargo-deny 0.20.2，文档来源：
+# context7 `/embarkstudios/cargo-deny`，CHANGELOG 0.16.0 条目：
+# "License configuration has been updated to deny all licenses by default
+# unless explicitly allowed or excepted"）。
+#
+# 这与本文档标题写的"deny GPL/AGPL/LGPL，warn 未知许可"字面上不完全对得上——
+# 新模型里"未知"和"GPL 系"结果都是硬失败，没有纯 warn 的中间态。但效果是
+# 等价甚至更严格的：GPL/AGPL/LGPL 因为没有出现在下面的 `allow` 列表里，
+# 天然被拒绝；任何新增依赖只要许可证不在 `allow` 清单内（不管是 GPL 还是
+# 单纯没见过的新许可证），`cargo deny check licenses` 都会直接报错、卡住
+# CI/PR，而不是安静地打一条 warning 然后被忽略——对一个还在早期、条目会
+# 持续变化的许可清单来说，"卡住逼人看一眼"比"warn 然后没人看"更符合这道
+# 门禁本来的目的。
+
+[licenses]
+# 置信度阈值：cargo-deny 通过 SPDX 许可证全文的文本相似度来判定一个
+# license-file 具体对应哪个 SPDX 标识符，取值 0.0~1.0，默认 0.8。
+# 显式写出来（而不是依赖隐式默认值）是为了防止未来 cargo-deny 版本升级
+# 悄悄改了默认值却没人注意到——这道门禁的严格程度不该随依赖升级漂移。
+confidence-threshold = 0.8
+
+# 允许清单：本项目实际依赖树（Cargo.lock 495 个 package，2026-08-14 用
+# `cargo metadata` 逐包核对 license 字段得出 33 种唯一表达式）里出现过的
+# 全部许可证标识符，逐一列出，不用通配。清单之外的任何标识符——包括
+# GPL-3.0 / AGPL-3.0 / LGPL-2.1 / LGPL-3.0 这些——都会被拒绝，不需要
+# 再写一份显式的 "deny" 列表（新 schema 没有这个字段，见上方 schema 说明）。
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "0BSD",
+    "Unlicense",
+    "MIT-0",
+    "CC0-1.0",
+    # webpki-root-certs 用的 Mozilla 根证书数据许可，非代码许可，
+    # 允许免费再分发根证书数据，与 GPL 系无关。
+    "CDLA-Permissive-2.0",
+    # Unicode 数据表许可（icu/unicode-ident 等 crate 内嵌的 Unicode 数据），
+    # 允许自由使用/复制/修改，无 copyleft 义务。
+    "Unicode-3.0",
+    # 弱 copyleft，但义务仅在"修改了 MPL 覆盖的源文件并对外分发该文件"时
+    # 触发，不会像 GPL 那样传染到整个二进制。本项目只是编译期引用未修改的
+    # 上游源码（cssparser / selectors 等，随 Tauri webview 依赖链传递引入），
+    # 不落入这个义务，因此允许而不是拒绝——注意这条**不是** LGPL，两者不要
+    # 混为一谈。
+    "MPL-2.0",
+]
+
+# 目前没有需要单独覆写的依赖：唯一一个许可表达式里带 LGPL 字样的依赖
+# （`r-efi`，getrandom 在 `cfg(target_os = "uefi")` 下的可选依赖，本项目
+# 不构建 UEFI 目标，实际不会被编译进产物），它的完整表达式是
+# "MIT OR Apache-2.0 OR LGPL-2.1-or-later"——三选一的 OR 关系，上面
+# allow 列表里的 MIT/Apache-2.0 已经能让整条表达式判定通过，不需要为它
+# 单独加 exceptions 条目去"选择"LGPL 分支。留空数组占位，后续如果出现
+# 真正需要按 crate 覆写许可判定的情况，往这里加。
+exceptions = []
+
+# ⚠️ 两个不出现在依赖树里、因此也不会出现在上面 allow 列表里的例外，
+# 记录在这里防止后人看到"deny LGPL"就误以为和它们的方案冲突：
+#
+# 1. WinDivert（LGPLv3 / GPLv2 双许可，内核驱动 WinDivert64.sys 另有签名
+#    要求）——本项目不打包其 .dll/.sys 到安装包，而是运行时从官方 URL
+#    下载、校验 hash 与大小上限，解压后把 WinDivert 的 LICENSE 一并落盘到
+#    安装目录（约定见 `THIRD-PARTY-NOTICES.md`、`docs/_internal/reference/
+#    参考项目与依赖许可合规清单.md` §2.1）。它从未进入 Cargo.lock，
+#    cargo-deny 天然看不到它，这里也不需要给它开例外。
+#
+# 2. Npcap（专有许可，免费版禁止随第三方软件分发）——本项目结论是不引入，
+#    抓包后端只用 pktmon（MIT）+ WinDivert（运行时下载），同上，
+#    不会出现在依赖树里（§2.2）。
+
+# 未使用 `[[licenses.clarify]]`：依赖树里目前没有 license 字段缺失或
+# 无法被 SPDX 解析、需要靠 license-file 哈希人工判定的 crate（本次核对的
+# 495 个 package 全部带有可解析的 license 字段）。留到真正遇到时再加，
+# 不预写空条目。
+
+# ---------------------------------------------------------------------------
+
+[bans]
+# 依赖树里同一个 crate 出现多个版本很常见（比如 windows-sys 的不同小版本
+# 被不同上游各自锁定），这是构建体积问题，不是许可合规问题，不该卡住
+# 这道门禁——保持宽松，只 warn。
+multiple-versions = "warn"
+# 没有已知需要拉黑的 crate（比如历史上常见的 "禁用 openssl-sys 强制走
+# rustls" 这类策略），本项目走 rustls 系已经是既定选型，不需要额外禁令。
+deny = []
+skip = []
+
+[advisories]
+# advisories 数据库结构版本，cargo-deny 当前要求显式声明为 2。
+version = 2
+db-urls = ["https://github.com/RustSec/advisory-db"]
+
+# ⚠️ **`cargo deny check advisories` 当前是红的，`ignore` 留空是有意的**，
+# 不是"目前没有命中"。2026-08-14 实测 **19 条 error**，其中 3 条是
+# vulnerability（不只是 unmaintained）：
+#
+#   RUSTSEC-2026-0194 / 0195  quick-xml 0.38.4  ← plist ← tauri
+#                             （重复属性名检查的二次方复杂度；NsReader
+#                              命名空间声明无上限分配导致内存耗尽 DoS）
+#   RUSTSEC-2026-0009         time 0.3.45       ← cookie / plist ← tauri
+#                             （栈耗尽 DoS）
+#
+# 其余 16 条是 unmaintained：gtk-rs GTK3 绑定、unic-* 系列、proc-macro-error。
+#
+# **为什么不加 ignore 掩盖**：三条 vulnerability 全部来自 Tauri 的传递依赖，
+# 本项目无法在自己这侧修（只能等 Tauri 升 plist/cookie）。加 ignore 会让这道
+# 检查变成永远绿的假门——那正是本项目在 HC-2/HC-3 上反复踩过的错误
+# （门之所以通过，是因为它什么都没检查）。宁可让它红着，红着至少每次跑都会
+# 提醒一次"该看看 Tauri 有没有升级了"。
+#
+# **可达性判断（2026-08-14）**：三条都不在本项目代码驱动的路径上。
+# quick-xml 经 `plist` 只用于解析 macOS 的 Info.plist（构建期与 bundle 元数据，
+# 输入不来自用户）；`time` 经 `cookie`/`plist` 进来，而**本项目自己的时间解析
+# 走 `chrono`**（`crates/paradigms/gs-p-authkey/src/pipeline.rs:958`
+# `NaiveDateTime::parse_from_str`），存档里的用户可控时间串不会流进 `time`。
+# 因此不构成当前可利用的风险，但依赖升级后需重新核这一段——**不要**因为
+# 这段结论就在未来直接照抄"无风险"。
+ignore = []
