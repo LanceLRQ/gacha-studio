@@ -189,6 +189,40 @@ gacha_type=103（音擎回响），⚠️ **人工构造，非真实样本**，�
 #      - credential/data_2.sample 的 authkey 参数值为字面量
 #        "FAKE_AUTHKEY_FOR_FIXTURE_ONLY"，不含任何真实签名片段
 #    结果：6 个入库文件 × 以上逐项核对全部通过。
+
+# ============================================================
+# archive/ 目录 —— UIGF v4.x 交换格式适配器的夹具
+# ============================================================
+#
+# 与上面 raw_response/ 的关系、生成方式（顺序反转 + 字段改名 + 脚本一次性
+# 跑在会话临时目录未入库）与 `fixtures/genshin/meta.toml` archive/ 一节
+# 完全同一思路，这里只记录绝区零特有的差异点：
+#
+#   - 源文件是 `raw_response/2_page_1.json`（6 条，gacha_type=2，独家
+#     频段）——与 record_key 测试组共用同一份"已核实为 API 真实倒序"的样本
+#   - `gacha_id` 直接取 raw_response 的取值 `"0"`（真实存档全量记录实测
+#     恒为该值），不是走 `UigfNapItem.gacha_id: Option` 缺省补 "0" 那条
+#     兜底路径——本文件里这个字段是显式声明的，兜底路径由
+#     `crates/gs-exchange/src/uigf.rs` 的单元测试
+#     `import_restores_zzz_record_defaulting_missing_gacha_id_to_zero`
+#     单独用一份不含 `gacha_id` 键的合成 JSON 覆盖，不依赖这份 fixture
+#   - `item_id`/`rank_type` 与星铁同理，直接取 raw_response 原始取值
+#   - `uid`/`timezone`/`lang` 取 `"100000000"`/`8`/`"zh-cn"`——绝区零响应
+#     信封本身不带 `region_time_zone`（时区来自 `region` 字段查静态表，
+#     见 `plugins/zzz/manifest.ts`），`timezone: 8` 对应 `region:
+#     "prod_gf_cn"` 在该静态表里的取值（`prod_gf_cn: 8`）
+#
+# ⚠️ 与星铁同理，绝区零 `timezoneSource: staticTable` 也需要页级响应体
+# （`region` 字段），UIGF 存档没有这个字段，导入路径会在 `gs-host` 层
+# fail closed——见 `crates/gs-host/src/import.rs` 模块文档"已知缺口"一节，
+# 完整分析不在本目录重复。
+#
+# 脱敏验证：本目录未接触任何新的真实数据（只读取已入库、已通过脱敏验证的
+# `raw_response/2_page_1.json`）。`node scripts/gs-sanitize.mjs
+# fixtures/zzz`（dry-run）对新增文件命中 0 处。**同样不要对本文件跑
+# `--write`**——理由与上方"不要对本目录跑 --write"一节相同：本文件的雪花
+# ID 沿用 raw_response 的 "19" 前缀序号，会被 long-numeric-id 规则坍缩成
+# 同一个占位值，破坏逐条记录 id 互不相同这条前提。
 #
 # 具体脱敏手法：
 #   - 账号级字段仅保留 uid（占位值 100000000）与 lang（非敏感），未出现

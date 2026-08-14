@@ -1,0 +1,116 @@
+{
+  "info": {
+    "export_timestamp": 1755100800,
+    "export_app": "gacha-studio-fixture",
+    "export_app_version": "v0.0.0-fixture",
+    "version": "v4.0"
+  },
+  "hkrpg": [
+    {
+      "uid": "100000000",
+      "timezone": 3,
+      "lang": "zh-cn",
+      "list": [
+        {
+          "gacha_id": "2128",
+          "gacha_type": "11",
+          "item_id": "20020",
+          "count": "1",
+          "time": "2101-07-15 10:21:49",
+          "name": "睿见",
+          "item_type": "光锥",
+          "rank_type": "3",
+          "id": "1500000000000000009"
+        },
+        {
+          "gacha_id": "2128",
+          "gacha_type": "11",
+          "item_id": "1510",
+          "count": "1",
+          "time": "2101-07-15 10:21:49",
+          "name": "姬子•启行",
+          "item_type": "角色",
+          "rank_type": "5",
+          "id": "1500000000000000008"
+        },
+        {
+          "gacha_id": "2128",
+          "gacha_type": "11",
+          "item_id": "20023",
+          "count": "1",
+          "time": "2101-07-15 10:21:49",
+          "name": "嗤笑",
+          "item_type": "光锥",
+          "rank_type": "3",
+          "id": "1500000000000000007"
+        },
+        {
+          "gacha_id": "2128",
+          "gacha_type": "11",
+          "item_id": "20001",
+          "count": "1",
+          "time": "2101-07-15 10:21:49",
+          "name": "物穰",
+          "item_type": "光锥",
+          "rank_type": "3",
+          "id": "1500000000000000006"
+        },
+        {
+          "gacha_id": "2128",
+          "gacha_type": "11",
+          "item_id": "20021",
+          "count": "1",
+          "time": "2101-07-15 10:21:49",
+          "name": "焚影",
+          "item_type": "光锥",
+          "rank_type": "3",
+          "id": "1500000000000000005"
+        },
+        {
+          "gacha_id": "2128",
+          "gacha_type": "11",
+          "item_id": "20002",
+          "count": "1",
+          "time": "2101-07-15 10:21:49",
+          "name": "天倾",
+          "item_type": "光锥",
+          "rank_type": "3",
+          "id": "1500000000000000004"
+        },
+        {
+          "gacha_id": "2128",
+          "gacha_type": "11",
+          "item_id": "21008",
+          "count": "1",
+          "time": "2101-07-15 10:21:49",
+          "name": "猎物的视线",
+          "item_type": "光锥",
+          "rank_type": "4",
+          "id": "1500000000000000003"
+        },
+        {
+          "gacha_id": "2128",
+          "gacha_type": "11",
+          "item_id": "20016",
+          "count": "1",
+          "time": "2101-07-15 10:21:49",
+          "name": "俱殁",
+          "item_type": "光锥",
+          "rank_type": "3",
+          "id": "1500000000000000002"
+        },
+        {
+          "gacha_id": "2128",
+          "gacha_type": "11",
+          "item_id": "20008",
+          "count": "1",
+          "time": "2101-07-15 10:21:49",
+          "name": "嘉果",
+          "item_type": "光锥",
+          "rank_type": "3",
+          "id": "1500000000000000001"
+        }
+      ]
+    }
+  ]
+}

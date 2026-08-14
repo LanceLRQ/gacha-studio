@@ -1,0 +1,65 @@
+{
+  "info": {
+    "export_timestamp": 1755100800,
+    "export_app": "gacha-studio-fixture",
+    "export_app_version": "v0.0.0-fixture",
+    "version": "v4.0"
+  },
+  "hk4e": [
+    {
+      "uid": "100000000",
+      "timezone": 8,
+      "lang": "zh-cn",
+      "list": [
+        {
+          "gacha_type": "301",
+          "item_id": "20001",
+          "count": "1",
+          "time": "2026-06-01 12:00:00",
+          "id": "1400000000000000006",
+          "name": "测试四星角色E",
+          "item_type": "角色",
+          "rank_type": "4"
+        },
+        {
+          "gacha_type": "301",
+          "item_id": "20002",
+          "count": "1",
+          "time": "2026-06-05 19:30:00",
+          "id": "1400000000000000007",
+          "name": "测试四星角色D"
+        },
+        {
+          "gacha_type": "400",
+          "item_id": "20003",
+          "count": "1",
+          "time": "2026-06-10 08:44:02",
+          "id": "1400000000000000008",
+          "name": "测试五星角色C",
+          "item_type": "角色",
+          "rank_type": "5"
+        },
+        {
+          "gacha_type": "301",
+          "item_id": "20004",
+          "count": "1",
+          "time": "2026-06-15 10:02:11",
+          "id": "1400000000000000009",
+          "name": "测试四星武器B",
+          "item_type": "武器",
+          "rank_type": "4"
+        },
+        {
+          "gacha_type": "301",
+          "item_id": "20005",
+          "count": "1",
+          "time": "2026-06-18 21:15:32",
+          "id": "1400000000000000010",
+          "name": "测试五星角色A",
+          "item_type": "角色",
+          "rank_type": "5"
+        }
+      ]
+    }
+  ]
+}

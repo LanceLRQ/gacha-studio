@@ -8,7 +8,6 @@ members = [
     "crates/gs-manifest-data",
     "crates/gs-plugin-runtime",
     "crates/paradigms/gs-p-authkey",
-    "crates/paradigms/gs-p-uigf",
     "crates/gs-exchange",
     "src-tauri",
 ]
@@ -38,15 +37,19 @@ gs-manifest-data = { path = "crates/gs-manifest-data" }
 # 顶部「为什么是独立 crate」一节（破解 gs-host ⇄ gs-p-authkey 的必然环）。
 gs-plugin-runtime = { path = "crates/gs-plugin-runtime" }
 gs-p-authkey = { path = "crates/paradigms/gs-p-authkey" }
-gs-p-uigf = { path = "crates/paradigms/gs-p-uigf" }
 # 交换格式适配层：识别并导入第三方工具产出的抽卡存档（如鸣潮参考项目
-# WWGachaExport 的本地 JSON 存档），产出本项目能消费的中间形状。依赖
-# gs-core，不被 gs-core 依赖。与 gs-p-uigf 平级但职责不同——gs-p-uigf
-# 服务的是 UIGF 这个米哈游三游共享的独立交换标准，目前只判版本号、是桩；
-# gs-exchange 是识别/导入任意第三方存档的通用框架，本任务落地了第一个
-# 真实适配器实现（wwgacha）。两者都不属于采集流程（`CollectConfig`
-# 判别联合的任何一个分支），这一点与插件 SDK 设计文档 1.3 节对
-# `gs-p-uigf` 的定位说明一致。
+# WWGachaExport 的本地 JSON 存档、UIGF v4.x 交换文件），产出本项目能消费的
+# 中间形状。依赖 gs-core，不被 gs-core 依赖，不属于采集流程
+# （`CollectConfig` 判别联合的任何一个分支）。
+#
+# UIGF 适配器（`gs_exchange::uigf`）落在这里，而不是独立的
+# `gs-p-uigf`——`crates/paradigms/gs-p-uigf` 曾经是一个 31 行的版本号判定
+# 桩（零字段映射、零依赖、零消费者），随 UIGF v4 真实实现落地一并删除。
+# 删除理由：`gs-exchange` 已经是"识别/导入任意第三方存档"的通用框架，
+# UIGF 与 wwgacha 是同一个 trait（`ExchangeAdapter`）下的两个平级实现，
+# 单独拆一个只装得下"其中一种格式"的 crate 不会带来任何隔离收益，只会多
+# 一层没有必要的 crate 边界。若在别处（旧文档、旧讨论记录）看到
+# "gs-p-uigf" 字样，一律是这次删除之前的旧模型残留。
 gs-exchange = { path = "crates/gs-exchange" }
 
 serde = { version = "1", features = ["derive"] }

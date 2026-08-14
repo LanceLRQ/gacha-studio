@@ -1298,10 +1298,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "gs-p-uigf"
-version = "0.1.0"
-
-[[package]]
 name = "gs-plugin-runtime"
 version = "0.1.0"
 dependencies = [

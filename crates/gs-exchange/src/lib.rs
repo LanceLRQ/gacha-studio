@@ -7,37 +7,39 @@
 //! 存档一键导入进来，不用重新走一遍采集流程。
 //!
 //! **已接线（M2-S6）**：`gs-host` 的 `import` 模块依赖本 crate，把
-//! [`ExchangeAdapter::import`] 产出的 [`ImportBatch`] 交给采集用的同一条
+//! [`ExchangeAdapter::import`] 产出的每个 [`ImportBatch`] 交给采集用的同一条
 //! `AuthkeyApiPipeline::build_records` 通路落库——理由与实现见
 //! `crates/gs-host/src/import.rs` 模块文档，裁定原文见
 //! `docs/_internal/milestones/03-M2-鸣潮插件与抽象证伪.md` §4.6.3。本 crate
 //! 自身仍然只负责"识别 + 导入成中间形状"这一层，不知道、也不依赖任何调用方
 //! 怎么处理这份中间形状。
 //!
-//! ⚠️ **诚实状态声明**：[`ExchangeAdapter`] trait 当前只有一个真实实现
-//! （[`wwgacha::WwgachaAdapter`]）。UIGF **本该**是这个 trait 的第二个实现
-//! ——它和 wwgacha 一样是"第三方工具产出的存档格式"，不是另一层东西——但
-//! `crates/paradigms/gs-p-uigf` 至今只判断版本号字符串是否以 `"v4."` 开头，
-//! 是桩，没有任何字段映射，因此**现在还不算数**。
+//! ## trait 已被第二个真实实现证伪并改过一次形状
 //!
-//! 按三次法则，`ExchangeAdapter` 现在是 N=1 抽象。仍然定义 trait 的理由是
-//! **多态是功能需求本身**（宿主要对一个未知文件遍历注册表逐个嗅探，
-//! [`AdapterRegistry`] 离开 trait 就不存在），不是从多个样本里归纳出来的
-//! 共性——这个理由只够支撑"现在建"，不够支撑"已验证"。
+//! [`ExchangeAdapter`] 现在有两个真实实现：[`wwgacha::WwgachaAdapter`] 与
+//! [`uigf::UigfAdapter`]。UIGF v4 落地时证伪了 `import` 最初"一次导入恰好
+//! 产出一个 [`ImportBatch`]"的假设——一份 UIGF v4 文件的粒度是"N 个游戏 ×
+//! M 个账号"（`info` + 最多 4 个游戏键，每个游戏键下是一个账号数组），而
+//! `ImportBatch` 是"1 个游戏 × 1 个账号"，`import` 一次只能返回一个，这是
+//! 返回类型级的不匹配，不是可以在 wwgacha 的返回值外面包一层就绕过去的
+//! 问题。因此 `import` 的签名改成了 `Result<Vec<ImportBatch>, ImportError>`
+//! ——wwgacha 的实现不受影响（它对应的仍然是"单文件=单账号"，只是把唯一的
+//! 那个 `ImportBatch` 包进一个长度恒为 1 的 `Vec`）。
 //!
-//! trait 形状是否真的通用，要等 M3 阶段 UIGF v4 的真实字段映射落地、并证明
-//! 能塞进同一套 `sniff`/`import` 接口之后才算被验证或证伪。UIGF 对这套接口
-//! 的压力远大于 wwgacha：它是**三套互不相干的标准**（Classic UIGF / SRGF /
-//! UIGF v4，参考实现里是三组独立结构体，见
-//! `docs/_internal/design/2026-08-10-伙伴工具生态与数据导入.md` §3.2）。
-//! "M3 的 UIGF 之于交换抽象"与"M2 的鸣潮之于采集抽象"是同一种关系，裁定详见
-//! `docs/_internal/milestones/03-M2-鸣潮插件与抽象证伪.md` §4.6.2。
+//! 同一次改动里，`fn game_id(&self) -> &'static str` 从 trait 上删除：
+//! 排查发现这个方法除了 [`wwgacha::WwgachaAdapter`] 自己的实现之外零消费点
+//! ——真正被下游读取的是 [`ImportBatch::game_id`]（每个 batch 各自携带自己
+//! 的游戏归属，UIGF 一次导入可能同时产出 genshin/starrail/zzz 三个游戏的
+//! batch，适配器级别的单一 `game_id()` 本来就装不下这个语义）。wwgacha 保留
+//! 了模块内的 `GAME_ID` 常量供自己构造 `ImportBatch` 时使用，只是不再是
+//! trait 契约的一部分。
 //!
-//! **不要把这个 trait 当成"已验证的抽象"来引用**——当前只是"看起来应该长
-//! 这样"的第一个样本，下一个真实适配器出现之前，trait 形状随时可能要改。
+//! 这次改动本身是"trait 形状随时可能要改"这条声明的兑现，不是失败——crate
+//! 顶部文档过去一直提醒这一点，UIGF 落地把它变成了已经发生的事实。
 
 use serde_json::Value;
 
+pub mod uigf;
 pub mod wwgacha;
 
 /// 对存档文件做格式识别（sniff）的判定结果。
@@ -69,12 +71,8 @@ pub enum SniffResult {
 ///
 /// 完整的诚实状态声明见本 crate 顶部文档。
 pub trait ExchangeAdapter {
-    /// 本适配器识别/导入的交换格式标识，如 `"wwgacha"`。
+    /// 本适配器识别/导入的交换格式标识，如 `"wwgacha"`、`"uigf-v4"`。
     fn format_id(&self) -> &'static str;
-
-    /// 本适配器导入后产出的记录归属哪款游戏，对应插件 `manifest.id`
-    /// （如 `"wuwa"`）。
-    fn game_id(&self) -> &'static str;
 
     /// 判断 `head` 是否匹配本适配器负责的格式。
     ///
@@ -84,12 +82,20 @@ pub trait ExchangeAdapter {
     /// [`ExchangeAdapter::import`]。
     fn sniff(&self, head: &[u8]) -> SniffResult;
 
-    /// 把完整的存档字节导入成 [`ImportBatch`]。
+    /// 把完整的存档字节导入成一批 [`ImportBatch`]。
+    ///
+    /// 返回 `Vec` 而不是单个值——这是 UIGF v4 落地时证伪掉的第一版假设，见
+    /// crate 顶部"trait 已被第二个真实实现证伪并改过一次形状"一节。一份
+    /// 存档可能同时携带多个游戏、每个游戏下又有多个账号（UIGF v4 就是这样：
+    /// `info` + 最多 4 个游戏键，每个游戏键下是一个账号数组），`ImportBatch`
+    /// 固定是"1 个游戏 × 1 个账号"的粒度，因此一次 `import` 调用要能产出
+    /// 0 到多个 batch。wwgacha 这类"单文件=单账号"的格式，返回值就是一个
+    /// 长度恒为 1 的 `Vec`。
     ///
     /// 与 `sniff` 不同，`data` 必须是完整文件——字段映射与结构校验都需要
     /// 完整数据才能可靠进行；截断的输入应当在读取阶段就被调用方过滤掉，
     /// 不指望这里能优雅处理不完整的字节。
-    fn import(&self, data: &[u8]) -> Result<ImportBatch, ImportError>;
+    fn import(&self, data: &[u8]) -> Result<Vec<ImportBatch>, ImportError>;
 }
 
 /// 一次成功导入的结果，尚未落库——落库、去重、写入 `GachaRecord` 是未来
@@ -113,6 +119,24 @@ pub struct ImportAccount {
     pub region: Option<String>,
     /// 对应存档的服务器标识（如 wwgacha 的 `ServerID`）。语义同上。
     pub server_id: Option<String>,
+    /// 存档自身声明的时区偏移小时数（UTC 偏移，正数表示东区）。
+    ///
+    /// UIGF v4 的 `UigfProject.timezone` 落在这里——放在 `ImportAccount`
+    /// 而不是 `ImportBatch`：UIGF 里 `timezone` 是 project 级（= 每游戏每
+    /// 账号）属性，语义上属于账号，不属于整份文件（一份 UIGF 文件可能包含
+    /// 多个游戏、每个游戏又有多个账号，各自的 `timezone` 互不相同）。
+    ///
+    /// 不携带时区信息的交换格式（如 wwgacha 本地存档，`GameUser.cs` 没有
+    /// 这个字段）填 `None`，是诚实地表达"确实没有"，不是编造一个默认时区。
+    ///
+    /// 消费点见 `gs_host::import::import_batch`：用这个值替代过去硬编码
+    /// 传给 `AuthkeyApiPipeline::build_records` 的 `page_tz_offset_hours`
+    /// 参数（`None`），也用它来放宽 `timezone_source_requires_page_response`
+    /// 那条 fail-closed 检查——插件声明的 `timezoneSource: apiField`/
+    /// `staticTable` 本来要读页级 API 响应体才能算出时区，但如果导入路径
+    /// 的存档本身已经带着这个偏移量，效果上等价，不需要再假装"没有响应体
+    /// 就一定拿不到时区"。
+    pub tz_offset_hours: Option<i32>,
 }
 
 /// 一个卡池维度的导入结果。

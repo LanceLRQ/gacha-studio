@@ -33,3 +33,53 @@ note = "覆盖三个场景：301 分组混有 gacha_type=400 的记录、rank_ty
 # 不是数据本身干净。真实数据派生的 fixture 除了跑 gs-sanitize，还须另有
 # 「已知敏感字段清单逐项确认」的正向检查（逐个核对 UID/authkey/ServerID 等
 # 已知敏感字段确实被替换成了占位值，而不是仅凭工具报告"0 处命中"就下结论）。
+
+# ============================================================
+# archive/ 目录 —— UIGF v4.x 交换格式适配器的夹具
+# ============================================================
+#
+# 与上面 raw_response/ 的关系是本目录的核心不变量，与
+# `fixtures/wuwa/meta.toml` 记录的 archive/ 一节同一思路：
+# `archive/uigf_v4_genshin.json` 与 `raw_response/301_page_1.json`
+# **是同一批记录的不同形状**，这是刻意的——后续测试断言"同一批记录走采集
+# 路径（读 raw_response，模拟 API 响应）与走导入路径（读 archive，模拟
+# UIGF 导入）算出的 record_key 完全相同"（`crates/gs-host/tests/
+# import_uigf.rs` 的 `record_keys_are_identical_across_collect_and_import_paths_for_genshin`）。
+#
+# 生成方式是对 `raw_response/301_page_1.json` 做机械字段变换（脚本在会话
+# 临时目录一次性跑过，未入库，逻辑如下）：
+#   - 顺序反转：raw_response 是 API 响应的倒序（新→旧），UIGF `list` 是
+#     账号维度按服务端雪花 ID 升序（旧→新，`docs/example-projects/
+#     HoYo.Gacha/tauri/src/database/schemas/gacha_record.rs:152` 的
+#     `ORDER BY id ASC` 核实），因此把 5 条记录整体反转
+#   - 字段改名/重排：`gacha_type`/`count`/`time`/`name`/`item_type`/
+#     `rank_type`/`id` 原样保留取值（不做字符串化/数值化的类型转换，
+#     UIGF 与 API 响应在这些字段上本来就同为字符串或同为数字）
+#   - 补 `item_id`：UIGF 的 `hk4e` item 结构要求这个字段（用于导出时查
+#     物品字典），但真实原神 API 从不返回它——**补的是脚本内顺序编号的占位
+#     值**（"20001"~"20005"，5 位数，不是真实物品目录 ID），因为
+#     `UigfAdapter` 还原成 API 形状时会主动丢弃这个字段（见
+#     `crates/gs-exchange/src/uigf.rs` 模块文档"字段还原"一节），占位值
+#     本身从未被任何测试断言消费
+#   - 第 4 条记录（id ...007，raw_response 里 `item_type`/`rank_type` 均为
+#     空字符串，对应"测试四星角色D"）在 UIGF 里整体省略这两个键（对应
+#     `Option::None`，不是空字符串）——真实 UIGF 导出遇到"元数据缺失"记录
+#     就是这样表达的（`converters.rs` 的 `skip_serializing_if =
+#     "Option::is_none"`），`UigfAdapter` 还原时 `None` 会补回空字符串，
+#     与原始 raw_response 完全对应
+#   - `uid`/`timezone`/`lang` 是账号级字段，取值 `"100000000"`/`8`/
+#     `"zh-cn"`——与本文件 `[account]` 一节的 UID 惯例、`raw_response/`
+#     全部记录的 `lang` 取值一致，`timezone: 8` 对应 UID 首位数字 "1" 落在
+#     `hooks.resolveTimezone` 默认分支（UTC+8）的既有惯例，不是随手挑的数
+#
+# ⚠️ **`timezone` 字段目前不影响 `occurred_at`**：原神插件声明了
+# `hooks.resolveTimezone`（按 UID 首位数字推断，见 `plugins/genshin/
+# hooks.ts`），`AuthkeyApiPipeline::build_records` 在这种情况下会无条件用
+# hook 的返回值，忽略任何显式传入的 `page_tz_offset_hours`——UIGF 存档声明
+# 的 `timezone` 因此对原神而言是"看起来有意义、实际不参与计算"的字段，完整
+# 分析见 `crates/gs-exchange/src/uigf.rs` 模块文档"已知缺口"一节。
+#
+# 脱敏验证：本目录未接触任何真实数据（转换脚本只读取已入库、已通过脱敏验证
+# 的 `raw_response/301_page_1.json`），`item_id` 占位值与 `uid`/`timezone`/
+# `lang` 均为脚本内字面量硬编码。`node scripts/gs-sanitize.mjs fixtures/
+# genshin`（dry-run）对新增文件命中 0 处。

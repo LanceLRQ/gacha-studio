@@ -8,8 +8,8 @@
 //! ——鸣潮走同一条 L1 流程但**没有 authkey**，判别标签叫 `authkey` 却用于
 //! 一个没有 authkey 的游戏，直接违反防线六「类型即文档」。crate 名与结构体名
 //! 本应一并改，但改名会牵动一批与本 crate 语义无关的文件（workspace 根
-//! `Cargo.toml`、`gs-plugin-runtime`/`gs-manifest-data`/`gs-analysis`/
-//! `gs-p-uigf` 里纯粹提及 crate 名的说明性注释、`scripts/gs-bundle-plugins.mjs`
+//! `Cargo.toml`、`gs-plugin-runtime`/`gs-manifest-data`/`gs-analysis`
+//! 里纯粹提及 crate 名的说明性注释、`scripts/gs-bundle-plugins.mjs`
 //! 与 `scripts/gs-check/checks/ipc-surface.mjs` 的路径引用），这些改动对
 //! "鸣潮 M2-S2 契约回改"这个任务没有增量价值，只有改名本身的噪音，因此保留
 //! crate 名与结构体名不变。**判断这个范式到底是什么，以 `CollectConfig`

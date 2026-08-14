@@ -13,7 +13,9 @@
 use std::path::{Path, PathBuf};
 
 use gs_core::RecordSource;
-use gs_exchange::{ExchangeAdapter, SniffResult, wwgacha::WwgachaAdapter};
+use gs_exchange::{
+    ExchangeAdapter, ImportBanner, ImportBatch, SniffResult, wwgacha::WwgachaAdapter,
+};
 use gs_host::import::{ImportError, import_batch};
 use gs_p_authkey::{AuthkeyApiPipeline, RateLimitPolicy};
 use gs_plugin_runtime::PluginRuntime;
@@ -66,6 +68,21 @@ fn wuwa_pipeline(runtime: &PluginRuntime) -> AuthkeyApiPipeline<'_> {
         .expect("应当能构造 wuwa pipeline")
 }
 
+/// `ExchangeAdapter::import` 现在返回 `Vec<ImportBatch>`（trait 改造见
+/// `crates/gs-exchange/src/lib.rs` 顶部文档），但单份 wwgacha 存档永远只
+/// 对应一个游戏一个账号——这里统一断言"恰好一个"再取出。
+fn import_single_wwgacha_batch(archive_bytes: &[u8]) -> ImportBatch {
+    let batches = WwgachaAdapter
+        .import(archive_bytes)
+        .expect("真实脱敏存档应当能被成功导入");
+    assert_eq!(
+        batches.len(),
+        1,
+        "单份 wwgacha 存档应当恰好产出一个 ImportBatch，实际: {batches:?}"
+    );
+    batches.into_iter().next().unwrap()
+}
+
 #[test]
 fn import_batch_persists_wwgacha_archive_matching_expected_counts_and_source() {
     let archive_bytes = read_fixture_bytes("fixtures/wuwa/archive/wwgacha_archive.json");
@@ -79,9 +96,7 @@ fn import_batch_persists_wwgacha_archive_matching_expected_counts_and_source() {
         "真实脱敏存档应当被 wwgacha 适配器明确识别"
     );
 
-    let batch = adapter
-        .import(&archive_bytes)
-        .expect("真实脱敏存档应当能被 wwgacha 适配器成功导入");
+    let batch = import_single_wwgacha_batch(&archive_bytes);
     assert_eq!(batch.game_id, "wuwa");
     let banner_1 = batch
         .banners
@@ -152,9 +167,7 @@ fn import_batch_persists_wwgacha_archive_matching_expected_counts_and_source() {
 #[test]
 fn import_batch_is_idempotent_across_two_runs() {
     let archive_bytes = read_fixture_bytes("fixtures/wuwa/archive/wwgacha_archive.json");
-    let batch = WwgachaAdapter
-        .import(&archive_bytes)
-        .expect("真实脱敏存档应当能被成功导入");
+    let batch = import_single_wwgacha_batch(&archive_bytes);
 
     let storage = Storage::open_in_memory().expect("应当能打开内存数据库");
     let account_id = setup_account(&storage);
@@ -228,9 +241,7 @@ fn assert_record_keys_match_across_paths(banner_id: &str, raw_response_fixture: 
 
     // 导入路径：经 wwgacha 适配器 import() 拿到已经还原成 API 倒序的记录。
     let archive_bytes = read_fixture_bytes("fixtures/wuwa/archive/wwgacha_archive.json");
-    let batch = WwgachaAdapter
-        .import(&archive_bytes)
-        .expect("真实脱敏存档应当能被成功导入");
+    let batch = import_single_wwgacha_batch(&archive_bytes);
     let banner = batch
         .banners
         .iter()
@@ -270,13 +281,20 @@ fn record_keys_are_identical_across_collect_and_import_paths_for_pool_10() {
     assert_record_keys_match_across_paths("10", "fixtures/wuwa/raw_response/10_page_1.json");
 }
 
-/// 声明 `timezoneSource: apiField` 的插件在导入路径下必须 fail closed——
-/// wuwa 真实插件没有声明这个分支（对它是空操作），因此这里用
-/// `AuthkeyApiPipeline::from_manifest_json_for_test`（`test-support`
+/// 声明 `timezoneSource: apiField` 的插件、且存档本身不携带时区信息时，
+/// 导入路径下必须 fail closed——这是 `ImportError::TimezoneUnavailable`
+/// 的两个成立条件之一（另一条见 `crates/gs-host/src/import.rs` 模块文档
+/// "时区来源的 fail-closed"一节）。wwgacha 存档格式没有时区字段，
+/// `WwgachaAdapter` 产出的 `ImportAccount.tz_offset_hours` 恒为
+/// `None`（见 `gs-exchange/src/wwgacha.rs`），天然满足"不携带时区信息"这
+/// 一半条件；wuwa 真实插件没有声明 `apiField` 分支（对它是空操作），因此
+/// 这里用 `AuthkeyApiPipeline::from_manifest_json_for_test`（`test-support`
 /// feature，见该函数文档）在 wuwa 真实 manifest 基础上合成一份声明了
-/// `apiField` 的变体，专门覆盖到这个报错分支。
+/// `apiField` 的变体，凑齐另一半条件，专门覆盖到这个报错分支——这条测试
+/// 因此也是"UIGF 解冻 `ImportAccount.tz_offset_hours` 之后，fail-closed
+/// 守卫本身没有失守"的回归证据。
 #[test]
-fn import_batch_fails_closed_when_plugin_declares_api_field_timezone_source() {
+fn import_batch_fails_closed_when_plugin_declares_api_field_and_archive_has_no_tz_offset() {
     let mut manifest_value = gs_plugin_runtime::plugin_manifest_data("wuwa")
         .expect("wuwa manifest 纯数据应当已经打包（先跑 node scripts/gs-bundle-plugins.mjs）")
         .clone();
@@ -290,27 +308,26 @@ fn import_batch_fails_closed_when_plugin_declares_api_field_timezone_source() {
             .expect("应当能用合成 manifest 构造 pipeline");
 
     let archive_bytes = read_fixture_bytes("fixtures/wuwa/archive/wwgacha_archive.json");
-    let batch = WwgachaAdapter
-        .import(&archive_bytes)
-        .expect("真实脱敏存档应当能被成功导入");
+    let batch = import_single_wwgacha_batch(&archive_bytes);
 
     let storage = Storage::open_in_memory().expect("应当能打开内存数据库");
     let account_id = setup_account(&storage);
     let repo = storage.repository();
 
     let result = import_batch(&batch, &pipeline, &repo, account_id, CAPTURED_AT);
-    let err = result.expect_err("timezoneSource: apiField 时导入应当 fail closed");
+    let err = result
+        .expect_err("timezoneSource: apiField 且存档不携带 tz_offset_hours 时导入应当 fail closed");
     assert!(
         matches!(
             &err,
-            ImportError::TimezoneSourceRequiresApiResponse { plugin_id } if plugin_id == "wuwa"
+            ImportError::TimezoneUnavailable { plugin_id } if plugin_id == "wuwa"
         ),
-        "错误应当是 TimezoneSourceRequiresApiResponse 且携带插件 id，实际：{err:?}"
+        "错误应当是 TimezoneUnavailable 且携带插件 id，实际：{err:?}"
     );
     let message = err.to_string();
     assert!(
-        message.contains("apiField") && message.contains("响应体"),
-        "错误信息里应当能看出原因（apiField + 缺响应体），实际：{message}"
+        message.contains("apiField") && message.contains("没有携带"),
+        "错误信息里应当能看出原因（apiField + 存档没有携带时区），实际：{message}"
     );
 
     // fail closed 必须发生在任何一条记录落库之前。
@@ -328,5 +345,46 @@ fn adapter_import_returns_error_not_panic_for_corrupted_archive_bytes() {
     assert!(
         result.is_err(),
         "损坏的存档字节应当返回 Err，而不是 panic 或静默产出空结果"
+    );
+}
+
+/// `import_batch` 原子性回归测试——见 `crates/gs-host/src/import.rs`
+/// `import_batch` 文档"原子性"一节。构造一个额外的、注定会失败的第三个
+/// 卡池（记录不是 JSON 对象，wuwa 的 `extractRecord` 会直接 throw），追加
+/// 到真实存档已有的两个合法卡池（"1"/"10"）之后，断言：
+/// - 整体导入返回 `Err`（第三个卡池的构建失败会传播）
+/// - 前两个合法卡池**一条记录都不落库**——不是"落了一部分、第三个失败"，
+///   而是构建阶段全部完成之前，数据库连一次写入尝试都没有发生过。
+#[test]
+fn import_batch_does_not_persist_any_records_when_a_later_banner_fails() {
+    let archive_bytes = read_fixture_bytes("fixtures/wuwa/archive/wwgacha_archive.json");
+    let mut batch = import_single_wwgacha_batch(&archive_bytes);
+    batch.banners.push(ImportBanner {
+        banner_id: "99".to_string(),
+        records: vec![serde_json::Value::Null],
+    });
+
+    let storage = Storage::open_in_memory().expect("应当能打开内存数据库");
+    let account_id = setup_account(&storage);
+    let repo = storage.repository();
+    let runtime = PluginRuntime::new().expect("插件运行时应当能正常启动");
+    let pipeline = wuwa_pipeline(&runtime);
+
+    let result = import_batch(&batch, &pipeline, &repo, account_id, CAPTURED_AT);
+    assert!(
+        result.is_err(),
+        "追加的第三个卡池记录不是对象，构建阶段应当失败并传播为 Err"
+    );
+
+    let records_1 = repo
+        .find_records_by_banner(account_id, "1")
+        .expect("查询应当成功");
+    let records_10 = repo
+        .find_records_by_banner(account_id, "10")
+        .expect("查询应当成功");
+    assert!(
+        records_1.is_empty() && records_10.is_empty(),
+        "第三个卡池构建失败时，前两个合法卡池也不应该有任何记录落库：\
+         records_1={records_1:?}, records_10={records_10:?}"
     );
 }

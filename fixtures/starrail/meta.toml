@@ -141,3 +141,36 @@ Rust 侧对该字段的校验与端点替换逻辑此前从未被真实插件跑
 #      - 本仓库内不存在任何指向真实存档文件的绝对路径引用（包括本文件）
 #    结果：23 条记录 × 上述核对项全部通过，具体逐项结果见任务交付报告
 #    （报告正文，不重复写进本文件）。
+
+# ============================================================
+# archive/ 目录 —— UIGF v4.x 交换格式适配器的夹具
+# ============================================================
+#
+# 与上面 raw_response/ 的关系、生成方式（顺序反转 + 字段改名 + 脚本一次性
+# 跑在会话临时目录未入库）与 `fixtures/genshin/meta.toml` archive/ 一节
+# 完全同一思路，这里只记录星铁特有的差异点：
+#
+#   - 源文件是 `raw_response/11_page_1.json`（9 条，gacha_type=11），
+#     不是 21_page_1（联动池）——理由是 11 与 record_key 测试组共用同一份
+#     "已核实为 API 真实倒序"的样本，选样面已经够窄，不需要再引入联动池的
+#     endpointOverride 变量
+#   - `gacha_id`/`item_id`/`rank_type` 三个字段 UIGF 里都是必填，直接取
+#     raw_response 对应字段的原始取值（星铁 API 本来就返回 `item_id`，与
+#     原神不同，见 `crates/gs-exchange/src/uigf.rs` 模块文档的字段对照表），
+#     不需要任何占位值
+#   - `uid`/`timezone`/`lang` 取 `"100000000"`/`8`/`"zh-cn"`，与
+#     `raw_response/11_page_1.json` 的 `region_time_zone: 8` 一致
+#
+# 额外新增 `archive/uigf_v4_starrail_timezone_variant.json`：与
+# `uigf_v4_starrail.json` **逐字节相同，只把 `hkrpg[0].timezone` 从 8 改成
+# 3**，专门用于 `crates/gs-host/tests/import_uigf.rs` 的
+# `timezone_field_changes_occurred_at_by_the_declared_delta_hours`——验证
+# UIGF 声明的 `timezone` 一旦被显式传给 `build_records` 的
+# `page_tz_offset_hours`，`occurred_at` 会按声明的小时数差正确偏移。选星铁
+# 而不是原神做这个验证，是因为原神的 `hooks.resolveTimezone` 会无条件覆盖
+# 这个参数（与上文 genshin archive 一节记录的"已知缺口"是同一件事）；星铁
+# 没有声明这个 hook，`timezoneSource: apiField`，会老实使用传入值。
+#
+# 脱敏验证：两个文件均未接触任何新的真实数据（只读取已入库、已通过脱敏
+# 验证的 `raw_response/11_page_1.json`）。`node scripts/gs-sanitize.mjs
+# fixtures/starrail`（dry-run）对新增文件命中 0 处。

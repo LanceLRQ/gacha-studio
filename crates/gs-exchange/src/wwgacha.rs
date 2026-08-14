@@ -192,10 +192,6 @@ impl ExchangeAdapter for WwgachaAdapter {
         FORMAT_ID
     }
 
-    fn game_id(&self) -> &'static str {
-        GAME_ID
-    }
-
     fn sniff(&self, head: &[u8]) -> SniffResult {
         // 两级降级，顺序不能颠倒：先尝试把 head 当完整 JSON 解析——这是
         // `head` 恰好等于（或大于）整个文件时唯一能给出 `Confident` 的
@@ -225,7 +221,7 @@ impl ExchangeAdapter for WwgachaAdapter {
         }
     }
 
-    fn import(&self, data: &[u8]) -> Result<ImportBatch, ImportError> {
+    fn import(&self, data: &[u8]) -> Result<Vec<ImportBatch>, ImportError> {
         let archive: WwgachaArchive =
             serde_json::from_slice(data).map_err(|err| ImportError::Malformed {
                 format_id: FORMAT_ID.to_string(),
@@ -251,16 +247,23 @@ impl ExchangeAdapter for WwgachaAdapter {
             })
             .collect();
 
-        Ok(ImportBatch {
+        // 单份 wwgacha 存档只对应一个游戏一个账号——返回长度恒为 1 的
+        // `Vec`，不是"这个格式将来可能支持多账号"的信号，纯粹是 trait
+        // 签名统一成 `Vec<ImportBatch>`（见 crate 顶部文档"trait 已被第二个
+        // 真实实现证伪并改过一次形状"一节）之后的必然写法。
+        Ok(vec![ImportBatch {
             format_id: FORMAT_ID.to_string(),
             game_id: GAME_ID.to_string(),
             account: ImportAccount {
                 uid: archive.uid.to_string(),
                 region: Some(archive.server_area),
                 server_id: Some(archive.server_id),
+                // GameUser.cs 没有时区字段——wwgacha 本地存档不携带任何形式
+                // 的时区信息，`None` 是诚实的表达，不是遗漏。
+                tz_offset_hours: None,
             },
             banners,
-        })
+        }])
     }
 }
 
@@ -443,11 +446,25 @@ mod tests {
 
     // ---------- import ----------
 
+    /// `import` 现在返回 `Vec<ImportBatch>`（见 crate 顶部文档"trait 已被
+    /// 第二个真实实现证伪并改过一次形状"一节），但单份 wwgacha 存档永远只
+    /// 对应一个游戏一个账号——这里统一断言"恰好一个"再取出，不在每条测试里
+    /// 重复这段解包逻辑。
+    fn import_single(adapter: &WwgachaAdapter, data: &[u8]) -> ImportBatch {
+        let batches = adapter.import(data).expect("样本应当能导入成功");
+        assert_eq!(
+            batches.len(),
+            1,
+            "单份 wwgacha 存档应当恰好产出一个 ImportBatch，实际: {batches:?}"
+        );
+        batches.into_iter().next().unwrap()
+    }
+
     #[test]
     fn import_remaps_fields_to_camel_case_api_shape_with_exactly_seven_keys() {
         let adapter = WwgachaAdapter;
         let full = sample_archive_json();
-        let batch = adapter.import(full.as_bytes()).expect("样本应当能导入成功");
+        let batch = import_single(&adapter, full.as_bytes());
 
         let banner = batch
             .banners
@@ -481,7 +498,7 @@ mod tests {
     fn import_preserves_numeric_types_for_resource_id_quality_level_and_count() {
         let adapter = WwgachaAdapter;
         let full = sample_archive_json();
-        let batch = adapter.import(full.as_bytes()).expect("样本应当能导入成功");
+        let batch = import_single(&adapter, full.as_bytes());
 
         let banner = batch
             .banners
@@ -510,13 +527,13 @@ mod tests {
     fn import_accepts_null_card_pool_id_without_error_or_record_loss() {
         let adapter = WwgachaAdapter;
         let full = sample_archive_json();
-        let batch = adapter.import(full.as_bytes());
+        let result = adapter.import(full.as_bytes());
         assert!(
-            batch.is_ok(),
-            "CardPoolId 为 null 是正常状态，不应导致导入失败: {batch:?}"
+            result.is_ok(),
+            "CardPoolId 为 null 是正常状态，不应导致导入失败: {result:?}"
         );
 
-        let batch = batch.unwrap();
+        let batch = import_single(&adapter, full.as_bytes());
         let banner = batch
             .banners
             .iter()
@@ -539,7 +556,7 @@ mod tests {
     fn import_skips_pool_slots_with_empty_data_array() {
         let adapter = WwgachaAdapter;
         let full = sample_archive_json();
-        let batch = adapter.import(full.as_bytes()).expect("样本应当能导入成功");
+        let batch = import_single(&adapter, full.as_bytes());
 
         let banner_ids: Vec<&str> = batch.banners.iter().map(|b| b.banner_id.as_str()).collect();
         assert!(
@@ -556,7 +573,7 @@ mod tests {
     fn import_reverses_pool_records_from_archive_order_to_api_order() {
         let adapter = WwgachaAdapter;
         let full = sample_archive_json();
-        let batch = adapter.import(full.as_bytes()).expect("样本应当能导入成功");
+        let batch = import_single(&adapter, full.as_bytes());
 
         let banner = batch
             .banners
