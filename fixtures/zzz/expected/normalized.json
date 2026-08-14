@@ -1,0 +1,251 @@
+{
+  "records": [
+    {
+      "fields": {
+        "itemId": "14158",
+        "time": "2099-01-09 20:10:00",
+        "bannerId": "103",
+        "count": 1,
+        "name": "空羽复归之诗",
+        "itemType": "音擎",
+        "rarity": "4",
+        "stableId": "2900000000000000001"
+      },
+      "recordKey": "103:2900000000000000001"
+    },
+    {
+      "fields": {
+        "itemId": "13008",
+        "time": "2099-01-09 20:10:00",
+        "bannerId": "103",
+        "count": 1,
+        "name": "双生泣星",
+        "itemType": "音擎",
+        "rarity": "3",
+        "stableId": "2900000000000000002"
+      },
+      "recordKey": "103:2900000000000000002"
+    },
+    {
+      "fields": {
+        "itemId": "12001",
+        "time": "2099-01-09 20:09:40",
+        "bannerId": "103",
+        "count": 1,
+        "name": "「月相」-望",
+        "itemType": "音擎",
+        "rarity": "2",
+        "stableId": "2900000000000000003"
+      },
+      "recordKey": "103:2900000000000000003"
+    },
+    {
+      "fields": {
+        "itemId": "12011",
+        "time": "2099-01-01 18:51:55",
+        "bannerId": "2",
+        "count": 1,
+        "name": "「电磁暴」-贰式",
+        "itemType": "音擎",
+        "rarity": "2",
+        "stableId": "1900000000000000001"
+      },
+      "recordKey": "2:1900000000000000001"
+    },
+    {
+      "fields": {
+        "itemId": "12007",
+        "time": "2099-01-01 18:51:55",
+        "bannerId": "2",
+        "count": 1,
+        "name": "「湍流」-铳型",
+        "itemType": "音擎",
+        "rarity": "2",
+        "stableId": "1900000000000000002"
+      },
+      "recordKey": "2:1900000000000000002"
+    },
+    {
+      "fields": {
+        "itemId": "1281",
+        "time": "2099-01-01 18:51:55",
+        "bannerId": "2",
+        "count": 1,
+        "name": "派派",
+        "itemType": "代理人",
+        "rarity": "3",
+        "stableId": "1900000000000000003"
+      },
+      "recordKey": "2:1900000000000000003"
+    },
+    {
+      "fields": {
+        "itemId": "12015",
+        "time": "2099-01-01 12:54:55",
+        "bannerId": "2",
+        "count": 1,
+        "name": "「灰烬」-钴蓝",
+        "itemType": "音擎",
+        "rarity": "2",
+        "stableId": "1900000000000000004"
+      },
+      "recordKey": "2:1900000000000000004"
+    },
+    {
+      "fields": {
+        "itemId": "12011",
+        "time": "2099-01-01 12:54:55",
+        "bannerId": "2",
+        "count": 1,
+        "name": "「电磁暴」-贰式",
+        "itemType": "音擎",
+        "rarity": "2",
+        "stableId": "1900000000000000005"
+      },
+      "recordKey": "2:1900000000000000005"
+    },
+    {
+      "fields": {
+        "itemId": "1021",
+        "time": "2099-01-02 16:47:31",
+        "bannerId": "2",
+        "count": 1,
+        "name": "猫又",
+        "itemType": "代理人",
+        "rarity": "4",
+        "stableId": "1900000000000000006"
+      },
+      "recordKey": "2:1900000000000000006"
+    },
+    {
+      "fields": {
+        "itemId": "1071",
+        "time": "2099-01-03 21:33:39",
+        "bannerId": "2",
+        "count": 1,
+        "name": "凯撒",
+        "itemType": "代理人",
+        "rarity": "4",
+        "stableId": "1900000000000000007"
+      },
+      "recordKey": "2:1900000000000000007"
+    },
+    {
+      "fields": {
+        "itemId": "1101",
+        "time": "2099-01-04 21:18:00",
+        "bannerId": "2",
+        "count": 1,
+        "name": "珂蕾妲",
+        "itemType": "代理人",
+        "rarity": "4",
+        "stableId": "1900000000000000008"
+      },
+      "recordKey": "2:1900000000000000008"
+    },
+    {
+      "fields": {
+        "itemId": "1251",
+        "time": "2099-01-05 22:44:34",
+        "bannerId": "2",
+        "count": 1,
+        "name": "青衣",
+        "itemType": "代理人",
+        "rarity": "4",
+        "stableId": "1900000000000000009"
+      },
+      "recordKey": "2:1900000000000000009"
+    },
+    {
+      "fields": {
+        "itemId": "1241",
+        "time": "2099-01-06 12:36:14",
+        "bannerId": "2",
+        "count": 1,
+        "name": "朱鸢",
+        "itemType": "代理人",
+        "rarity": "4",
+        "stableId": "1900000000000000010"
+      },
+      "recordKey": "2:1900000000000000010"
+    },
+    {
+      "fields": {
+        "itemId": "1101",
+        "time": "2099-01-06 12:33:58",
+        "bannerId": "2",
+        "count": 1,
+        "name": "珂蕾妲",
+        "itemType": "代理人",
+        "rarity": "4",
+        "stableId": "1900000000000000011"
+      },
+      "recordKey": "2:1900000000000000011"
+    },
+    {
+      "fields": {
+        "itemId": "12008",
+        "time": "2099-01-07 18:39:36",
+        "bannerId": "5",
+        "count": 1,
+        "name": "「湍流」-矢型",
+        "itemType": "音擎",
+        "rarity": "2",
+        "stableId": "1900000000000000012"
+      },
+      "recordKey": "5:1900000000000000012"
+    },
+    {
+      "fields": {
+        "itemId": "53007",
+        "time": "2099-01-07 18:39:36",
+        "bannerId": "5",
+        "count": 1,
+        "name": "泪眼布",
+        "itemType": "邦布",
+        "rarity": "3",
+        "stableId": "1900000000000000013"
+      },
+      "recordKey": "5:1900000000000000013"
+    },
+    {
+      "fields": {
+        "itemId": "53001",
+        "time": "2099-01-07 18:39:56",
+        "bannerId": "5",
+        "count": 1,
+        "name": "企鹅布",
+        "itemType": "邦布",
+        "rarity": "3",
+        "stableId": "1900000000000000014"
+      },
+      "recordKey": "5:1900000000000000014"
+    },
+    {
+      "fields": {
+        "itemId": "54004",
+        "time": "2099-01-07 18:40:46",
+        "bannerId": "5",
+        "count": 1,
+        "name": "巴特勒",
+        "itemType": "邦布",
+        "rarity": "4",
+        "stableId": "1900000000000000015"
+      },
+      "recordKey": "5:1900000000000000015"
+    },
+    {
+      "fields": {
+        "itemId": "54006",
+        "time": "2099-01-08 22:37:53",
+        "bannerId": "5",
+        "count": 1,
+        "name": "飚速布",
+        "itemType": "邦布",
+        "rarity": "4",
+        "stableId": "1900000000000000016"
+      },
+      "recordKey": "5:1900000000000000016"
+    }
+  ]
+}

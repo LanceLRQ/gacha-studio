@@ -1,0 +1,88 @@
+{
+  "retcode": 0,
+  "message": "OK",
+  "data": {
+    "region": "prod_gf_cn",
+    "region_time_zone": 8,
+    "list": [
+      {
+        "uid": "100000000",
+        "gacha_type": "11",
+        "gacha_id": "2041",
+        "item_id": "20009",
+        "count": "1",
+        "time": "2099-09-10 10:05:26",
+        "name": "乐圮",
+        "lang": "zh-cn",
+        "item_type": "光锥",
+        "rank_type": "3",
+        "id": "1500000000000000010"
+      },
+      {
+        "uid": "100000000",
+        "gacha_type": "11",
+        "gacha_id": "2041",
+        "item_id": "20014",
+        "count": "1",
+        "time": "2099-09-10 10:05:26",
+        "name": "相抗",
+        "lang": "zh-cn",
+        "item_type": "光锥",
+        "rank_type": "3",
+        "id": "1500000000000000011"
+      },
+      {
+        "uid": "100000000",
+        "gacha_type": "11",
+        "gacha_id": "2041",
+        "item_id": "1223",
+        "count": "1",
+        "time": "2099-09-10 10:05:26",
+        "name": "",
+        "lang": "zh-cn",
+        "item_type": "",
+        "rank_type": "",
+        "id": "1500000000000000012"
+      },
+      {
+        "uid": "100000000",
+        "gacha_type": "11",
+        "gacha_id": "2041",
+        "item_id": "20005",
+        "count": "1",
+        "time": "2099-09-10 10:05:26",
+        "name": "齐颂",
+        "lang": "zh-cn",
+        "item_type": "光锥",
+        "rank_type": "3",
+        "id": "1500000000000000013"
+      },
+      {
+        "uid": "100000000",
+        "gacha_type": "11",
+        "gacha_id": "2039",
+        "item_id": "20001",
+        "count": "1",
+        "time": "2099-08-23 19:24:26",
+        "name": "物穰",
+        "lang": "zh-cn",
+        "item_type": "光锥",
+        "rank_type": "3",
+        "id": "1500000000000000014"
+      },
+      {
+        "uid": "100000000",
+        "gacha_type": "11",
+        "gacha_id": "2039",
+        "item_id": "20010",
+        "count": "1",
+        "time": "2099-08-23 19:24:24",
+        "name": "戍御",
+        "lang": "zh-cn",
+        "item_type": "光锥",
+        "rank_type": "3",
+        "id": "1500000000000000015"
+      }
+    ]
+  }
+}

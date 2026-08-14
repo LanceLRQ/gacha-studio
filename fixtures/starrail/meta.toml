@@ -1,0 +1,143 @@
+# 星铁插件 fixture 元信息。
+#
+# ⚠️ **与 fixtures/genshin/ 的性质不同、与 fixtures/wuwa/ 同类**：本目录的
+# raw_response/ 样本裁自真实存档（本机 userData 下两个账号之一，约 5372 条
+# 中选取 23 条），因此脱敏不是走过场，零命中也不构成安全证明——见文末
+# 「脱敏验证」一节。
+
+[game]
+id = "starrail"
+displayName = "崩坏：星穹铁道"
+apiVersionNote = """
+raw_response/*.json 模拟的是 getGachaLog / getLdGachaLog 的响应形状：
+{ retcode, message, data: { region, region_time_zone, list: [...] } }。
+list 元素是 11 键对象（uid/gacha_type/gacha_id/item_id/count/time/name/
+lang/item_type/rank_type/id）。
+
+⚠️ 真实存档文件本身只保留 9 键（缺 uid、lang，两者被工具提到了存档顶层，
+即"账号级"），这一点已用参考实现源码核实：
+docs/example-projects/star-rail-warp-export/src/main/getData.js:451-452
+`const { id, item_id, item_type, name, rank_type, time, gacha_id, gacha_type,
+count } = item` 显式只解构 9 个字段，证明真实 API 响应的 list 元素确实携带
+uid/lang（否则不需要特意从中丢弃）。本目录的 raw_response/ 因此不是直接裁自
+存档文件，而是在存档的 9 键基础上补回 uid（占位值）与 lang（真实值 "zh-cn"，
+非敏感），还原成 API 响应形态——"存档 ≠ API 响应"，这是本次任务简报特别
+强调的一点，如实记录转换过程，不是想当然地直接照抄存档字段。
+"""
+
+[account]
+# 假 UID，占位值，与 fixtures/genshin/、fixtures/wuwa/ 沿用同一惯例。
+# raw_response/ 下每条记录的 uid 字段均为此占位值，不含任何真实账号信息。
+uid = "100000000"
+region = "prod_gf_cn"
+
+[fixture]
+collectedAt = "2026-08-14"
+sanitized = "true"
+sanitizedBy = "主进程从真实存档裁样 + 脚本脱敏，随后过 gs-sanitize 复核 + 正向核对"
+
+# ============================================================
+# 裁样策略
+# ============================================================
+#
+# 数据来源：本机两个星铁抽卡存档账号之一（另一账号无 21/22 联动池数据，
+# 不适合覆盖本目录要求的场景，未使用；两个账号的原始文件均未被复制进本仓库，
+# 也不在本文件中出现绝对路径或真实 UID）。
+#
+# 选样从该账号 pool 11（角色活动跃迁，3510 条）与 pool 21（角色联动跃迁，
+# 50 条）两个真实数组里各取一段连续切片，做了两处变换：
+#   1. 时间整体平移 +75 年（如 2024-09-10 → 2099-09-10），只改年份、保留
+#      月/日/时/分/秒——与 fixtures/wuwa/meta.toml 的"时间整体平移"同一手法，
+#      既保住相对间隔与真实分布形态，又与任何真实游玩时刻脱钩。
+#   2. 从存档的 9 键对象补全为 API 响应的 11 键对象：补 uid（占位值
+#      100000000）、补 lang（"zh-cn"，非敏感真实值）；再补回响应信封
+#      `{ retcode, message, data: { region, region_time_zone, list } }`。
+#   3. `id`（服务端雪花 ID）不使用任何真实值，全部替换为本目录内顺序递增的
+#      19 位占位 ID（1500000000000000001 起），形态参照
+#      fixtures/genshin/ 的 1400000000000000010 这类占位惯例。
+# `item_id`/`gacha_id`/`gacha_type`/`item_type`/`name`/`rank_type`/`count`
+# 均保留真实取值——这些是游戏内容/目录数据（角色与光锥的名称、星级、卡池
+# 类别码），不是账号数据，脱敏不覆盖这一层。
+
+[[samples]]
+path = "raw_response/11_page_1.json"
+count = 9
+note = """
+gacha_type=11（角色活动跃迁）。裁自真实账号该池最新的一段连续记录（存档内
+原始顺序是时间正序，本文件按真实 API 行为翻回倒序——最新在前），覆盖：
+  - 光锥类三星记录 ×7（角色活动池的常见配抽）
+  - 一条四星光锥记录（"猎物的视线"）
+  - 一条五星角色记录（"姬子•启行"，item_type=角色，rank_type=5）——满足
+    「至少一条五星记录」这一常见 fixture 要求
+"""
+
+[[samples]]
+path = "raw_response/11_page_2.json"
+count = 6
+note = """
+gacha_type=11 的更早一段记录，**刻意选中真实存档里唯一一条元数据缺失记录**
+（item_id="1223" 有真实值，name/item_type/rank_type 全为空字符串，时间平移
+前是 2024-09-10——新角色上线当日官方物品字典未同步，research/03 §1.3 已
+记录过这条真实样例，本文件是该样例的一手复现，不是转述）。空字符串在
+expected/normalized.json 里必须归一化为字段整体缺失（undefined），不能冒充
+"有值"——这条记录在 expected/normalized.json 对应的 fields 对象里没有
+name/itemType/rarity 三个键，是本目录验证的核心场景之一。
+"""
+
+[[samples]]
+path = "raw_response/11_page_3_empty.json"
+count = 0
+note = """
+空 list 的末页，验证分页终止条件（stopCondition 缺省 emptyPage）。参照
+fixtures/genshin/raw_response/301_page_3_empty.json 的同款写法。
+"""
+
+[[samples]]
+path = "raw_response/21_page_1.json"
+count = 8
+note = """
+gacha_type=21（角色联动跃迁，Fate[UBW] 联动池，gacha_id=5001）——这是
+banners[].endpointOverride（getLdGachaLog）字段**第一个真实用例**，
+Rust 侧对该字段的校验与端点替换逻辑此前从未被真实插件跑过。裁自真实账号该
+池全部 50 条记录里的一段连续切片，覆盖：
+  - 光锥类三星/四星记录若干
+  - 一条五星角色记录（"Saber"，item_type=角色，rank_type=5，FGO 联动角色）
+"""
+
+# ============================================================
+# ★ 已知未验证 / 本轮未覆盖项
+# ============================================================
+#
+# 与 manifest.ts 里对应字段旁的注释一致，此处汇总，避免遗漏：
+#   - pityGroups 里 departureWarp（gacha_type=2，硬保底 50）的软保底
+#     start/step 未覆盖，用 custom 占位——简报给出的两条社区推算口径分别
+#     对应硬保底 90/80 两档，硬保底 50 不属于任一档，没有第三档数据支撑，
+#     不外推、不编造。
+#   - collect.params.bannerIdentity 未声明（缺省 "response"）——星铁是否会
+#     像原神一样混池，本次任务未独立实测验证，保守不声明 "query"。
+#   - metadata（星铁物品字典）未声明——元数据缺失场景已知真实存在（见上方
+#     11_page_2 样本），但字典内容本身超出本次任务范围。
+#   - 4★ 保底组未声明，仅声明 5★——与基线 plugins/genshin/manifest.ts
+#     现状一致，非本插件独有缺口。
+#   - exchangeFormats（UIGF）未声明——字段映射未经真实实现校准。
+
+# ============================================================
+# 脱敏验证（两道，缺一不可）
+# ============================================================
+#
+# ① gs-sanitize 扫描：跑 `pnpm gs:sanitize fixtures/starrail/`（dry-run），
+#    结果见任务交付报告——报告里同时列出了逐项正向核对，不能只看这一步。
+#
+# ② 正向逐项核对（零命中不构成安全证明，AUDIT-2026-08-12-M2鸣潮真实存档
+#    实测.md §四 记录过一次真实的假阴性案例，本目录同样不能只依赖工具报告）：
+#      - raw_response/ 下全部 23 条记录的 uid 字段恰好等于占位值 100000000
+#      - raw_response/ 下全部 23 条记录的 id（雪花 ID）字段恰好是本目录内
+#        顺序递增的占位序列（1500000000000000001~023），不含任何真实雪花 ID
+#      - 全部 23 条记录的 time 字段年份均 ≥ 2099（真实取值年份范围是
+#        2023~2026，平移 +75 年后不可能落在这个区间，用于确认平移确实生效）
+#      - item_id/gacha_id/gacha_type/item_type/name/rank_type/count 保留
+#        真实取值（这些是游戏内容，不是账号数据，脱敏范围不覆盖这一层，
+#        逐项核对时确认"保留"这件事本身是刻意的，不是遗漏）
+#      - 本仓库内不存在任何指向真实存档文件的绝对路径引用（包括本文件）
+#    结果：23 条记录 × 上述核对项全部通过，具体逐项结果见任务交付报告
+#    （报告正文，不重复写进本文件）。

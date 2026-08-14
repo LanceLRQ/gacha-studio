@@ -1,0 +1,87 @@
+{
+  "retcode": 0,
+  "message": "OK",
+  "data": {
+    "list": [
+      {
+        "id": "1900000000000000001",
+        "uid": "100000000",
+        "gacha_type": "2",
+        "gacha_id": "0",
+        "item_id": "12011",
+        "count": "1",
+        "time": "2099-01-01 18:51:55",
+        "name": "「电磁暴」-贰式",
+        "item_type": "音擎",
+        "rank_type": "2",
+        "lang": "zh-cn"
+      },
+      {
+        "id": "1900000000000000002",
+        "uid": "100000000",
+        "gacha_type": "2",
+        "gacha_id": "0",
+        "item_id": "12007",
+        "count": "1",
+        "time": "2099-01-01 18:51:55",
+        "name": "「湍流」-铳型",
+        "item_type": "音擎",
+        "rank_type": "2",
+        "lang": "zh-cn"
+      },
+      {
+        "id": "1900000000000000003",
+        "uid": "100000000",
+        "gacha_type": "2",
+        "gacha_id": "0",
+        "item_id": "1281",
+        "count": "1",
+        "time": "2099-01-01 18:51:55",
+        "name": "派派",
+        "item_type": "代理人",
+        "rank_type": "3",
+        "lang": "zh-cn"
+      },
+      {
+        "id": "1900000000000000004",
+        "uid": "100000000",
+        "gacha_type": "2",
+        "gacha_id": "0",
+        "item_id": "12015",
+        "count": "1",
+        "time": "2099-01-01 12:54:55",
+        "name": "「灰烬」-钴蓝",
+        "item_type": "音擎",
+        "rank_type": "2",
+        "lang": "zh-cn"
+      },
+      {
+        "id": "1900000000000000005",
+        "uid": "100000000",
+        "gacha_type": "2",
+        "gacha_id": "0",
+        "item_id": "12011",
+        "count": "1",
+        "time": "2099-01-01 12:54:55",
+        "name": "「电磁暴」-贰式",
+        "item_type": "音擎",
+        "rank_type": "2",
+        "lang": "zh-cn"
+      },
+      {
+        "id": "1900000000000000006",
+        "uid": "100000000",
+        "gacha_type": "2",
+        "gacha_id": "0",
+        "item_id": "1021",
+        "count": "1",
+        "time": "2099-01-02 16:47:31",
+        "name": "猫又",
+        "item_type": "代理人",
+        "rank_type": "4",
+        "lang": "zh-cn"
+      }
+    ],
+    "region": "prod_gf_cn"
+  }
+}

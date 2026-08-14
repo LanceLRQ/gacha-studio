@@ -1,0 +1,200 @@
+# 绝区零插件 fixture 元信息。
+#
+# ⚠️ 与 fixtures/genshin/ 的性质不同：原神那套是手工构造、从未接触真实账号
+# 数据；本目录 raw_response/ 下除 103_page_1.json 外，全部**裁自真实抽卡存档**
+# （本地脱敏样本，5225 条中选取 19 条），因此脱敏不是走过场，零命中也不构成
+# 安全证明——见文末「脱敏验证」一节，与 fixtures/wuwa/meta.toml 记录的同类
+# 教训一致。
+
+[game]
+id = "zzz"
+displayName = "绝区零"
+apiVersionNote = """
+raw_response/*.json 模拟的是 GET .../common/gacha_record/api/getGachaLog 的
+响应形状：{ retcode, message, data: { list: [...], region } }，与原神完全
+同构（已用 zzz-signal-search-export/src/main/getData.js:203-204 核实）。
+data 元素对齐真实存档 + getData.js:477-478 双来源确认一致的 9 键结构
+（id/item_id/item_type/name/rank_type/time/gacha_id/gacha_type/count），
+本目录在此基础上补回了存档丢弃的 uid/lang 两键，凑齐 API 响应的 11 键。
+"""
+
+[account]
+# 假 UID，与 fixtures/genshin/meta.toml、fixtures/wuwa/meta.toml 的占位惯例
+# 一致；不是真实账号 UID（真实 UID 从未写入本目录任何文件，见下方脱敏说明）。
+uid = "100000000"
+region = "prod_gf_cn"
+
+[fixture]
+collectedAt = "2026-08-14"
+sanitized = "true"
+sanitizedBy = "主进程手工裁样 + 脚本化脱敏，随后过 gs-sanitize 复核 + 正向逐项核对"
+note = """
+raw_response/ 下 5 个文件中，4 个（2_page_1/2/3_empty、5_page_1）裁自真实
+抽卡存档（本地脱敏样本，未入库、未复制进仓库），覆盖：
+  - gacha_type=2（独家频段）两页 + 一页空列表，验证分页与终止条件
+  - rank_type="4"（S 级，最高档，不是 "5"）——RaritySpec 抽象的核心验证点
+  - item_type="邦布"——第三类物品分类
+  - gacha_id 恒为 "0"（真实存档全量记录实测一致）
+  - data.region="prod_gf_cn" 且响应信封不含 region_time_zone字段
+    （后者是客户端查表算出来再写回本地存档的派生值，不是 API 原始字段，
+    见 manifest.ts 里 time.timezoneSource 旁的说明）
+第 5 个文件（103_page_1.json）**不是真实样本**，见下方「已知未验证项」。
+"""
+
+# ============================================================
+# ★ 已知未验证项（不冒充已验证结论）
+# ============================================================
+#
+# 1. 103（音擎回响）无真实样本，形态为类比构造
+#    --------------------------------------------------------
+#    真实存档里 gacha_type=103 是 **0 条记录**（已用脚本核实：对存档
+#    result 数组按 gacha_type 分组统计，103 对应的分组长度为 0）。
+#    raw_response/103_page_1.json 的 3 条记录是**人工构造**，形态照抄同族
+#    音擎池（gacha_type=3，真实有数据）观测到的记录结构；item_id/name 借用
+#    了 gacha_type=3 真实出现过的道具名称（音擎名称是游戏内容，不是账号
+#    数据，因此不算敏感信息复用），但 id/time 是构造值、不对应任何真实抽取
+#    事件。为便于日后区分，103 记录的 id 用 "29" 前缀（真实裁样记录统一用
+#    "19" 前缀），两者不会混淆。
+#
+# 2. 102（独家重映）/103（音擎回响）与 2/3 的保底共享关系未确证
+#    --------------------------------------------------------
+#    manifest.ts 的 pityGroups 把 102/103 各自建成独立分组，**不是**已验证
+#    结论——官方保底概率公示页用的是另一套内部编号，与抽卡记录 API 的
+#    gacha_type 对不上，无法直接比对；第三方 wiki 称 102/103 是独立保底但
+#    没有官方确认。按独立处理是保守选择，若后续证实 102/103 与 2/3 实际
+#    共享保底计数，需要合并对应 PityGroup 的 members。
+#
+# 3. 响应记录里卡池字段的键名是旁证，非绝区零的直接实测
+#    --------------------------------------------------------
+#    查询参数名已确认改成了 real_gacha_type（zzz-signal-search-export
+#    getData.js:202），但响应记录元素里对应字段是否也叫 real_gacha_type、
+#    还是仍是 gacha_type，research/03、04 与本地存档均未直接证明——存档是
+#    经工具再序列化过的产物，字段名可能被工具统一改写。manifest.ts 的
+#    extractRecord 按 record.gacha_type 读取，最强依据是 HoYo.Gacha
+#    crates/url_scraper/src/types.rs:80-90 的 GachaLog.gacha_type 字段
+#    （四款米哈游游戏共用同一个反序列化目标，doc comment 没有为绝区零留任何
+#    字段名特例），但这是旁证，不是直接抓包/实测绝区零某一条真实响应报文
+#    得出的结论，如实标注在此，manifest.ts 里 bannerId 字段旁有同一份说明。
+#
+# 4. credential/data_2.sample 是手写文本近似，不是真实缓存字节
+#    --------------------------------------------------------
+#    与 fixtures/genshin/credential/data_2.sample 同一性质：真实 data_2 是
+#    Chromium 二进制块文件格式，本文件是可读文本近似，只用于证明
+#    manifest.ts 的 urlPattern 正则能在「Rust 侧已从缓存中抽取出的文本」上
+#    命中一次真实形态的请求 URL，不代表已经拿到并解析过绝区零真实的
+#    data_2 二进制文件。URL 本身的查询参数取自 manifest.ts 引用的官方接口
+#    路径 + real_gacha_type/end_id 等已核实参数名，外加
+#    packages/gs-plugin-kit/manifest.ts 文档提到的 init_log_gacha_base_type
+#    （该参数名来自本项目既有 SDK 文档引用，不是本次新查证），authkey 是
+#    FAKE_AUTHKEY_FOR_FIXTURE_ONLY 占位值，不是真实凭据。
+
+[[samples]]
+path = "raw_response/2_page_1.json"
+count = 6
+note = """
+gacha_type=2（独家频段）第 1 页。裁自真实存档，覆盖：B 级音擎（rank_type
+"2"）×4、A 级代理人（rank_type "3"，"派派"）×1、S 级代理人（rank_type "4"，
+"猫又"）×1。按 API 真实返回顺序（新→旧）排列——存档本身是旧→新，本文件
+裁样时已反转，与本项目 fixtures/wuwa/meta.toml 记录过的「存档序 vs API 序
+相反」是同一件事。
+"""
+
+[[samples]]
+path = "raw_response/2_page_2.json"
+count = 5
+note = """
+gacha_type=2（独家频段）第 2 页，验证分页衔接。5 条全部是 S 级代理人
+（rank_type "4"）：凯撒、珂蕾妲（两次出现，同一角色不同批次抽中，真实存档
+如此，不是构造错误）、青衣、朱鸢——集中裁取 S 级样本，覆盖面比自然分页更
+密，是有意为之的裁样策略，不代表真实概率分布。
+"""
+
+[[samples]]
+path = "raw_response/2_page_3_empty.json"
+count = 0
+note = "gacha_type=2 空列表终止页，验证分页引擎的 emptyPage 停止条件。"
+
+[[samples]]
+path = "raw_response/5_page_1.json"
+count = 5
+note = """
+gacha_type=5（邦布频段）第 1 页。裁自真实存档，覆盖：B 级音擎 ×1、A 级邦布
+（rank_type "3"）×2（泪眼布、企鹅布）、S 级邦布（rank_type "4"）×2（巴特勒、
+飚速布）。⚠️ 邦布最低是 A 级，不存在 B 级邦布——真实存档全量统计已核实
+（item_type/rank_type 组合不是笛卡尔积，只有音擎有 B 级），本页裁样如实
+反映这条约束，没有构造不存在的"B 级邦布"组合。
+"""
+
+[[samples]]
+path = "raw_response/103_page_1.json"
+count = 3
+note = """
+gacha_type=103（音擎回响），⚠️ **人工构造，非真实样本**，详见上方
+「已知未验证项」第 1 条。3 条记录覆盖 B/A/S 三档音擎（rank_type
+"2"/"3"/"4"），id 用 "29" 前缀与真实裁样的 "19" 前缀区分。
+"""
+
+# ============================================================
+# ⚠️ 不要对本目录跑 `pnpm gs:sanitize fixtures/zzz/ --write`
+# ============================================================
+#
+# 已在临时目录实测确认（未落到本目录任何真实文件）：`--write` 会把本目录
+# 全部 "19xxxxxxxxxxxxxxxxx" / "29xxxxxxxxxxxxxxxxx" 序号 id **无差别替换成
+# 同一个固定占位值 "1000000000000000000"**（gs-sanitize.mjs 的 long-numeric-id
+# 规则本身的规范占位符，见该规则定义旁注释）——这与
+# fixtures/wuwa/meta.toml 记录过的"UID 900000001 在 --write 下被改写成
+# 100000000，并不幂等"是同一类问题，但后果更重：本目录的样本刻意让每条
+# 记录持有互不相同的 id（用于验证 record_key 的唯一性），若真的跑
+# --write，全部记录的 id 会坍缩成同一个值，`hooks.deriveRecordKey`
+# 算出的 record_key 会跟着大量撞键（同一 bannerId 下的记录全部变成
+# 同一个 recordKey），expected/normalized.json 里逐条不同的 recordKey
+# 断言会集体失败——不是"改了个无关紧要的占位符"，是直接破坏本目录测的
+# 东西。这与 genshin 用 "1400000000000000010" 这类非规范占位符的做法是
+# 同一种设计取舍（保留分辨度 vs 追求 --write 幂等），genshin 同样没有
+# 也不应该对自己的 fixture 跑 --write。dry-run 本身是安全的（只读、不
+# 修改文件），仅 --write 需要避免。
+
+# ============================================================
+# 脱敏验证（两道，缺一不可）—— 覆盖全部 6 个入库样本文件
+# ============================================================
+#
+# ① gs-sanitize 扫描：见任务报告里贴出的真实命令输出（本文件不复述工具
+#    输出本身，只记录判断依据）。
+#
+# ② 正向逐项核对：**零命中不构成安全证明**，本项目已经在 M2 鸣潮 fixture
+#    上踩过一次真实的坑（早期规则对含 9 位 UID 的样本报告零命中，是假阴性
+#    不是安全证明），本目录同样不能只看 gs-sanitize 的报告就收尾。逐项确认
+#    真实值不在文件里的方法是「新文件字段值是否恰好等于我写入的占位字面
+#    量」——因为裁样脚本自始至终只从本地真实存档读取 id/item_id/item_type/
+#    name/rank_type/time/count/gacha_id/gacha_type 九个字段，从未读取过真实
+#    UID、真实 authkey、任何账号级标识：
+#      - 全部 19 条真实裁样记录的 uid 字段 === "100000000"（脚本写入的
+#        固定占位值，逐条核对，不是"大概率不是真实值"）
+#      - 全部 19 条真实裁样记录的 id 字段匹配 "19" + 17 位数字的构造模式
+#        （脚本按真实记录出现顺序从 1900000000000000001 依次递增编号，
+#        与真实存档里的 19 位雪花 ID 在数值上完全无关，只是位数凑够 19 位
+#        这一形状特征保留了下来）
+#      - 全部 3 条 103 构造记录的 id 字段匹配 "29" + 17 位数字模式，同样是
+#        脚本生成的序号，不对应任何真实事件
+#      - 全部 22 条记录的 time 字段日期部分落在 2099-01-01～2099-01-09
+#        区间（脚本按"首次出现的真实日期"顺序映射到这个虚构基准，时分秒
+#        原样保留以维持"同一批次同秒"的分组结构，但日期已与真实游玩时间
+#        无关）
+#      - lang 字段固定为 "zh-cn"：与真实存档取值相同，但该字段本身是游戏
+#        客户端语言设置，不是账号标识，比照 fixtures/genshin/meta.toml 对
+#        同一字段的处理方式，不需要额外脱敏
+#      - item_id / name / item_type / rank_type / count / gacha_id 五个
+#        字段直接保留真实存档原值——它们是游戏内容（道具目录 ID、道具名、
+#        分类、稀有度、数量、恒定值），不是账号数据，不在脱敏范围内
+#      - credential/data_2.sample 的 authkey 参数值为字面量
+#        "FAKE_AUTHKEY_FOR_FIXTURE_ONLY"，不含任何真实签名片段
+#    结果：6 个入库文件 × 以上逐项核对全部通过。
+#
+# 具体脱敏手法：
+#   - 账号级字段仅保留 uid（占位值 100000000）与 lang（非敏感），未出现
+#     authkey、设备 ID、cookie、token 等其余凭据字段
+#   - 雪花 ID 全部替换为脚本生成的序号（19 位数字形状保留，数值与真实值
+#     无关），真实裁样与人工构造两类分别用 "19"/"29" 前缀区分
+#   - 时间整体映射到 2099 年虚构基准，保留同批次同秒的分组结构，抹去真实
+#     游玩时刻
+#   - 未复制、未提交任何原始存档文件到本仓库

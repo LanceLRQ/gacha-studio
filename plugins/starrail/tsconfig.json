@@ -1,0 +1,10 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    // fixture.test.ts 用 `node --experimental-strip-types` 直接执行，Node 的 ESM
+    // 解析要求相对导入带显式扩展名（moduleResolution: Bundler 允许省略，Node
+    // 不允许）。本插件没有构建产物发布环节，与 gs-plugin-kit 的 tsconfig 同理。
+    "allowImportingTsExtensions": true
+  },
+  "include": ["**/*.ts"]
+}

@@ -1,0 +1,114 @@
+{
+  "retcode": 0,
+  "message": "OK",
+  "data": {
+    "region": "prod_gf_cn",
+    "region_time_zone": 8,
+    "list": [
+      {
+        "uid": "100000000",
+        "gacha_type": "21",
+        "gacha_id": "5001",
+        "item_id": "20003",
+        "count": "1",
+        "time": "2100-07-12 08:04:42",
+        "name": "琥珀",
+        "lang": "zh-cn",
+        "item_type": "光锥",
+        "rank_type": "3",
+        "id": "1500000000000000016"
+      },
+      {
+        "uid": "100000000",
+        "gacha_type": "21",
+        "gacha_id": "5001",
+        "item_id": "21004",
+        "count": "1",
+        "time": "2100-07-12 08:04:42",
+        "name": "记忆中的模样",
+        "lang": "zh-cn",
+        "item_type": "光锥",
+        "rank_type": "4",
+        "id": "1500000000000000017"
+      },
+      {
+        "uid": "100000000",
+        "gacha_type": "21",
+        "gacha_id": "5001",
+        "item_id": "20021",
+        "count": "1",
+        "time": "2100-07-12 08:04:42",
+        "name": "焚影",
+        "lang": "zh-cn",
+        "item_type": "光锥",
+        "rank_type": "3",
+        "id": "1500000000000000018"
+      },
+      {
+        "uid": "100000000",
+        "gacha_type": "21",
+        "gacha_id": "5001",
+        "item_id": "1014",
+        "count": "1",
+        "time": "2100-07-12 08:04:42",
+        "name": "Saber",
+        "lang": "zh-cn",
+        "item_type": "角色",
+        "rank_type": "5",
+        "id": "1500000000000000019"
+      },
+      {
+        "uid": "100000000",
+        "gacha_type": "21",
+        "gacha_id": "5001",
+        "item_id": "20007",
+        "count": "1",
+        "time": "2100-07-12 08:04:42",
+        "name": "离弦",
+        "lang": "zh-cn",
+        "item_type": "光锥",
+        "rank_type": "3",
+        "id": "1500000000000000020"
+      },
+      {
+        "uid": "100000000",
+        "gacha_type": "21",
+        "gacha_id": "5001",
+        "item_id": "20009",
+        "count": "1",
+        "time": "2100-07-12 08:04:42",
+        "name": "乐圮",
+        "lang": "zh-cn",
+        "item_type": "光锥",
+        "rank_type": "3",
+        "id": "1500000000000000021"
+      },
+      {
+        "uid": "100000000",
+        "gacha_type": "21",
+        "gacha_id": "5001",
+        "item_id": "20021",
+        "count": "1",
+        "time": "2100-07-12 08:04:42",
+        "name": "焚影",
+        "lang": "zh-cn",
+        "item_type": "光锥",
+        "rank_type": "3",
+        "id": "1500000000000000022"
+      },
+      {
+        "uid": "100000000",
+        "gacha_type": "21",
+        "gacha_id": "5001",
+        "item_id": "20012",
+        "count": "1",
+        "time": "2100-07-12 08:04:42",
+        "name": "轮契",
+        "lang": "zh-cn",
+        "item_type": "光锥",
+        "rank_type": "3",
+        "id": "1500000000000000023"
+      }
+    ]
+  }
+}

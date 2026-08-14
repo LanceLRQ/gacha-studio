@@ -1,0 +1,48 @@
+{
+  "retcode": 0,
+  "message": "OK",
+  "data": {
+    "list": [
+      {
+        "id": "2900000000000000001",
+        "uid": "100000000",
+        "gacha_type": "103",
+        "gacha_id": "0",
+        "item_id": "14158",
+        "count": "1",
+        "time": "2099-01-09 20:10:00",
+        "name": "空羽复归之诗",
+        "item_type": "音擎",
+        "rank_type": "4",
+        "lang": "zh-cn"
+      },
+      {
+        "id": "2900000000000000002",
+        "uid": "100000000",
+        "gacha_type": "103",
+        "gacha_id": "0",
+        "item_id": "13008",
+        "count": "1",
+        "time": "2099-01-09 20:10:00",
+        "name": "双生泣星",
+        "item_type": "音擎",
+        "rank_type": "3",
+        "lang": "zh-cn"
+      },
+      {
+        "id": "2900000000000000003",
+        "uid": "100000000",
+        "gacha_type": "103",
+        "gacha_id": "0",
+        "item_id": "12001",
+        "count": "1",
+        "time": "2099-01-09 20:09:40",
+        "name": "「月相」-望",
+        "item_type": "音擎",
+        "rank_type": "2",
+        "lang": "zh-cn"
+      }
+    ],
+    "region": "prod_gf_cn"
+  }
+}

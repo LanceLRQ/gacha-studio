@@ -1,0 +1,9 @@
+{
+  "retcode": 0,
+  "message": "OK",
+  "data": {
+    "region": "prod_gf_cn",
+    "region_time_zone": 8,
+    "list": []
+  }
+}

@@ -1,0 +1,74 @@
+{
+  "retcode": 0,
+  "message": "OK",
+  "data": {
+    "list": [
+      {
+        "id": "1900000000000000007",
+        "uid": "100000000",
+        "gacha_type": "2",
+        "gacha_id": "0",
+        "item_id": "1071",
+        "count": "1",
+        "time": "2099-01-03 21:33:39",
+        "name": "凯撒",
+        "item_type": "代理人",
+        "rank_type": "4",
+        "lang": "zh-cn"
+      },
+      {
+        "id": "1900000000000000008",
+        "uid": "100000000",
+        "gacha_type": "2",
+        "gacha_id": "0",
+        "item_id": "1101",
+        "count": "1",
+        "time": "2099-01-04 21:18:00",
+        "name": "珂蕾妲",
+        "item_type": "代理人",
+        "rank_type": "4",
+        "lang": "zh-cn"
+      },
+      {
+        "id": "1900000000000000009",
+        "uid": "100000000",
+        "gacha_type": "2",
+        "gacha_id": "0",
+        "item_id": "1251",
+        "count": "1",
+        "time": "2099-01-05 22:44:34",
+        "name": "青衣",
+        "item_type": "代理人",
+        "rank_type": "4",
+        "lang": "zh-cn"
+      },
+      {
+        "id": "1900000000000000010",
+        "uid": "100000000",
+        "gacha_type": "2",
+        "gacha_id": "0",
+        "item_id": "1241",
+        "count": "1",
+        "time": "2099-01-06 12:36:14",
+        "name": "朱鸢",
+        "item_type": "代理人",
+        "rank_type": "4",
+        "lang": "zh-cn"
+      },
+      {
+        "id": "1900000000000000011",
+        "uid": "100000000",
+        "gacha_type": "2",
+        "gacha_id": "0",
+        "item_id": "1101",
+        "count": "1",
+        "time": "2099-01-06 12:33:58",
+        "name": "珂蕾妲",
+        "item_type": "代理人",
+        "rank_type": "4",
+        "lang": "zh-cn"
+      }
+    ],
+    "region": "prod_gf_cn"
+  }
+}

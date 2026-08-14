@@ -2400,6 +2400,26 @@ mod tests {
         (runtime, account_id)
     }
 
+    /// 与 `setup_pipeline_and_account` 同构，仅把账号的 `plugin_id` 参数化
+    /// ——星铁/绝区零测试需要账号声明的插件与实际采集的插件一致（虽然当前
+    /// schema 不会因为不一致而报错，但测试语义上应当对应真实场景，不该
+    /// 借用一个写死的 "genshin" 账号）。
+    fn setup_pipeline_and_account_for(storage: &Storage, plugin_id: &str) -> (PluginRuntime, i64) {
+        let runtime = PluginRuntime::new().expect("插件运行时应当能正常启动");
+        let account_id = storage
+            .repository()
+            .create_account(&NewAccount {
+                plugin_id: plugin_id.to_string(),
+                game_uid: "100000000".to_string(),
+                region: "cn_gf01".to_string(),
+                display_name: None,
+                retention_days: Some(168),
+                created_at: 1_754_800_000_000,
+            })
+            .expect("创建测试账号应当成功");
+        (runtime, account_id)
+    }
+
     /// 基于 genshin 真实 manifest 纯数据，覆盖调用方指定的字段构造测试用
     /// manifest JSON——凭据/请求模板/卡池表等其余字段全部沿用 genshin 真实
     /// 声明，只替换本次要验证的差异点。用来测试 `endpointOverride`/
@@ -2608,6 +2628,422 @@ mod tests {
             )
             .expect("采集应当成功");
         assert_eq!(outcome.records_inserted, 8);
+    }
+
+    /// 用真实 fixture（`fixtures/starrail/raw_response/`）驱动星铁角色活动
+    /// 跃迁（banner "11"）的 3 页请求：前两页各有记录、第三页空——这是
+    /// FIXRS 门要求的"至少一条 Rust 测试吃过星铁真实数据"。星铁与原神最大
+    /// 的差异是 `timezoneSource: apiField`（原神走 hooks.resolveTimezone），
+    /// 这条测试专门验证 apiField 分支在真实响应体上真的算出了
+    /// `TzOrigin::Region`，而不是像 M2-S6 故障那样静默退化成 `Assumed`——
+    /// 只是这次发生在星铁而不是鸣潮。
+    #[test]
+    fn starrail_full_pipeline_run_matches_fixture_expectations() {
+        let storage = Storage::open_in_memory().expect("应当能打开内存数据库");
+        let (runtime, account_id) = setup_pipeline_and_account_for(&storage, "starrail");
+        let pipeline = AuthkeyApiPipeline::new(
+            "starrail",
+            &runtime,
+            RateLimitPolicy::zero_delay_for_tests(),
+        )
+        .expect("应当能构造 pipeline");
+
+        let credential_url = "https://public-operation-hkrpg.mihoyo.com/common/hkrpg_gacha_record/api/getGachaLog?authkey=FAKE&lang=zh-cn&gacha_type=11";
+
+        let transport = FixtureTransport::new();
+        transport.register(
+            pipeline
+                .build_page_url(credential_url, "11", 1)
+                .expect("URL 构造应当成功"),
+            read_fixture("fixtures/starrail/raw_response/11_page_1.json"),
+        );
+        transport.register(
+            pipeline
+                .build_page_url(credential_url, "11", 2)
+                .expect("URL 构造应当成功"),
+            read_fixture("fixtures/starrail/raw_response/11_page_2.json"),
+        );
+        transport.register(
+            pipeline
+                .build_page_url(credential_url, "11", 3)
+                .expect("URL 构造应当成功"),
+            read_fixture("fixtures/starrail/raw_response/11_page_3_empty.json"),
+        );
+
+        let repo = storage.repository();
+        let lang = crate::cache_scan::extract_query_param(credential_url, "lang");
+        let outcome = pipeline
+            .collect_banner(
+                &transport,
+                &repo,
+                account_id,
+                "11",
+                credential_url,
+                "100000000",
+                None,
+                lang.as_deref(),
+                1_754_812_801_000,
+            )
+            .expect("采集应当成功");
+
+        assert_eq!(outcome.stop_reason, StopReason::EmptyPage);
+        assert_eq!(outcome.pages_fetched, 3);
+        assert_eq!(outcome.non_empty_pages, 2);
+        assert_eq!(outcome.records_seen, 15, "page_1 9 条 + page_2 6 条");
+        assert_eq!(outcome.records_inserted, 15);
+
+        let records = repo
+            .find_records_by_banner(account_id, "11")
+            .expect("查询应当成功");
+        assert_eq!(records.len(), 15);
+
+        // record_key 形态：`${bannerId}:${stableId}`——验证星铁 hooks.ts 声明
+        // 的 deriveRecordKey 真的被插件运行时执行到了，不是空操作。
+        assert!(
+            records
+                .iter()
+                .any(|r| r.record_key.as_str() == "11:1500000000000000001")
+        );
+
+        // apiField 分支：region_time_zone=8 是页级字段，三页记录应当全部
+        // 换算出 TzOrigin::Region + tz_offset_min=480，不是 computed 路径
+        // （星铁 hooks.ts 没有声明 resolveTimezone）。
+        assert!(
+            records
+                .iter()
+                .all(|r| r.tz_origin == TzOrigin::Region && r.tz_offset_min == Some(480)),
+            "星铁 timezoneSource=apiField(region_time_zone)，全部记录都应换算出 UTC+8"
+        );
+
+        // occurred_at 抽查：page_1 第一条记录 time="2101-07-15 10:21:49"，
+        // 按 UTC+8 换算成毫秒时间戳。
+        let expected_naive =
+            chrono::NaiveDateTime::parse_from_str("2101-07-15 10:21:49", "%Y-%m-%d %H:%M:%S")
+                .unwrap();
+        let expected_utc_ms = (expected_naive.and_utc().timestamp() - 8 * 3600) * 1000;
+        let first_record = records
+            .iter()
+            .find(|r| r.record_key.as_str() == "11:1500000000000000001")
+            .expect("应当能找到这条记录");
+        assert_eq!(first_record.occurred_at, expected_utc_ms);
+
+        // research/03 §1.3 的元数据缺失真实样例：item_id="1223" 有值，
+        // name/item_type/rank_type 全为空串。星铁 itemIdSource 缺省
+        // "native"，determine_meta_state 靠 name/item_type/rarity 是否为
+        // None 判定——空串必须先被插件侧 toNonEmptyString 归一化成 None，
+        // 这条记录才会落在 MetaState::Pending；如果这层归一化被去掉，空串
+        // 会原样透传，is_none() 判断会失效，这条记录会被误判为 Complete，
+        // `idx_record_meta_pending` 永远扫不到它。
+        let record_with_missing_metadata = records
+            .iter()
+            .find(|r| r.item_id == "1223")
+            .expect("fixture 里 11_page_2.json 应当有这条元数据缺失记录");
+        assert_eq!(record_with_missing_metadata.meta_state, MetaState::Pending);
+        assert_eq!(
+            record_with_missing_metadata.item_type, None,
+            "空串必须归一化为 NULL，不是原样存空字符串"
+        );
+        assert_eq!(
+            record_with_missing_metadata.rarity, None,
+            "空串必须归一化为 NULL，不是原样存空字符串"
+        );
+
+        // 其余 14 条记录 name/item_type/rank_type 都有值，应当落
+        // Complete——与上面那条 Pending 记录形成对照，证明
+        // determine_meta_state 真的在按字段完整性判定，不是恒定值。
+        let complete_count = records
+            .iter()
+            .filter(|r| r.meta_state == MetaState::Complete)
+            .count();
+        assert_eq!(
+            complete_count, 14,
+            "15 条记录里只有 1 条元数据缺失，其余 14 条应为 Complete"
+        );
+    }
+
+    /// 星铁联动池（banner "21"）在真实 manifest 里声明了
+    /// `endpointOverride: "getLdGachaLog"`。已有的
+    /// `build_page_url_applies_endpoint_override_for_declared_banner_only`
+    /// （见下方 A1 节）用的是拼出来的合成 manifest，从没真正喂过一条星铁的
+    /// 真实响应。这条测试用星铁真实 manifest + 真实 fixture
+    /// `21_page_1.json`，同时验证两件事没有互相脱节：① `build_page_url`
+    /// 真的把最后一段路径替换成 `getLdGachaLog`；② 替换后的端点收到的真实
+    /// 联动池数据仍然能正确走完 `build_records`（record_key 带上 "21:"
+    /// 前缀、apiField 时区、meta_state）。用 `build_records` 而不是
+    /// `collect_banner` 整页循环——联动池 fixture 只给了一页数据，不需要为
+    /// 了触发终止条件去伪造一页本不存在的空响应。
+    #[test]
+    fn starrail_collab_pool_endpoint_override_pipeline_run_uses_ld_endpoint_and_real_fixture() {
+        let storage = Storage::open_in_memory().expect("应当能打开内存数据库");
+        let (runtime, account_id) = setup_pipeline_and_account_for(&storage, "starrail");
+        let pipeline = AuthkeyApiPipeline::new(
+            "starrail",
+            &runtime,
+            RateLimitPolicy::zero_delay_for_tests(),
+        )
+        .expect("应当能构造 pipeline");
+
+        let credential_url = "https://public-operation-hkrpg.mihoyo.com/common/hkrpg_gacha_record/api/getGachaLog?authkey=FAKE&lang=zh-cn&gacha_type=21";
+        let overridden_url = pipeline
+            .build_page_url(credential_url, "21", 1)
+            .expect("URL 构造应当成功");
+        let overridden_path = overridden_url
+            .split('?')
+            .next()
+            .expect("URL 应当至少有路径部分");
+        assert!(
+            overridden_path.ends_with("getLdGachaLog"),
+            "banner 21 声明了 endpointOverride，最终请求路径应当以 getLdGachaLog 结尾：{overridden_url}"
+        );
+
+        let raw_response = read_fixture("fixtures/starrail/raw_response/21_page_1.json");
+        let response_json: Value =
+            serde_json::from_str(&raw_response).expect("fixture 应当是合法 JSON");
+        let list: Vec<Value> = response_json["data"]["list"]
+            .as_array()
+            .cloned()
+            .expect("fixture 应当有 data.list 数组");
+        assert_eq!(list.len(), 8);
+
+        let tz_offset_hours = pipeline
+            .resolve_page_level_timezone_offset_hours(&response_json)
+            .expect("apiField 声明且响应体带 region_time_zone 时应当能解析出时区偏移");
+        assert_eq!(tz_offset_hours, Some(8));
+
+        let batch = pipeline
+            .build_records(
+                &list,
+                "21",
+                account_id,
+                "100000000",
+                None,
+                Some("zh-cn"),
+                1_754_812_801_000,
+                tz_offset_hours,
+                RecordSource::OfficialApi,
+            )
+            .expect("build_records 应当成功");
+        assert_eq!(batch.len(), 8);
+
+        let repo = storage.repository();
+        let inserted = repo.insert_records(&batch).expect("写入应当成功");
+        assert_eq!(inserted, 8);
+
+        let records = repo
+            .find_records_by_banner(account_id, "21")
+            .expect("查询应当成功");
+        assert!(
+            records
+                .iter()
+                .any(|r| r.record_key.as_str() == "21:1500000000000000019"),
+            "record_key 应当是 `${{bannerId}}:${{stableId}}` 形态"
+        );
+        assert!(
+            records
+                .iter()
+                .all(|r| r.tz_origin == TzOrigin::Region && r.tz_offset_min == Some(480)),
+            "联动池同样走 apiField(region_time_zone) 分支"
+        );
+        assert!(
+            records.iter().all(|r| r.meta_state == MetaState::Complete),
+            "21_page_1.json 里全部记录 name/item_type/rank_type 均有值，不应有 Pending"
+        );
+    }
+
+    /// 用真实 fixture（`fixtures/zzz/raw_response/`）驱动绝区零独家频段
+    /// （banner "2"）的 3 页请求：前两页各有记录、第三页空——这是 FIXRS 门
+    /// 要求的"至少一条 Rust 测试吃过绝区零真实数据"。绝区零与星铁的差异是
+    /// `timezoneSource: staticTable`（响应体只有 `region` 字段，没有
+    /// `region_time_zone`，UTC 偏移量要靠插件声明的查表 table 换算），这条
+    /// 测试验证 staticTable 查表路径在真实响应体上真的走通了。
+    #[test]
+    fn zzz_full_pipeline_run_matches_fixture_expectations() {
+        let storage = Storage::open_in_memory().expect("应当能打开内存数据库");
+        let (runtime, account_id) = setup_pipeline_and_account_for(&storage, "zzz");
+        let pipeline =
+            AuthkeyApiPipeline::new("zzz", &runtime, RateLimitPolicy::zero_delay_for_tests())
+                .expect("应当能构造 pipeline");
+
+        let credential_url = "https://public-operation-nap.mihoyo.com/common/gacha_record/api/getGachaLog?authkey=FAKE&lang=zh-cn&real_gacha_type=2";
+
+        let transport = FixtureTransport::new();
+        transport.register(
+            pipeline
+                .build_page_url(credential_url, "2", 1)
+                .expect("URL 构造应当成功"),
+            read_fixture("fixtures/zzz/raw_response/2_page_1.json"),
+        );
+        transport.register(
+            pipeline
+                .build_page_url(credential_url, "2", 2)
+                .expect("URL 构造应当成功"),
+            read_fixture("fixtures/zzz/raw_response/2_page_2.json"),
+        );
+        transport.register(
+            pipeline
+                .build_page_url(credential_url, "2", 3)
+                .expect("URL 构造应当成功"),
+            read_fixture("fixtures/zzz/raw_response/2_page_3_empty.json"),
+        );
+
+        let repo = storage.repository();
+        let lang = crate::cache_scan::extract_query_param(credential_url, "lang");
+        let outcome = pipeline
+            .collect_banner(
+                &transport,
+                &repo,
+                account_id,
+                "2",
+                credential_url,
+                "100000000",
+                None,
+                lang.as_deref(),
+                1_754_812_801_000,
+            )
+            .expect("采集应当成功");
+
+        assert_eq!(outcome.stop_reason, StopReason::EmptyPage);
+        assert_eq!(outcome.pages_fetched, 3);
+        assert_eq!(outcome.non_empty_pages, 2);
+        assert_eq!(outcome.records_seen, 11, "page_1 6 条 + page_2 5 条");
+        assert_eq!(outcome.records_inserted, 11);
+
+        let records = repo
+            .find_records_by_banner(account_id, "2")
+            .expect("查询应当成功");
+        assert_eq!(records.len(), 11);
+
+        // record_key 形态：`${bannerId}:${stableId}`。
+        assert!(
+            records
+                .iter()
+                .any(|r| r.record_key.as_str() == "2:1900000000000000001")
+        );
+
+        // staticTable 分支：响应体只有 `region: "prod_gf_cn"`，没有任何形式
+        // 的 UTC 偏移量字段——必须靠插件声明的 table（region → 8）查出偏移
+        // 量，不是直接读某个字段。三页记录应当全部换算出
+        // TzOrigin::Region + tz_offset_min=480。
+        assert!(
+            records
+                .iter()
+                .all(|r| r.tz_origin == TzOrigin::Region && r.tz_offset_min == Some(480)),
+            "绝区零 timezoneSource=staticTable(region)，prod_gf_cn 应查出 UTC+8"
+        );
+
+        let expected_naive =
+            chrono::NaiveDateTime::parse_from_str("2099-01-01 18:51:55", "%Y-%m-%d %H:%M:%S")
+                .unwrap();
+        let expected_utc_ms = (expected_naive.and_utc().timestamp() - 8 * 3600) * 1000;
+        let first_record = records
+            .iter()
+            .find(|r| r.record_key.as_str() == "2:1900000000000000001")
+            .expect("应当能找到这条记录");
+        assert_eq!(first_record.occurred_at, expected_utc_ms);
+
+        // 稀有度阶梯 2/3/4，不是米哈游默认的 3/4/5——抽查真实响应里
+        // rank_type="4" 的那条（"猫又"，绝区零 S 级代理人），确认 rarity
+        // 字段原样透传了这个此前从未在本 crate fixture 里出现过的取值。
+        let s_rank_record = records
+            .iter()
+            .find(|r| r.item_id == "1021")
+            .expect("fixture 里应当有猫又这条记录");
+        assert_eq!(s_rank_record.rarity.as_deref(), Some("4"));
+
+        // 全部记录 name/item_type/rank_type 均有值，itemIdSource 缺省
+        // native，应当全部落 Complete——与星铁那条元数据缺失记录形成对照，
+        // 证明这批 fixture 本身没有缺失样例，Pending 分支不会被误触发。
+        assert!(records.iter().all(|r| r.meta_state == MetaState::Complete));
+    }
+
+    /// 绝区零邦布频段（banner "5"）真实响应里 5 条记录混有已知的"音擎"
+    /// 类型（1 条）与此前 fixture 里从未出现过的"邦布"类型（4 条），同时
+    /// 引入稀有度阶梯的最高档 `rank_type: "4"`。fixture 只有一页数据，用
+    /// `build_records` 而不是 `collect_banner` 整页循环，理由与星铁联动池
+    /// 测试相同——不需要为了触发终止条件去伪造一页本不存在的空响应。
+    #[test]
+    fn zzz_bangboo_channel_pipeline_run_covers_third_item_type_and_top_rarity_four() {
+        let storage = Storage::open_in_memory().expect("应当能打开内存数据库");
+        let (runtime, account_id) = setup_pipeline_and_account_for(&storage, "zzz");
+        let pipeline =
+            AuthkeyApiPipeline::new("zzz", &runtime, RateLimitPolicy::zero_delay_for_tests())
+                .expect("应当能构造 pipeline");
+
+        let raw_response = read_fixture("fixtures/zzz/raw_response/5_page_1.json");
+        let response_json: Value =
+            serde_json::from_str(&raw_response).expect("fixture 应当是合法 JSON");
+        let list: Vec<Value> = response_json["data"]["list"]
+            .as_array()
+            .cloned()
+            .expect("fixture 应当有 data.list 数组");
+        assert_eq!(list.len(), 5);
+
+        let tz_offset_hours = pipeline
+            .resolve_page_level_timezone_offset_hours(&response_json)
+            .expect("staticTable 查表命中时应当能解析出时区偏移");
+        assert_eq!(tz_offset_hours, Some(8));
+
+        let batch = pipeline
+            .build_records(
+                &list,
+                "5",
+                account_id,
+                "100000000",
+                None,
+                Some("zh-cn"),
+                1_754_812_801_000,
+                tz_offset_hours,
+                RecordSource::OfficialApi,
+            )
+            .expect("build_records 应当成功");
+        assert_eq!(batch.len(), 5);
+
+        let repo = storage.repository();
+        let inserted = repo.insert_records(&batch).expect("写入应当成功");
+        assert_eq!(inserted, 5);
+
+        let records = repo
+            .find_records_by_banner(account_id, "5")
+            .expect("查询应当成功");
+        assert_eq!(records.len(), 5);
+
+        // 5 条记录里 4 条是"邦布"类型物品——item_type 字段是自由字符串直接
+        // 透传，这里按数量断言而不是全量断言（fixture 里第 1 条
+        // "「湍流」-矢型" 仍是"音擎"类型），验证第三档物品类型真的完整流过了
+        // Rust 侧，不是只在 TS 侧 extractRecord 里存在。
+        let bangboo_count = records
+            .iter()
+            .filter(|r| r.item_type.as_deref() == Some("邦布"))
+            .count();
+        assert_eq!(
+            bangboo_count, 4,
+            "5_page_1.json 应有 4 条邦布类型记录（其余 1 条是音擎）"
+        );
+
+        // 稀有度阶梯最高档是 "4"（S 级），fixture 里两条 rank_type="4"
+        // 的记录（巴特勒、飚速布）应当原样透传为 rarity=Some("4")——不是
+        // 米哈游三游默认的 "5"。
+        let rank_four_count = records
+            .iter()
+            .filter(|r| r.rarity.as_deref() == Some("4"))
+            .count();
+        assert_eq!(rank_four_count, 2, "巴特勒、飚速布两条应为 rank_type=4");
+        assert!(
+            records.iter().all(|r| r.rarity.as_deref() != Some("5")),
+            "绝区零稀有度阶梯不含 \"5\"，不应有任何记录被归到这一档"
+        );
+
+        assert!(
+            records
+                .iter()
+                .any(|r| r.record_key.as_str() == "5:1900000000000000012")
+        );
+        assert!(
+            records
+                .iter()
+                .all(|r| r.tz_origin == TzOrigin::Region && r.tz_offset_min == Some(480))
+        );
+        assert!(records.iter().all(|r| r.meta_state == MetaState::Complete));
     }
 
     /// 同一份 fixture 跑两遍：第二遍新增行数必须为 0，且不报错——

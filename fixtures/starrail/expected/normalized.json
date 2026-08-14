@@ -1,0 +1,300 @@
+{
+  "records": [
+    {
+      "fields": {
+        "itemId": "20008",
+        "time": "2101-07-15 10:21:49",
+        "bannerId": "11",
+        "count": 1,
+        "name": "嘉果",
+        "itemType": "光锥",
+        "rarity": "3",
+        "stableId": "1500000000000000001"
+      },
+      "recordKey": "11:1500000000000000001"
+    },
+    {
+      "fields": {
+        "itemId": "20016",
+        "time": "2101-07-15 10:21:49",
+        "bannerId": "11",
+        "count": 1,
+        "name": "俱殁",
+        "itemType": "光锥",
+        "rarity": "3",
+        "stableId": "1500000000000000002"
+      },
+      "recordKey": "11:1500000000000000002"
+    },
+    {
+      "fields": {
+        "itemId": "21008",
+        "time": "2101-07-15 10:21:49",
+        "bannerId": "11",
+        "count": 1,
+        "name": "猎物的视线",
+        "itemType": "光锥",
+        "rarity": "4",
+        "stableId": "1500000000000000003"
+      },
+      "recordKey": "11:1500000000000000003"
+    },
+    {
+      "fields": {
+        "itemId": "20002",
+        "time": "2101-07-15 10:21:49",
+        "bannerId": "11",
+        "count": 1,
+        "name": "天倾",
+        "itemType": "光锥",
+        "rarity": "3",
+        "stableId": "1500000000000000004"
+      },
+      "recordKey": "11:1500000000000000004"
+    },
+    {
+      "fields": {
+        "itemId": "20021",
+        "time": "2101-07-15 10:21:49",
+        "bannerId": "11",
+        "count": 1,
+        "name": "焚影",
+        "itemType": "光锥",
+        "rarity": "3",
+        "stableId": "1500000000000000005"
+      },
+      "recordKey": "11:1500000000000000005"
+    },
+    {
+      "fields": {
+        "itemId": "20001",
+        "time": "2101-07-15 10:21:49",
+        "bannerId": "11",
+        "count": 1,
+        "name": "物穰",
+        "itemType": "光锥",
+        "rarity": "3",
+        "stableId": "1500000000000000006"
+      },
+      "recordKey": "11:1500000000000000006"
+    },
+    {
+      "fields": {
+        "itemId": "20023",
+        "time": "2101-07-15 10:21:49",
+        "bannerId": "11",
+        "count": 1,
+        "name": "嗤笑",
+        "itemType": "光锥",
+        "rarity": "3",
+        "stableId": "1500000000000000007"
+      },
+      "recordKey": "11:1500000000000000007"
+    },
+    {
+      "fields": {
+        "itemId": "1510",
+        "time": "2101-07-15 10:21:49",
+        "bannerId": "11",
+        "count": 1,
+        "name": "姬子•启行",
+        "itemType": "角色",
+        "rarity": "5",
+        "stableId": "1500000000000000008"
+      },
+      "recordKey": "11:1500000000000000008"
+    },
+    {
+      "fields": {
+        "itemId": "20020",
+        "time": "2101-07-15 10:21:49",
+        "bannerId": "11",
+        "count": 1,
+        "name": "睿见",
+        "itemType": "光锥",
+        "rarity": "3",
+        "stableId": "1500000000000000009"
+      },
+      "recordKey": "11:1500000000000000009"
+    },
+    {
+      "fields": {
+        "itemId": "20009",
+        "time": "2099-09-10 10:05:26",
+        "bannerId": "11",
+        "count": 1,
+        "name": "乐圮",
+        "itemType": "光锥",
+        "rarity": "3",
+        "stableId": "1500000000000000010"
+      },
+      "recordKey": "11:1500000000000000010"
+    },
+    {
+      "fields": {
+        "itemId": "20014",
+        "time": "2099-09-10 10:05:26",
+        "bannerId": "11",
+        "count": 1,
+        "name": "相抗",
+        "itemType": "光锥",
+        "rarity": "3",
+        "stableId": "1500000000000000011"
+      },
+      "recordKey": "11:1500000000000000011"
+    },
+    {
+      "fields": {
+        "itemId": "1223",
+        "time": "2099-09-10 10:05:26",
+        "bannerId": "11",
+        "count": 1,
+        "stableId": "1500000000000000012"
+      },
+      "recordKey": "11:1500000000000000012"
+    },
+    {
+      "fields": {
+        "itemId": "20005",
+        "time": "2099-09-10 10:05:26",
+        "bannerId": "11",
+        "count": 1,
+        "name": "齐颂",
+        "itemType": "光锥",
+        "rarity": "3",
+        "stableId": "1500000000000000013"
+      },
+      "recordKey": "11:1500000000000000013"
+    },
+    {
+      "fields": {
+        "itemId": "20001",
+        "time": "2099-08-23 19:24:26",
+        "bannerId": "11",
+        "count": 1,
+        "name": "物穰",
+        "itemType": "光锥",
+        "rarity": "3",
+        "stableId": "1500000000000000014"
+      },
+      "recordKey": "11:1500000000000000014"
+    },
+    {
+      "fields": {
+        "itemId": "20010",
+        "time": "2099-08-23 19:24:24",
+        "bannerId": "11",
+        "count": 1,
+        "name": "戍御",
+        "itemType": "光锥",
+        "rarity": "3",
+        "stableId": "1500000000000000015"
+      },
+      "recordKey": "11:1500000000000000015"
+    },
+    {
+      "fields": {
+        "itemId": "20003",
+        "time": "2100-07-12 08:04:42",
+        "bannerId": "21",
+        "count": 1,
+        "name": "琥珀",
+        "itemType": "光锥",
+        "rarity": "3",
+        "stableId": "1500000000000000016"
+      },
+      "recordKey": "21:1500000000000000016"
+    },
+    {
+      "fields": {
+        "itemId": "21004",
+        "time": "2100-07-12 08:04:42",
+        "bannerId": "21",
+        "count": 1,
+        "name": "记忆中的模样",
+        "itemType": "光锥",
+        "rarity": "4",
+        "stableId": "1500000000000000017"
+      },
+      "recordKey": "21:1500000000000000017"
+    },
+    {
+      "fields": {
+        "itemId": "20021",
+        "time": "2100-07-12 08:04:42",
+        "bannerId": "21",
+        "count": 1,
+        "name": "焚影",
+        "itemType": "光锥",
+        "rarity": "3",
+        "stableId": "1500000000000000018"
+      },
+      "recordKey": "21:1500000000000000018"
+    },
+    {
+      "fields": {
+        "itemId": "1014",
+        "time": "2100-07-12 08:04:42",
+        "bannerId": "21",
+        "count": 1,
+        "name": "Saber",
+        "itemType": "角色",
+        "rarity": "5",
+        "stableId": "1500000000000000019"
+      },
+      "recordKey": "21:1500000000000000019"
+    },
+    {
+      "fields": {
+        "itemId": "20007",
+        "time": "2100-07-12 08:04:42",
+        "bannerId": "21",
+        "count": 1,
+        "name": "离弦",
+        "itemType": "光锥",
+        "rarity": "3",
+        "stableId": "1500000000000000020"
+      },
+      "recordKey": "21:1500000000000000020"
+    },
+    {
+      "fields": {
+        "itemId": "20009",
+        "time": "2100-07-12 08:04:42",
+        "bannerId": "21",
+        "count": 1,
+        "name": "乐圮",
+        "itemType": "光锥",
+        "rarity": "3",
+        "stableId": "1500000000000000021"
+      },
+      "recordKey": "21:1500000000000000021"
+    },
+    {
+      "fields": {
+        "itemId": "20021",
+        "time": "2100-07-12 08:04:42",
+        "bannerId": "21",
+        "count": 1,
+        "name": "焚影",
+        "itemType": "光锥",
+        "rarity": "3",
+        "stableId": "1500000000000000022"
+      },
+      "recordKey": "21:1500000000000000022"
+    },
+    {
+      "fields": {
+        "itemId": "20012",
+        "time": "2100-07-12 08:04:42",
+        "bannerId": "21",
+        "count": 1,
+        "name": "轮契",
+        "itemType": "光锥",
+        "rarity": "3",
+        "stableId": "1500000000000000023"
+      },
+      "recordKey": "21:1500000000000000023"
+    }
+  ]
+}

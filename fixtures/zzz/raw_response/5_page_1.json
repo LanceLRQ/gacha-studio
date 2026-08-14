@@ -1,0 +1,74 @@
+{
+  "retcode": 0,
+  "message": "OK",
+  "data": {
+    "list": [
+      {
+        "id": "1900000000000000012",
+        "uid": "100000000",
+        "gacha_type": "5",
+        "gacha_id": "0",
+        "item_id": "12008",
+        "count": "1",
+        "time": "2099-01-07 18:39:36",
+        "name": "「湍流」-矢型",
+        "item_type": "音擎",
+        "rank_type": "2",
+        "lang": "zh-cn"
+      },
+      {
+        "id": "1900000000000000013",
+        "uid": "100000000",
+        "gacha_type": "5",
+        "gacha_id": "0",
+        "item_id": "53007",
+        "count": "1",
+        "time": "2099-01-07 18:39:36",
+        "name": "泪眼布",
+        "item_type": "邦布",
+        "rank_type": "3",
+        "lang": "zh-cn"
+      },
+      {
+        "id": "1900000000000000014",
+        "uid": "100000000",
+        "gacha_type": "5",
+        "gacha_id": "0",
+        "item_id": "53001",
+        "count": "1",
+        "time": "2099-01-07 18:39:56",
+        "name": "企鹅布",
+        "item_type": "邦布",
+        "rank_type": "3",
+        "lang": "zh-cn"
+      },
+      {
+        "id": "1900000000000000015",
+        "uid": "100000000",
+        "gacha_type": "5",
+        "gacha_id": "0",
+        "item_id": "54004",
+        "count": "1",
+        "time": "2099-01-07 18:40:46",
+        "name": "巴特勒",
+        "item_type": "邦布",
+        "rank_type": "4",
+        "lang": "zh-cn"
+      },
+      {
+        "id": "1900000000000000016",
+        "uid": "100000000",
+        "gacha_type": "5",
+        "gacha_id": "0",
+        "item_id": "54006",
+        "count": "1",
+        "time": "2099-01-08 22:37:53",
+        "name": "飚速布",
+        "item_type": "邦布",
+        "rank_type": "4",
+        "lang": "zh-cn"
+      }
+    ],
+    "region": "prod_gf_cn"
+  }
+}
