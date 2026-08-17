@@ -13,7 +13,9 @@ use gs_core::GsError;
 use gs_storage::Storage;
 use std::path::Path;
 
+pub mod archive;
 pub mod import;
+pub mod views;
 
 /// 宿主运行时：当前只承载一个存储连接，后续随 IPC 命令实现逐步扩充
 /// （插件注册表、范式流程编排等）。

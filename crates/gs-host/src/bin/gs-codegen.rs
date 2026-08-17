@@ -29,6 +29,7 @@ use gs_core::{
     RequestTemplate, RetentionPolicy, RetryConfig, StopCondition, TimeConfig, TimezoneSource,
     TzOrigin, UnifiedRecordFields,
 };
+use gs_host::views::{AccountView, ImportReport, ImportedAccountReport, RecordPage};
 use std::fs;
 use std::path::PathBuf;
 use ts_rs::{Config, TS};
@@ -38,6 +39,17 @@ const OUTPUT_RELATIVE_PATH: &str = "packages/gs-plugin-kit/types/generated.ts";
 
 /// 生成文件首行的固定说明，见任务约束「生成产物必须是确定性的」第 3 条。
 const HEADER: &str = "// 本文件由 gs-codegen 生成，禁止手改。修改请改 crates/gs-core 后重跑 `cargo run -p gs-host --bin gs-codegen`。";
+
+/// IPC 视图类型的生成落点。唯一消费者是前端，不进 `gs-plugin-kit`——
+/// 完整理由见 `crates/gs-host/src/views.rs` 的模块文档。
+const IPC_OUTPUT_RELATIVE_PATH: &str = "web/src/lib/ipc/generated.ts";
+
+/// IPC 产物的文件头。比上面那份多一行 `import type`：这份文件里的类型会
+/// 引用 `GachaRecord`（`RecordPage.records` 的元素类型），而它属于另一份
+/// 产物。两份产物之间用真实的 TS import 连接，不复制一份声明过来——
+/// 复制会得到两个同名但可能悄悄漂移的类型。
+const IPC_HEADER: &str = "// 本文件由 gs-codegen 生成，禁止手改。修改请改 crates/gs-host/src/views.rs 后重跑 `cargo run -p gs-host --bin gs-codegen`。\n\
+import type { GachaRecord } from \"gs-plugin-kit/types\";";
 
 fn main() {
     // ts-rs 对 i64/u64/i128/u128 的默认映射是 `bigint`，不是 `number`。这在
@@ -101,10 +113,32 @@ fn main() {
         ("NoCredentialReason", NoCredentialReason::decl(&cfg)),
     ];
 
+    write_generated(OUTPUT_RELATIVE_PATH, HEADER, &type_decls);
+
+    // --- 第二份产物：IPC 视图类型 ---
+    //
+    // 与上面那份分开写，理由见 `crates/gs-host/src/views.rs` 的模块文档
+    // （一句话：那份是插件契约、要过 HC-3 的 zod 覆盖率检查，这份是应用
+    // 自己的 IPC 形状、给它写 zod 是用运行时校验去验自己的输出）。
+    let ipc_decls: Vec<(&str, String)> = vec![
+        ("AccountView", AccountView::decl(&cfg)),
+        ("RecordPage", RecordPage::decl(&cfg)),
+        ("ImportReport", ImportReport::decl(&cfg)),
+        ("ImportedAccountReport", ImportedAccountReport::decl(&cfg)),
+    ];
+    write_generated(IPC_OUTPUT_RELATIVE_PATH, IPC_HEADER, &ipc_decls);
+}
+
+/// 把一份显式类型清单拼成 TS 文件写盘。
+///
+/// 两份产物共用同一套拼接规则——尤其是"按清单里手写的固定顺序输出"这条：
+/// ts-rs 内部用 `HashMap` 收集依赖，让它自行展开会让两次运行产生纯粹因
+/// 遍历顺序不同造成的 diff，把 HC-3 变成永远红灯，见本文件头部说明。
+fn write_generated(relative_path: &str, header: &str, decls: &[(&str, String)]) {
     let mut body = String::new();
-    // 元组的类型名（`_name`）只在上面清单里作 review 时的可读标注用，
+    // 元组的类型名（`_name`）只在清单里作 review 时的可读标注用，
     // 类型名本身已经出现在 `decl()` 的输出文本里，不需要在这里重复拼接。
-    for (_name, decl) in &type_decls {
+    for (_name, decl) in decls {
         // `decl()` 只返回 `type Foo = ...;`，没有 `export` 关键字，这里手动补上；
         // 也没有依赖类型的 import 语句，符合「单文件打包、类型间用裸名互相引用」的设计。
         body.push_str("export ");
@@ -112,16 +146,16 @@ fn main() {
         body.push('\n');
     }
 
-    let content = format!("{HEADER}\n\n{body}");
-    let output_path = repo_root().join(OUTPUT_RELATIVE_PATH);
+    let content = format!("{header}\n\n{body}");
+    let output_path = repo_root().join(relative_path);
+    if let Some(parent) = output_path.parent() {
+        fs::create_dir_all(parent)
+            .unwrap_or_else(|err| panic!("创建目录 {} 失败: {err}", parent.display()));
+    }
     fs::write(&output_path, &content)
         .unwrap_or_else(|err| panic!("写入 {} 失败: {err}", output_path.display()));
 
-    println!(
-        "已生成 {} 个类型 -> {}",
-        type_decls.len(),
-        output_path.display()
-    );
+    println!("已生成 {} 个类型 -> {}", decls.len(), output_path.display());
 }
 
 /// 从当前二进制所在 crate 的 `CARGO_MANIFEST_DIR`（`<repo>/crates/gs-host`）

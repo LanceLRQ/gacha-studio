@@ -18,3 +18,5 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 tauri = { version = "2", features = [] }
 gs-host.workspace = true
+gs-plugin-runtime.workspace = true
+tauri-plugin-dialog = "2.7.2"

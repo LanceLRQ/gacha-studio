@@ -33,6 +33,17 @@ const SCHEMA_FILE = 'packages/gs-plugin-kit/schema/index.ts';
 // 而插件代码正是 record_key、归一化这些静默失败高发区的所在。
 const PLUGIN_BUNDLE_DIR = 'crates/gs-plugin-runtime/generated/';
 
+// IPC 视图类型（gs-codegen 的第二份产物，源在 crates/gs-host/src/views.rs）。
+//
+// 它落在 web/ 下而不是 packages/gs-plugin-kit/types/，理由见那个模块的文档
+// （一句话：那个目录的类型要过下面第 ③ 项 zod 覆盖率检查，而 IPC 形状是
+// 宿主自己 serde 出去的，给它写 zod 是用运行时校验去验自己的输出）。
+//
+// 但「不进 zod 检查」不等于「不进一致性检查」——它同样是生成产物，手改
+// 同样必须被抓。所以只把它加进下面第 ① 项的 porcelain 监视范围，
+// 不加进第 ③ 项。
+const IPC_TYPES_DIR = 'web/src/lib/ipc/';
+
 function joinOutput(result) {
   return [result.stdout, result.stderr].filter((s) => s && s.trim().length > 0).join('\n');
 }
@@ -265,7 +276,7 @@ export async function run() {
 
   const statusResult = spawnSync(
     'git',
-    ['status', '--porcelain', '--', TYPES_DIR, PLUGIN_BUNDLE_DIR],
+    ['status', '--porcelain', '--', TYPES_DIR, PLUGIN_BUNDLE_DIR, IPC_TYPES_DIR],
     { cwd: repoRoot, encoding: 'utf8' },
   );
 

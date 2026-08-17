@@ -13,19 +13,13 @@
 //! （capabilities 管的是"前端能调用哪些命令"，不是"Rust 后端能不能读写
 //! 自己的应用数据目录"）。
 
+mod commands;
+
 use gs_host::HostRuntime;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Mutex;
 use tauri::Manager;
-
-/// 骨架阶段的探针命令：验证宿主运行时（存储 + 分析）能独立完成初始化。
-/// 不暴露任何文件系统 / 网络能力，只返回布尔结果，符合能力窄口原则。
-/// 用内存库而非应用真实的库，避免这条探测顺带污染生产数据。
-#[tauri::command]
-fn host_runtime_ready() -> bool {
-    HostRuntime::bootstrap_in_memory().is_ok()
-}
 
 /// 计算生产环境的数据库文件路径：`<app_data_dir>/gacha-studio.sqlite3`。
 /// `app_data_dir` 不存在时一并创建——`rusqlite::Connection::open` 不会自动
@@ -54,17 +48,21 @@ pub fn run() {
             app.manage(Mutex::new(runtime));
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![host_runtime_ready])
+        .plugin(tauri_plugin_dialog::init())
+        .invoke_handler(tauri::generate_handler![
+            commands::host_runtime_ready,
+            commands::list_accounts,
+            commands::list_records,
+            commands::import_archive_via_picker,
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
     fn host_runtime_bootstraps_successfully() {
-        assert!(host_runtime_ready());
+        assert!(crate::commands::host_runtime_ready());
     }
 }

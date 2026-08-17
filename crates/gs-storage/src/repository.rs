@@ -495,6 +495,85 @@ impl<'conn> Repository<'conn> {
         rows_into_records(rows)
     }
 
+    /// 分页查询记录，`banner_key` 为 `None` 时跨全部卡池。
+    ///
+    /// 与 [`Self::find_records_by_banner`] 分开而不是给它加可选参数：那个方法
+    /// 是分析链路用的（一次要拿全量算保底），这个是界面用的（一次只要一屏）。
+    /// 两者的正确行为相反——分析拿不全就是错的，界面拿全量就是把几千条记录
+    /// 一次塞进 IPC。
+    ///
+    /// 排序按 `occurred_at DESC, id DESC`：界面默认展示最近的抽卡。第二排序键
+    /// 不能省——同秒多条记录（鸣潮十连一次落 10 条同 `occurred_at`）只按第一
+    /// 键排序时 SQLite 不保证稳定顺序，翻页会出现同一条记录在两页都出现、
+    /// 另一条一页都不出现。
+    pub fn find_records_paged(
+        &self,
+        account_id: i64,
+        banner_key: Option<&str>,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<GachaRecord>, GsError> {
+        match banner_key {
+            Some(banner_key) => {
+                let sql = format!(
+                    "SELECT {GACHA_RECORD_SELECT_COLUMNS} FROM gacha_record \
+                     WHERE account_id = ?1 AND banner_key = ?2 \
+                     ORDER BY occurred_at DESC, id DESC LIMIT ?3 OFFSET ?4"
+                );
+                let mut stmt = self.conn.prepare(&sql).map_err(storage_err)?;
+                let rows = stmt
+                    .query_map(
+                        params![account_id, banner_key, limit, offset],
+                        map_gacha_record_row,
+                    )
+                    .map_err(storage_err)?;
+                rows_into_records(rows)
+            }
+            None => {
+                let sql = format!(
+                    "SELECT {GACHA_RECORD_SELECT_COLUMNS} FROM gacha_record \
+                     WHERE account_id = ?1 \
+                     ORDER BY occurred_at DESC, id DESC LIMIT ?2 OFFSET ?3"
+                );
+                let mut stmt = self.conn.prepare(&sql).map_err(storage_err)?;
+                let rows = stmt
+                    .query_map(params![account_id, limit, offset], map_gacha_record_row)
+                    .map_err(storage_err)?;
+                rows_into_records(rows)
+            }
+        }
+    }
+
+    /// 记录总数，`banner_key` 为 `None` 时跨全部卡池。供界面算总页数——
+    /// 与 [`Self::find_records_paged`] 的筛选条件必须保持一致，否则页码算出来
+    /// 是错的。
+    pub fn count_records(&self, account_id: i64, banner_key: Option<&str>) -> Result<i64, GsError> {
+        let count = match banner_key {
+            Some(banner_key) => self.conn.query_row(
+                "SELECT COUNT(*) FROM gacha_record WHERE account_id = ?1 AND banner_key = ?2",
+                params![account_id, banner_key],
+                |row| row.get::<_, i64>(0),
+            ),
+            None => self.conn.query_row(
+                "SELECT COUNT(*) FROM gacha_record WHERE account_id = ?1",
+                params![account_id],
+                |row| row.get::<_, i64>(0),
+            ),
+        };
+        count.map_err(storage_err)
+    }
+
+    /// 列出全部账号，按 `(plugin_id, game_uid)` 升序——界面侧栏与账号切换器
+    /// 要的是一个稳定顺序，用插入顺序（`id`）会让同一个游戏的账号散在列表各处。
+    pub fn list_accounts(&self) -> Result<Vec<Account>, GsError> {
+        let sql =
+            format!("SELECT {ACCOUNT_SELECT_COLUMNS} FROM account ORDER BY plugin_id, game_uid");
+        let mut stmt = self.conn.prepare(&sql).map_err(storage_err)?;
+        let rows = stmt.query_map([], map_account_row).map_err(storage_err)?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(storage_err)
+    }
+
     /// 按 `(account_id, pity_group)` 查询，用于合并保底的卡池集合统计
     /// （301/400 这类共享保底但 `banner_key` 不同的场景，见存储数据模型
     /// 设计文档 §3.2.4 上方的实测约束）。
@@ -842,6 +921,37 @@ impl<'conn> Repository<'conn> {
         self.conn
             .query_row(&sql, params![id], map_account_row)
             .optional()
+            .map_err(storage_err)
+    }
+
+    /// 按 `(plugin_id, game_uid)` 查询，**不含区服**——返回同一游戏同一 UID
+    /// 下的全部账号。
+    ///
+    /// 存在的理由：`account` 的身份三元组是 `(plugin_id, game_uid, region)`，
+    /// 但**不是每种交换格式的存档都携带区服**。UIGF v4 就完全没有这个字段，
+    /// 它的适配器永远产出 `region: None`（`gs_exchange::uigf` 里三处
+    /// `region: None`）。若把 `None` 落成空串当作一个"区服值"，同一个玩家
+    /// 从 UIGF 导入的账号，与日后走 API 采集（那条路能拿到真实区服）建出来的
+    /// 账号，会是**两个不同的账号**——记录一分为二，跨源合并、保底连续性、
+    /// 保留期告警全部跟着错，而且不会有任何报错。
+    ///
+    /// 调用方（导入流程）用它做的判断是：存档没声明区服时，按 `(plugin_id,
+    /// game_uid)` 找现有账号，恰好一个就复用，一个都没有就新建，
+    /// **多于一个则拒绝**——那种情况下没有任何依据能选对，猜一个比报错更坏。
+    pub fn find_accounts_by_plugin_and_uid(
+        &self,
+        plugin_id: &str,
+        game_uid: &str,
+    ) -> Result<Vec<Account>, GsError> {
+        let sql = format!(
+            "SELECT {ACCOUNT_SELECT_COLUMNS} FROM account \
+             WHERE plugin_id = ?1 AND game_uid = ?2 ORDER BY region"
+        );
+        let mut stmt = self.conn.prepare(&sql).map_err(storage_err)?;
+        let rows = stmt
+            .query_map(params![plugin_id, game_uid], map_account_row)
+            .map_err(storage_err)?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
             .map_err(storage_err)
     }
 

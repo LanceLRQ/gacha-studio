@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "主窗口的最小权限集合。仅授予 Tauri 核心框架的基础能力（窗口/菜单/事件等），未注册任何文件系统、网络、shell、dialog 类插件，因此这些能力目前对前端完全不可见。后续新增的 IPC 窄口命令（scanGameCache / callGameApi 等）须各自声明独立权限，不得复用本文件。",
+  "description": "主窗口的最小权限集合。仅授予 Tauri 核心框架的基础能力（窗口/菜单/事件等）。tauri-plugin-dialog 已在 Rust 侧注册，但这里刻意不授予它任何权限——前端因此调不到它的 JS API，文件对话框只能由 Rust 命令内部弹出，用户选中的路径从不越过 IPC 边界。未注册文件系统、网络、shell 类插件，这些能力对前端完全不可见。⚠️ 本文件此前写着「后续新增的 IPC 窄口命令须各自声明独立权限，不得复用本文件」——那句话是基于对 Tauri 2 模型的误解，在这个模型里做不到，已于 2026-08-14 删除：应用自定义命令（#[tauri::command] + generate_handler!）不受 capabilities 管辖，官方文档明写默认对所有窗口开放，要限制得用 AppManifest::commands，不是往这里加 permission 标识符。所以本文件挡的是插件权限，挡不住自定义命令；后者的安全性靠命令签名本身够窄 + docs/_internal/audit/AUDIT-2026-08-11-HC2能力窄口审计.md 的逐条人工审计。",
   "windows": [
     "main"
   ],

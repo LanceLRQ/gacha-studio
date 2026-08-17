@@ -19,6 +19,7 @@ gs-exchange.workspace = true
 gs-p-authkey.workspace = true
 # 构造 AuthkeyApiPipeline 需要一个已加载插件 bundle 的运行时实例。
 gs-plugin-runtime.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 ts-rs.workspace = true
 
