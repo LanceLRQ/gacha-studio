@@ -33,6 +33,7 @@
 //! 出来的 `Serialize` 实现能让两边天然保持一致（`gs-storage::enum_to_sql`
 //! 已经是这个模式的先例）。
 
+use crate::manifest_lookup;
 use gs_core::{BannerSpec, PityGroup, RaritySpec};
 use gs_storage::NewBannerMeta;
 
@@ -43,37 +44,6 @@ pub const GENSHIN_PLUGIN_ID: &str = "genshin";
 /// 一个跨 Rust/TS 两侧共享的稳定标识符，不是"数据"，与硬编码保底线数字是
 /// 两回事（标识符本就该在两侧字面一致，就像表名/JSON 键名）。
 pub const CHARACTER_EVENT_WISH_PITY_GROUP: &str = "characterEventWish";
-
-/// 取 genshin 插件 manifest 的纯数据根节点。找不到就直接 panic——manifest
-/// 纯数据缺失意味着没跑过 `node scripts/gs-bundle-plugins.mjs`，属于开发期
-/// 配置错误，不是运行时应当优雅处理的情况（`AuthkeyApiPipeline::new` 对
-/// 同一缺失场景的处理方式一致，见 `gs-p-authkey/src/pipeline.rs`）。
-fn genshin_manifest() -> &'static serde_json::Value {
-    gs_manifest_data::plugin_manifest_data(GENSHIN_PLUGIN_ID).unwrap_or_else(|| {
-        panic!(
-            "插件 \"{GENSHIN_PLUGIN_ID}\" 的 manifest 纯数据未找到——先跑一次 \
-             `node scripts/gs-bundle-plugins.mjs` 生成 \
-             crates/gs-plugin-runtime/generated/plugins.manifest.json"
-        )
-    })
-}
-
-/// 把 `value` 反序列化成 `T`，失败时 panic 并带上字段名——manifest JSON
-/// 已经由打包脚本按 `gs_core` 的领域类型约束生成，反序列化失败说明两侧
-/// 契约脱节（比如手改过生成文件，或 `gs_core` 改了字段却没重新打包），
-/// 属于要求人工介入的开发期错误。
-fn deserialize_or_panic<T: serde::de::DeserializeOwned>(
-    field: &str,
-    value: &serde_json::Value,
-) -> T {
-    serde_json::from_value(value.clone()).unwrap_or_else(|err| {
-        panic!(
-            "genshin manifest 的 \"{field}\" 字段解析失败：{err}——\
-             这份 JSON 由 scripts/gs-bundle-plugins.mjs 生成，不应手改；\
-             若 gs_core 的领域类型改过字段，需要重新打包"
-        )
-    })
-}
 
 /// `curve`/`guarantee` 在 `banner_meta.curve_type`/`guarantee_rule` 两列上
 /// 的摘要标签，直接复用它们已有的 `#[serde(tag = "kind")]` 序列化结果，
@@ -92,8 +62,13 @@ fn serde_kind_tag<T: serde::Serialize>(value: &T) -> String {
 /// 原神 manifest 声明的全部保底组。当前只有一个（角色活动祈愿），但签名不
 /// 假设这一点——manifest 新增第二个保底组（比如武器池未来若也有共享保底）
 /// 时，这里不需要改代码。
+///
+/// 反序列化逻辑已收敛到 [`manifest_lookup::pity_groups_for`]（按任意插件 id
+/// 参数化的通用版本），本函数只是绑死 `GENSHIN_PLUGIN_ID` 的薄封装——保留
+/// 是因为它是已发布的公共 API，`pity.rs`/`rarity.rs`/`rare_event.rs` 的测试
+/// 与集成测试都直接调用它。
 pub fn genshin_pity_groups() -> Vec<PityGroup> {
-    deserialize_or_panic("pityGroups", &genshin_manifest()["pityGroups"])
+    manifest_lookup::pity_groups_for(GENSHIN_PLUGIN_ID)
 }
 
 /// 角色活动祈愿的完整保底声明：`hardPity: 90`、
@@ -111,15 +86,17 @@ pub fn character_event_wish_pity_group() -> PityGroup {
         })
 }
 
-/// 原神的稀有度阶梯声明，直接来自 manifest `rarity` 字段。
+/// 原神的稀有度阶梯声明，直接来自 manifest `rarity` 字段。薄封装，理由同
+/// [`genshin_pity_groups`]。
 pub fn genshin_rarity_spec() -> RaritySpec {
-    deserialize_or_panic("rarity", &genshin_manifest()["rarity"])
+    manifest_lookup::rarity_spec_for(GENSHIN_PLUGIN_ID)
 }
 
 /// 原神 manifest 声明的全部卡池（`banners` 数组），直接来自 manifest，
-/// 新增卡池只需要改 `plugins/genshin/manifest.ts`。
+/// 新增卡池只需要改 `plugins/genshin/manifest.ts`。薄封装，理由同
+/// [`genshin_pity_groups`]。
 pub fn genshin_banners() -> Vec<BannerSpec> {
-    deserialize_or_panic("banners", &genshin_manifest()["banners"])
+    manifest_lookup::banners_for(GENSHIN_PLUGIN_ID)
 }
 
 /// `displayName` 只按 `"zh-CN"` 取——M1 阶段只有中文一种展示语言，manifest

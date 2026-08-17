@@ -29,7 +29,11 @@ use gs_core::{
     RequestTemplate, RetentionPolicy, RetryConfig, StopCondition, TimeConfig, TimezoneSource,
     TzOrigin, UnifiedRecordFields,
 };
-use gs_host::views::{AccountView, ImportReport, ImportedAccountReport, RecordPage};
+use gs_host::views::{
+    AccountAnalysisView, AccountView, CurveEvaluationView, GameView, ImportReport,
+    ImportedAccountReport, OverviewStatsView, PityGroupProgressView, PityPullView,
+    PluginRarityDistributionView, RarityDistributionView, RecordPage,
+};
 use std::fs;
 use std::path::PathBuf;
 use ts_rs::{Config, TS};
@@ -45,11 +49,12 @@ const HEADER: &str = "// 本文件由 gs-codegen 生成，禁止手改。修改�
 const IPC_OUTPUT_RELATIVE_PATH: &str = "web/src/lib/ipc/generated.ts";
 
 /// IPC 产物的文件头。比上面那份多一行 `import type`：这份文件里的类型会
-/// 引用 `GachaRecord`（`RecordPage.records` 的元素类型），而它属于另一份
+/// 引用 `GachaRecord`（`RecordPage.records` 的元素类型）、`RaritySpec`/
+/// `BannerSpec`（`GameView.rarity`/`GameView.banners`），而它们都属于另一份
 /// 产物。两份产物之间用真实的 TS import 连接，不复制一份声明过来——
 /// 复制会得到两个同名但可能悄悄漂移的类型。
 const IPC_HEADER: &str = "// 本文件由 gs-codegen 生成，禁止手改。修改请改 crates/gs-host/src/views.rs 后重跑 `cargo run -p gs-host --bin gs-codegen`。\n\
-import type { GachaRecord } from \"gs-plugin-kit/types\";";
+import type { GachaRecord, RaritySpec, BannerSpec } from \"gs-plugin-kit/types\";";
 
 fn main() {
     // ts-rs 对 i64/u64/i128/u128 的默认映射是 `bigint`，不是 `number`。这在
@@ -125,6 +130,19 @@ fn main() {
         ("RecordPage", RecordPage::decl(&cfg)),
         ("ImportReport", ImportReport::decl(&cfg)),
         ("ImportedAccountReport", ImportedAccountReport::decl(&cfg)),
+        // --- 插件展示元数据（list_games） ---
+        ("GameView", GameView::decl(&cfg)),
+        // --- 分析结果（account_analysis / overview_stats） ---
+        ("CurveEvaluationView", CurveEvaluationView::decl(&cfg)),
+        ("PityPullView", PityPullView::decl(&cfg)),
+        ("PityGroupProgressView", PityGroupProgressView::decl(&cfg)),
+        ("RarityDistributionView", RarityDistributionView::decl(&cfg)),
+        ("AccountAnalysisView", AccountAnalysisView::decl(&cfg)),
+        (
+            "PluginRarityDistributionView",
+            PluginRarityDistributionView::decl(&cfg),
+        ),
+        ("OverviewStatsView", OverviewStatsView::decl(&cfg)),
     ];
     write_generated(IPC_OUTPUT_RELATIVE_PATH, IPC_HEADER, &ipc_decls);
 }

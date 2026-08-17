@@ -54,6 +54,109 @@ const GACHA_RECORD_SELECT_COLUMNS: &str = "id, account_id, banner_key, pity_grou
     lang, occurred_at, occurred_raw, tz_origin, tz_offset_min, seq_in_batch, item_id, \
     item_type, rarity, qty, meta_state, source, captured_at, raw_ref, extra";
 
+/// [`Repository::find_records_paged`] / [`Repository::count_records`] 共用的
+/// 筛选条件。用结构体而不是给这两个方法各加一排 `Option` 参数——它们的
+/// 筛选条件必须逐字段保持一致（分页器总数才不会跟实际翻页结果对不上，见
+/// [`Repository::count_records`] 的文档），一份共享结构体能让"新增一个
+/// 筛选项时两个方法都要跟着改"这件事在函数签名上就看得见，不是改了一个、
+/// 忘了另一个才在测试里暴露。
+///
+/// `#[derive(Default)]`：所有字段留空即"不筛选、返回该账号下全部记录"，
+/// 调用方按需用结构体更新语法只填自己关心的字段。
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RecordFilter<'a> {
+    pub banner_key: Option<&'a str>,
+    /// 传哪些稀有度值就筛哪些——不是"顶级/次级/其余"这种语义分档。稀有度
+    /// 阶梯长度和取值因游戏而异（绝区零是 `["2","3","4"]`，米哈游三游是
+    /// `["3","4","5"]`），语义分档需要知道"哪一档算顶级"，那是插件
+    /// manifest 的知识（`RaritySpec.pity_target`），存储层不该替调用方做
+    /// 这个判断，理由同 [`Repository::find_records_by_rarity`] 已有的注释。
+    ///
+    /// `Some(&[])`（显式传入零个稀有度值）与 `None`（不筛选）语义不同：
+    /// 前者是"筛出空集"，后者是"不限制这一维度"——SQL `IN ()` 本身是非法
+    /// 语法，这两种输入在拼 SQL 之前就被分开处理，见
+    /// [`rarities_select_nothing`]。
+    pub rarities: Option<&'a [String]>,
+    /// 时间区间，按 `occurred_at`（已归一化的 UTC 毫秒时间戳，不是原始
+    /// 字符串 `occurred_raw`）过滤，两端都是闭区间，`None` 表示不限制
+    /// 那一端。
+    pub occurred_from: Option<i64>,
+    pub occurred_to: Option<i64>,
+    /// 物品名搜索：对 `item_id` 做子串匹配。原神的 `item_id` 本身就是
+    /// 本地化物品名（原神 API 不返回 item_id，见
+    /// `plugins/genshin/manifest.ts` `extractRecord` 的说明），因此"按
+    /// 物品名搜索"对原神而言就是对 `item_id` 做匹配，不需要额外的 name
+    /// 列。用户输入里的 `%`/`_` 会被转义成字面量，见 [`escape_like_pattern`]。
+    pub item_search: Option<&'a str>,
+}
+
+/// `filter.rarities` 显式传入了一个空切片时短路：SQL `IN ()` 语法非法，
+/// 且"选中零个稀有度"这个意图本身就该直接得到空结果，不需要真的拼一条
+/// SQL 去问数据库。
+fn rarities_select_nothing(rarities: Option<&[String]>) -> bool {
+    matches!(rarities, Some(list) if list.is_empty())
+}
+
+/// 转义 LIKE 模式里的通配符，让用户搜索词按字面匹配——物品名恰好包含
+/// `%`/`_` 时不应该被当成"任意字符/任意长度"的通配符。反斜杠本身也要
+/// 转义，否则用户输入里带反斜杠会改变后面字符的转义语义。
+fn escape_like_pattern(input: &str) -> String {
+    input
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
+}
+
+/// 把 `account_id` + `filter` 拼成 `WHERE` 子句（不含 `WHERE` 关键字本身）
+/// 与对应的参数列表，供 [`Repository::find_records_paged`] /
+/// [`Repository::count_records`] 共用——两个方法各自在结果后面追加
+/// `ORDER BY ... LIMIT ... OFFSET ...` 或 `COUNT(*)`，筛选这部分完全相同。
+///
+/// 调用方须先用 [`rarities_select_nothing`] 排除"显式选中零个稀有度"的
+/// 情形，本函数不处理那个短路分支（到这里时 `filter.rarities` 若为
+/// `Some`，切片必然非空）。
+///
+/// 用不带编号的 `?` 占位符而不是 `?1,?2,...`：本文件其余方法固定参数
+/// 个数、`?N` 写起来更直观；这里筛选条件是动态的，参数个数随调用方传入的
+/// `rarities` 长度变化，编号会随之变化，不带编号让 rusqlite 按位置顺序
+/// 绑定，不需要在拼接时手动同步编号。
+fn build_record_filter_where(
+    account_id: i64,
+    filter: &RecordFilter<'_>,
+) -> (String, Vec<Box<dyn ToSql>>) {
+    let mut clauses = vec!["account_id = ?".to_string()];
+    let mut params: Vec<Box<dyn ToSql>> = vec![Box::new(account_id)];
+
+    if let Some(banner_key) = filter.banner_key {
+        clauses.push("banner_key = ?".to_string());
+        params.push(Box::new(banner_key.to_string()));
+    }
+
+    if let Some(rarities) = filter.rarities {
+        let placeholders = vec!["?"; rarities.len()].join(",");
+        clauses.push(format!("rarity IN ({placeholders})"));
+        for value in rarities {
+            params.push(Box::new(value.clone()));
+        }
+    }
+
+    if let Some(from) = filter.occurred_from {
+        clauses.push("occurred_at >= ?".to_string());
+        params.push(Box::new(from));
+    }
+    if let Some(to) = filter.occurred_to {
+        clauses.push("occurred_at <= ?".to_string());
+        params.push(Box::new(to));
+    }
+
+    if let Some(search) = filter.item_search {
+        clauses.push("item_id LIKE ? ESCAPE '\\'".to_string());
+        params.push(Box::new(format!("%{}%", escape_like_pattern(search))));
+    }
+
+    (clauses.join(" AND "), params)
+}
+
 /// [`GachaRecord`] 落库前对应的列名列表，比 [`GACHA_RECORD_SELECT_COLUMNS`]
 /// 少一个 `id`——`id` 由 SQLite 的 `INTEGER PRIMARY KEY` 自动生成，写入路径
 /// 里传入的 `GachaRecord::id` 会被忽略（调用方可以填任意占位值，惯例填 `0`，
@@ -495,7 +598,9 @@ impl<'conn> Repository<'conn> {
         rows_into_records(rows)
     }
 
-    /// 分页查询记录，`banner_key` 为 `None` 时跨全部卡池。
+    /// 分页查询记录，筛选条件见 [`RecordFilter`]（`Default::default()` 即
+    /// 跨全部卡池、不限稀有度/时间/物品名，与本方法改造前"`banner_key` 为
+    /// `None`"的行为一致）。
     ///
     /// 与 [`Self::find_records_by_banner`] 分开而不是给它加可选参数：那个方法
     /// 是分析链路用的（一次要拿全量算保底），这个是界面用的（一次只要一屏）。
@@ -509,58 +614,72 @@ impl<'conn> Repository<'conn> {
     pub fn find_records_paged(
         &self,
         account_id: i64,
-        banner_key: Option<&str>,
+        filter: &RecordFilter<'_>,
         limit: i64,
         offset: i64,
     ) -> Result<Vec<GachaRecord>, GsError> {
-        match banner_key {
-            Some(banner_key) => {
-                let sql = format!(
-                    "SELECT {GACHA_RECORD_SELECT_COLUMNS} FROM gacha_record \
-                     WHERE account_id = ?1 AND banner_key = ?2 \
-                     ORDER BY occurred_at DESC, id DESC LIMIT ?3 OFFSET ?4"
-                );
-                let mut stmt = self.conn.prepare(&sql).map_err(storage_err)?;
-                let rows = stmt
-                    .query_map(
-                        params![account_id, banner_key, limit, offset],
-                        map_gacha_record_row,
-                    )
-                    .map_err(storage_err)?;
-                rows_into_records(rows)
-            }
-            None => {
-                let sql = format!(
-                    "SELECT {GACHA_RECORD_SELECT_COLUMNS} FROM gacha_record \
-                     WHERE account_id = ?1 \
-                     ORDER BY occurred_at DESC, id DESC LIMIT ?2 OFFSET ?3"
-                );
-                let mut stmt = self.conn.prepare(&sql).map_err(storage_err)?;
-                let rows = stmt
-                    .query_map(params![account_id, limit, offset], map_gacha_record_row)
-                    .map_err(storage_err)?;
-                rows_into_records(rows)
-            }
+        if rarities_select_nothing(filter.rarities) {
+            return Ok(Vec::new());
         }
+
+        let (where_sql, mut owned_params) = build_record_filter_where(account_id, filter);
+        owned_params.push(Box::new(limit));
+        owned_params.push(Box::new(offset));
+        let param_refs: Vec<&dyn ToSql> = owned_params.iter().map(Box::as_ref).collect();
+
+        let sql = format!(
+            "SELECT {GACHA_RECORD_SELECT_COLUMNS} FROM gacha_record WHERE {where_sql} \
+             ORDER BY occurred_at DESC, id DESC LIMIT ? OFFSET ?"
+        );
+        let mut stmt = self.conn.prepare(&sql).map_err(storage_err)?;
+        let rows = stmt
+            .query_map(param_refs.as_slice(), map_gacha_record_row)
+            .map_err(storage_err)?;
+        rows_into_records(rows)
     }
 
-    /// 记录总数，`banner_key` 为 `None` 时跨全部卡池。供界面算总页数——
-    /// 与 [`Self::find_records_paged`] 的筛选条件必须保持一致，否则页码算出来
-    /// 是错的。
-    pub fn count_records(&self, account_id: i64, banner_key: Option<&str>) -> Result<i64, GsError> {
-        let count = match banner_key {
-            Some(banner_key) => self.conn.query_row(
-                "SELECT COUNT(*) FROM gacha_record WHERE account_id = ?1 AND banner_key = ?2",
-                params![account_id, banner_key],
-                |row| row.get::<_, i64>(0),
-            ),
-            None => self.conn.query_row(
-                "SELECT COUNT(*) FROM gacha_record WHERE account_id = ?1",
-                params![account_id],
-                |row| row.get::<_, i64>(0),
-            ),
-        };
-        count.map_err(storage_err)
+    /// 满足 [`RecordFilter`] 的记录总数。供界面算总页数——与
+    /// [`Self::find_records_paged`] 的筛选条件必须保持一致，否则页码算出来
+    /// 是错的；两者共用 [`build_record_filter_where`] 正是为了机械保证这一点，
+    /// 不依赖调用方手动同步两处筛选逻辑。
+    pub fn count_records(
+        &self,
+        account_id: i64,
+        filter: &RecordFilter<'_>,
+    ) -> Result<i64, GsError> {
+        if rarities_select_nothing(filter.rarities) {
+            return Ok(0);
+        }
+
+        let (where_sql, owned_params) = build_record_filter_where(account_id, filter);
+        let param_refs: Vec<&dyn ToSql> = owned_params.iter().map(Box::as_ref).collect();
+        let sql = format!("SELECT COUNT(*) FROM gacha_record WHERE {where_sql}");
+        self.conn
+            .query_row(&sql, param_refs.as_slice(), |row| row.get::<_, i64>(0))
+            .map_err(storage_err)
+    }
+
+    /// 不分页地取出某个账号的**全部**记录，供 `gs-host` 的分析编排（跨账号
+    /// 统计、稀有度分布）在进程内直接消费——不经过 IPC，不受
+    /// `src-tauri::commands::MAX_PAGE_SIZE` 那道"一次调用最多拿多少条"的
+    /// 上限约束（那道上限是为了防止 webview 一次性把整张表通过 IPC 序列化
+    /// 出去，本方法的调用方从始至终待在 Rust 进程内，不适用同一顾虑）。
+    ///
+    /// 不接受任何筛选条件：调用方（`gs_analysis::rarity_distribution` 等）
+    /// 需要的正是"这个账号名下全部记录"，筛选是它们拿到数据之后自己做的事。
+    pub fn find_all_records_for_account(
+        &self,
+        account_id: i64,
+    ) -> Result<Vec<GachaRecord>, GsError> {
+        let sql = format!(
+            "SELECT {GACHA_RECORD_SELECT_COLUMNS} FROM gacha_record \
+             WHERE account_id = ?1 ORDER BY occurred_at DESC, id DESC"
+        );
+        let mut stmt = self.conn.prepare(&sql).map_err(storage_err)?;
+        let rows = stmt
+            .query_map(params![account_id], map_gacha_record_row)
+            .map_err(storage_err)?;
+        rows_into_records(rows)
     }
 
     /// 列出全部账号，按 `(plugin_id, game_uid)` 升序——界面侧栏与账号切换器

@@ -985,6 +985,7 @@ version = "0.1.0"
 dependencies = [
  "gs-host",
  "gs-plugin-runtime",
+ "gs-storage",
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",

@@ -46,16 +46,47 @@ const PLUGIN_MANIFEST_JSON: &str =
 /// 需要的子集不同，这里不定义一个大而全的结构体，由各调用方自己反序列化出
 /// 只关心的那部分——这个自由度一旦收进一个公共大结构体就找不回来了。
 pub fn plugin_manifest_data(plugin_id: &str) -> Option<&'static Value> {
+    parsed_manifest_root().get(plugin_id)
+}
+
+/// 打包脚本写入的元信息键，标记"这份 JSON 是生成产物"，不是一个插件 id。
+/// [`registered_plugin_ids`] 用它把自己排除在外——见 `scripts/gs-bundle-plugins.mjs`
+/// 里 `pureManifests = { _generatedBy: ... }` 那一行，两处字面量必须一致。
+const GENERATED_BY_KEY: &str = "_generatedBy";
+
+/// 列出全部已注册插件的 id（`plugins/index.ts` 打包出的全部游戏），按字母序
+/// 排列。
+///
+/// 排序是刻意的，不是顺手：`plugins.manifest.json` 的顶层键顺序取决于
+/// `serde_json::Map` 的内部实现（本 crate 未开 `preserve_order` feature 时是
+/// `BTreeMap`，本就按字母序；但这不该是调用方能依赖的隐式前提）。显式排序
+/// 让 `list_games` 这类消费方（`gs-host::catalog`）拿到的游戏列表顺序不随
+/// `serde_json` 内部实现细节或依赖 feature 变化而漂移。
+pub fn registered_plugin_ids() -> Vec<&'static str> {
+    let mut ids: Vec<&'static str> = parsed_manifest_root()
+        .as_object()
+        .into_iter()
+        .flat_map(|obj| obj.keys())
+        .filter(|key| key.as_str() != GENERATED_BY_KEY)
+        .map(String::as_str)
+        .collect();
+    ids.sort_unstable();
+    ids
+}
+
+/// 懒解析并缓存 `plugins.manifest.json` 的根节点，[`plugin_manifest_data`]
+/// 与 [`registered_plugin_ids`] 共用同一份解析结果与同一个 `OnceLock`——
+/// 避免两个函数各自解析一遍同一份文件。
+fn parsed_manifest_root() -> &'static Value {
     static PARSED: OnceLock<Value> = OnceLock::new();
-    let root = PARSED.get_or_init(|| {
+    PARSED.get_or_init(|| {
         serde_json::from_str(PLUGIN_MANIFEST_JSON).unwrap_or_else(|err| {
             panic!(
                 "crates/gs-plugin-runtime/generated/plugins.manifest.json 不是合法 JSON：{err}\
                  ——这份文件禁止手改，若被手改过请重跑 node scripts/gs-bundle-plugins.mjs"
             )
         })
-    });
-    root.get(plugin_id)
+    })
 }
 
 #[cfg(test)]
@@ -72,6 +103,18 @@ mod tests {
         assert_eq!(manifest["fields"], serde_json::json!({}));
         assert!(manifest["pityGroups"].is_array());
         assert!(manifest["rarity"]["ladder"].is_array());
+    }
+
+    #[test]
+    fn registered_plugin_ids_lists_all_plugins_and_excludes_metadata_key() {
+        let ids = registered_plugin_ids();
+        // 钉住当前四个已注册插件——新增插件时这条测试会红，是有意的确认点，
+        // 理由与 gs-analysis 的 banner_meta_seed 测试同款（见该文件顶部说明）。
+        assert_eq!(ids, vec!["genshin", "starrail", "wuwa", "zzz"]);
+        assert!(
+            !ids.contains(&"_generatedBy"),
+            "打包脚本写入的元信息键不是插件 id，不应该出现在这里"
+        );
     }
 
     #[test]

@@ -19,4 +19,8 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = [] }
 gs-host.workspace = true
 gs-plugin-runtime.workspace = true
+# list_records 的筛选条件要装进 gs_storage::RecordFilter 传给 gs-host——
+# gs-host 已经依赖 gs-storage，但 Rust 不允许只靠传递依赖使用一个 crate，
+# 这里必须显式声明。
+gs-storage.workspace = true
 tauri-plugin-dialog = "2.7.2"

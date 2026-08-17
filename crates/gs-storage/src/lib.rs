@@ -19,7 +19,8 @@ use rusqlite::Connection;
 pub use backup::BackupKind;
 pub use repository::{
     Account, IntegrityRow, NewAccount, NewBannerMeta, NewBannerSnapshot, NewCollectSession,
-    NewRareEvent, NewRawPayload, RareEventRow, Repository, SnapshotOrigin, UnknownBannerRow,
+    NewRareEvent, NewRawPayload, RareEventRow, RecordFilter, Repository, SnapshotOrigin,
+    UnknownBannerRow,
 };
 
 /// SQLite 连接的封装：负责开启连接、设置宿主要求的 pragma、把 schema

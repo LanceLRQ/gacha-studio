@@ -13,7 +13,9 @@ use gs_core::GsError;
 use gs_storage::Storage;
 use std::path::Path;
 
+pub mod analysis;
 pub mod archive;
+pub mod catalog;
 pub mod import;
 pub mod views;
 

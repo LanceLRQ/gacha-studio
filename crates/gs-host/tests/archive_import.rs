@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use gs_host::archive::{ArchiveImportError, import_archive_bytes};
 use gs_plugin_runtime::PluginRuntime;
-use gs_storage::{NewAccount, Storage};
+use gs_storage::{NewAccount, RecordFilter, Storage};
 
 const CAPTURED_AT: i64 = 1_755_000_000_000;
 
@@ -58,7 +58,7 @@ fn imports_a_uigf_archive_end_to_end_and_creates_the_account() {
     assert_eq!(accounts[0].id, account.account_id);
 
     let count = repo
-        .count_records(account.account_id, None)
+        .count_records(account.account_id, &RecordFilter::default())
         .expect("查询记录数应当成功");
     assert_eq!(
         count, account.records_inserted as i64,

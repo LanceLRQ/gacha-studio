@@ -31,8 +31,11 @@ use std::sync::Mutex;
 
 use gs_host::HostRuntime;
 use gs_host::archive::import_archive_bytes;
-use gs_host::views::{AccountView, ImportReport, RecordPage};
+use gs_host::views::{
+    AccountAnalysisView, AccountView, GameView, ImportReport, OverviewStatsView, RecordPage,
+};
 use gs_plugin_runtime::PluginRuntime;
+use gs_storage::RecordFilter;
 use tauri::State;
 use tauri_plugin_dialog::DialogExt;
 
@@ -80,7 +83,9 @@ pub fn list_accounts(state: RuntimeState<'_>) -> Result<Vec<AccountView>, String
     accounts
         .into_iter()
         .map(|account| {
-            let record_count = repo.count_records(account.id, None).map_err(to_message)?;
+            let record_count = repo
+                .count_records(account.id, &RecordFilter::default())
+                .map_err(to_message)?;
             Ok(AccountView {
                 id: account.id,
                 plugin_id: account.plugin_id,
@@ -95,16 +100,31 @@ pub fn list_accounts(state: RuntimeState<'_>) -> Result<Vec<AccountView>, String
         .collect()
 }
 
-/// 分页读取某个账号的抽卡记录。
+/// 分页读取某个账号的抽卡记录，支持按卡池 / 稀有度集合 / 时间区间 / 物品名
+/// 子串筛选。
+///
+/// 筛选下沉到 SQL（[`gs_storage::RecordFilter`]），不是"全量拉取后前端本地
+/// 筛"——星铁真实存档实测 5372 条、单页上限 200，全量要 27 个来回，且违反
+/// [`MAX_PAGE_SIZE`] 存在的理由（见下方"最坏情况"）。
 ///
 /// **最坏情况能做什么**：分页读本地记录。`page_size` 被夹到
 /// [`MAX_PAGE_SIZE`]，无法用一次调用把整张表拖出来；`account_id` 是个整数，
-/// 猜到别的 id 也只能读到同一个本地库里本来就属于这个用户的数据。
+/// 猜到别的 id 也只能读到同一个本地库里本来就属于这个用户的数据。新增的
+/// 四个筛选参数（`rarities`/`occurred_from`/`occurred_to`/`item_search`）
+/// 同样只是缩小结果集的过滤条件，不能扩大可读范围——不传等价于不筛选，
+/// 不会比原有行为读到更多数据；`item_search` 走参数化 `LIKE` 查询（见
+/// `gs_storage::repository` 里 `escape_like_pattern` 的转义处理），不是拼接
+/// SQL 字符串，没有注入面。
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub fn list_records(
     state: RuntimeState<'_>,
     account_id: i64,
     banner_key: Option<String>,
+    rarities: Option<Vec<String>>,
+    occurred_from: Option<i64>,
+    occurred_to: Option<i64>,
+    item_search: Option<String>,
     page: Option<i64>,
     page_size: Option<i64>,
 ) -> Result<RecordPage, String> {
@@ -119,12 +139,22 @@ pub fn list_records(
         .clamp(1, MAX_PAGE_SIZE);
     let page = page.unwrap_or(0).max(0);
 
-    let banner_key = banner_key.as_deref();
+    let filter = RecordFilter {
+        banner_key: banner_key.as_deref(),
+        rarities: rarities.as_deref(),
+        occurred_from,
+        occurred_to,
+        item_search: item_search.as_deref(),
+    };
+
+    // count_records 与 find_records_paged 必须传同一个 filter——这不是
+    // "顺手保持一致"，是这两个方法能配合出正确分页器的唯一前提，见
+    // gs_storage::Repository::count_records 的文档。
     let total = repo
-        .count_records(account_id, banner_key)
+        .count_records(account_id, &filter)
         .map_err(to_message)?;
     let records = repo
-        .find_records_paged(account_id, banner_key, page_size, page * page_size)
+        .find_records_paged(account_id, &filter, page_size, page * page_size)
         .map_err(to_message)?;
 
     Ok(RecordPage {
@@ -181,6 +211,47 @@ pub async fn import_archive_via_picker(
     let report =
         import_archive_bytes(&bytes, &plugin_runtime, &repo, now_millis()).map_err(to_message)?;
     Ok(Some(report))
+}
+
+/// 列出全部已注册插件（游戏）的展示元数据：展示名、稀有度档位、卡池展示名。
+///
+/// 前端拿不到插件 manifest 本身（打包进 QuickJS 用的 bundle，`web/`
+/// 的 tsconfig 不 include 它），游戏名/稀有度档位/卡池展示名因此必须从
+/// Rust 侧透出，见 [`gs_host::views::GameView`] 的文档。
+///
+/// **最坏情况能做什么**：读出编译期内嵌进二进制的静态 manifest 数据（不是
+/// 用户数据，不触碰磁盘/网络）。无参数，没有注入面。
+#[tauri::command]
+pub fn list_games() -> Vec<GameView> {
+    gs_host::catalog::list_games()
+}
+
+/// 单个账号的保底进度 + 稀有度分布，供游戏详情页与记录明细表"保底内第几抽"
+/// 列使用。
+///
+/// **最坏情况能做什么**：读出这一个账号名下的记录并做统计计算，不接受
+/// 任何路径/凭据类参数——`account_id` 是本地库里的整数主键，猜到别的 id
+/// 也只能读到同一个本地库里本来就属于这个用户的另一个账号的统计结果。
+#[tauri::command]
+pub fn account_analysis(
+    state: RuntimeState<'_>,
+    account_id: i64,
+) -> Result<AccountAnalysisView, String> {
+    let runtime = state.lock().map_err(|_| POISONED.to_string())?;
+    let repo = runtime.storage().repository();
+    gs_host::analysis::account_analysis(&repo, account_id).map_err(to_message)
+}
+
+/// 跨账号概览统计，供总览页"跨游戏数据"这一块使用。
+///
+/// **最坏情况能做什么**：读出本地库里全部账号的记录并做统计计算。无参数，
+/// 没有注入面；返回的是聚合数字与按插件分组的稀有度分布，不含任何单条
+/// 记录的明细。
+#[tauri::command]
+pub fn overview_stats(state: RuntimeState<'_>) -> Result<OverviewStatsView, String> {
+    let runtime = state.lock().map_err(|_| POISONED.to_string())?;
+    let repo = runtime.storage().repository();
+    gs_host::analysis::overview_stats(&repo).map_err(to_message)
 }
 
 /// `Mutex` 被毒化时的消息。毒化只可能发生在某个持有锁的命令 panic 之后，
