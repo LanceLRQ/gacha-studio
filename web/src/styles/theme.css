@@ -45,6 +45,11 @@
   --game-genshin: oklch(0.7 0.12 80);
   --game-starrail: oklch(0.55 0.15 300);
   --game-zzz: oklch(0.68 0.16 55);
+  /* 鸣潮——四个已注册插件里唯一原设计稿未覆盖的一个（IPC 接线阶段新增，
+     见 web/src/lib/games.ts 的 colorVar 推导：`--game-${pluginId}` 要求
+     每个已注册插件都有对应变量，否则会静默 fallback 到未定义 CSS 变量）。
+     色相取蓝绿区间（230），与另外三款的橙/紫/橙红区分开。 */
+  --game-wuwa: oklch(0.62 0.14 230);
 
   /*
    * 字体：西文自托管，中文回落系统字体——两条约束各按各的量级取舍。
@@ -101,6 +106,7 @@
   --game-genshin: oklch(0.75 0.11 80);
   --game-starrail: oklch(0.68 0.14 300);
   --game-zzz: oklch(0.72 0.15 55);
+  --game-wuwa: oklch(0.68 0.13 230);
 }
 
 @custom-variant dark (&:is(.dark *));
@@ -148,6 +154,7 @@
   --color-game-genshin: var(--game-genshin);
   --color-game-starrail: var(--game-starrail);
   --color-game-zzz: var(--game-zzz);
+  --color-game-wuwa: var(--game-wuwa);
 
   /* popover/secondary/muted/accent 同样是 shadcn 组件惯例别名，复用已有 token */
   --color-popover: var(--card);

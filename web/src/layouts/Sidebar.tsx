@@ -3,7 +3,6 @@ import type { ReactNode } from "react";
 import { NavLink } from "react-router-dom";
 
 import { useAppState } from "@/lib/app-state";
-import { MOCK_GAMES } from "@/lib/mock-data";
 import { cn } from "@/lib/utils";
 
 /**
@@ -14,8 +13,8 @@ import { cn } from "@/lib/utils";
  * 完整的图标/fallback 头像在总览卡片、设置页、游戏详情顶栏才会出现。
  */
 export function Sidebar() {
-  const { enabledGameIds } = useAppState();
-  const games = MOCK_GAMES.filter((g) => enabledGameIds.has(g.id));
+  const { games: allGames, gamesStatus, enabledGameIds } = useAppState();
+  const games = allGames.filter((g) => enabledGameIds.has(g.id));
 
   return (
     <aside className="flex w-[184px] shrink-0 flex-col overflow-hidden bg-sidebar px-3 py-4">
@@ -39,7 +38,13 @@ export function Sidebar() {
       </div>
 
       <div className="flex min-h-0 flex-col gap-px overflow-y-auto">
-        {games.length === 0 && (
+        {games.length === 0 && gamesStatus.status === "loading" && (
+          <p className="px-2 py-1.5 text-[11.5px] text-faint-foreground">加载中…</p>
+        )}
+        {games.length === 0 && gamesStatus.status === "error" && (
+          <p className="px-2 py-1.5 text-[11.5px] text-destructive">游戏列表加载失败</p>
+        )}
+        {games.length === 0 && gamesStatus.status === "ready" && (
           <p className="px-2 py-1.5 text-[11.5px] text-faint-foreground">
             尚未启用任何游戏
           </p>

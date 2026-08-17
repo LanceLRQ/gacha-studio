@@ -35,6 +35,12 @@ catalog:
   # nova 预设本身即采用这一方式（详见 web/src/components/ui/button.tsx）。
   radix-ui: ^1.6.7
   react-router-dom: ^7.18.2
+  # 前端调 invoke() 的唯一途径（另一条路是开 withGlobalTauri，那会把整个
+  # Tauri API 挂到 window 上，与 HC-2「能力窄口」的方向相反）。
+  # ⚠️ 需与根 package.json 的 @tauri-apps/cli 保持同一 minor：二者共用同一套
+  # IPC 协议，cli 升级后 api 不跟会在运行时报「命令不存在」这类难查的错，
+  # 而不是编译期失败。
+  "@tauri-apps/api": ^2.11.1
 
   # 西文字体自托管（拉丁子集，5 个字重实测 120KB）。中文不打包，
   # 由 --font-ui 兜底链回落系统字体，见 web/src/styles/theme.css。

@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 
 import { GameIcon } from "@/components/game-icon";
 import { downloadAndVerifyIcon } from "@/lib/game-icon";
-import type { MockGameMeta } from "@/lib/mock-data";
+import type { GameMeta } from "@/lib/games";
 
 /**
  * 挂载即发起下载——因此调用方必须只在「这个游戏已启用」的场景下渲染本组件
@@ -15,7 +15,7 @@ export function GameIconAuto({
   size = 26,
   className,
 }: {
-  game: MockGameMeta;
+  game: GameMeta;
   size?: number;
   className?: string;
 }) {

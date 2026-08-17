@@ -3,32 +3,34 @@ import { ArrowRight, Check, HardDrive, Layers } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 
 import { GameIcon } from "@/components/game-icon";
+import { LoadingState, ErrorState } from "@/components/async-view";
 import { Button } from "@/components/ui/button";
 import { useAppState } from "@/lib/app-state";
-import { MOCK_GAMES, type GameId, type MockGameMeta } from "@/lib/mock-data";
+import type { GameId, GameMeta } from "@/lib/games";
 import { cn } from "@/lib/utils";
 
 /**
  * 欢迎页——对应 ui-demo/welcome.html。单屏欢迎层，只做「说明 + 勾选启用
  * 哪些游戏」，不做多步向导（§4.4）。
  *
- * 偏差说明：设计稿列了 5 款游戏（含鸣潮/异环），但本里程碑只有原神一个
- * 插件真正落地，星铁/绝区零也只是纸面演练用的 mock 数据；鸣潮/异环连
- * mock 详情都没有。把它们做成可勾选项会造成「勾了之后进总览却空空如也」
- * 的假交互，因此这里只列出真正有 mock 数据支撑的三款游戏。
+ * 游戏列表来自 `list_games()`（经 AppStateProvider 统一拉取），不再是写死
+ * 的 mock 常量——四个已注册插件（genshin/wuwa/starrail/zzz）都会出现在
+ * 这里，不需要再手工维护"哪些游戏有 mock 数据支撑"这份名单。
  */
 export function Welcome() {
   const navigate = useNavigate();
-  const { enabledGameIds, completeOnboarding } = useAppState();
-  const [selected, setSelected] = useState<Set<GameId>>(new Set(enabledGameIds));
+  const { games, gamesStatus, reloadGames, completeOnboarding } = useAppState();
+  // 初次进入欢迎页时默认全选——用 undefined 表示"用户还没有手动改过"，
+  // 实际渲染时派生成 games 的全量 id 集合，这样即使 games 异步到达也不需要
+  // 额外的 effect 去回填默认值。
+  const [selectedOverride, setSelectedOverride] = useState<Set<GameId> | undefined>(undefined);
+  const selected = selectedOverride ?? new Set(games.map((g) => g.id));
 
   function toggle(id: GameId) {
-    setSelected((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
+    const next = new Set(selected);
+    if (next.has(id)) next.delete(id);
+    else next.add(id);
+    setSelectedOverride(next);
   }
 
   function handleStart() {
@@ -59,16 +61,20 @@ export function Welcome() {
         </div>
 
         <div className="scroll-area min-h-0 flex-1 overflow-y-auto px-1">
-          <div className="flex flex-col gap-2 pb-1">
-            {MOCK_GAMES.map((game) => (
-              <GameSelectCard
-                key={game.id}
-                game={game}
-                checked={selected.has(game.id)}
-                onToggle={() => toggle(game.id)}
-              />
-            ))}
-          </div>
+          {gamesStatus.status === "loading" && <LoadingState label="正在加载已注册的游戏插件…" />}
+          {gamesStatus.status === "error" && <ErrorState message={gamesStatus.message} onRetry={reloadGames} />}
+          {gamesStatus.status === "ready" && (
+            <div className="flex flex-col gap-2 pb-1">
+              {games.map((game) => (
+                <GameSelectCard
+                  key={game.id}
+                  game={game}
+                  checked={selected.has(game.id)}
+                  onToggle={() => toggle(game.id)}
+                />
+              ))}
+            </div>
+          )}
         </div>
 
         <div className="mt-5 flex shrink-0 items-center justify-between gap-4 border-t border-border px-1 pt-4">
@@ -96,7 +102,7 @@ function GameSelectCard({
   checked,
   onToggle,
 }: {
-  game: MockGameMeta;
+  game: GameMeta;
   checked: boolean;
   onToggle: () => void;
 }) {

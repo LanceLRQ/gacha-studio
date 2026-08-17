@@ -4,6 +4,10 @@ import { Badge } from "@/components/ui/badge";
 import { RISK_LABEL, type RiskLevel } from "@/lib/risk";
 
 /**
+ * ⚠️ **本组件当前无人引用（2026-08-17 起），是刻意保留的孤儿，不是漏删。**
+ * 原因与解冻条件见 `@/lib/risk` 头部注释——它依赖的三个字段 Rust 侧还没有，
+ * 硬渲染只能靠编造。
+ *
  * 风险等级 → badge variant 的映射写死在组件内部，不作为 prop 开放给调用方
  * 覆盖——这是界面设计方向 §5.2 那条硬约束的落点：「正常」必须永远是最弱的
  * 视觉权重，不能因为某个调用点想要更醒目而悄悄改掉，否则状态色迟早贬值到

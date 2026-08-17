@@ -5,53 +5,82 @@ import {
   Download,
   ExternalLink,
   FolderOpen,
-  OctagonAlert,
   RefreshCw,
   Save,
-  ShieldCheck,
   Upload,
 } from "lucide-react";
 
 import { GameIcon } from "@/components/game-icon";
+import { ErrorState, LoadingState } from "@/components/async-view";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardHeader, CardTitle, CardTitleGroup } from "@/components/ui/card";
-import {
-  Dialog,
-  DialogBody,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useAppState } from "@/lib/app-state";
+import { formatCount, formatDate, maskUid } from "@/lib/format";
 import { downloadAndVerifyIcon, isValidIconUrl } from "@/lib/game-icon";
-import { accountsOf, MOCK_GAMES, type GameId, type MockGameMeta } from "@/lib/mock-data";
+import type { GameMeta } from "@/lib/games";
+import { importArchiveViaPicker, listAccounts } from "@/lib/ipc-client";
+import type { AccountView, ImportReport } from "@/lib/ipc/generated";
+import { useAsync } from "@/lib/use-async";
 import { type ThemePreference, useTheme } from "@/lib/theme-provider";
 import { cn } from "@/lib/utils";
 
-/** 游戏目录：本地组件状态覆盖 mock 账号的初始值，模拟「更改目录」后的即时反馈。 */
-interface DirOverride {
-  path: string;
-  valid: boolean;
-}
+/**
+ * 提示文案：出现在所有"目前没有对应 IPC 命令"的按钮上——数据库位置/备份/
+ * 检查更新/导出都是如此，本轮 IPC 面只提供了
+ * `import_archive_via_picker` 这一条写入命令，其余维持禁用而不是假装可点。
+ */
+const NOT_WIRED_HINT = "该功能尚未接入 IPC 命令，本轮只接通了「导入存档」";
 
-/** 对应 ui-demo/settings.html。游戏目录、图标 URL + 重新下载、主题切换、导入导出入口。 */
+/**
+ * 对应 ui-demo/settings.html。
+ *
+ * ⚠️ 与原始设计稿的偏差：原「游戏」tab 有一个完整的「选择游戏目录」对话框
+ * （自动检测候选路径 + 手动浏览 + 校验可用性）。真实 IPC 面完全没有与
+ * 「游戏目录」相关的命令（既不能列出候选路径，也不能设置/校验目录），这是
+ * 采集链路本身尚未实现的一部分，不是这个页面的疏漏。继续渲染那个对话框
+ * 等于给用户一个点了会"确认成功"但背后什么也没发生的假交互，因此整个
+ * 对话框在这一轮被移除，游戏 tab 改为展示该游戏下的真实账号列表 +
+ * 「导入存档」入口——这也是当前 IPC 面下唯一真实可用的"把数据弄进来"的
+ * 方式。
+ */
 export function Settings() {
-  const { enabledGameIds } = useAppState();
-  const games = MOCK_GAMES.filter((g) => enabledGameIds.has(g.id));
-  const [dirOverrides, setDirOverrides] = useState<Partial<Record<GameId, DirOverride>>>({});
-  const [dirDialogGameId, setDirDialogGameId] = useState<GameId | undefined>(undefined);
+  const { games: allGames, enabledGameIds } = useAppState();
+  const games = allGames.filter((g) => enabledGameIds.has(g.id));
+
+  const accountsState = useAsync(() => listAccounts(), []);
+
+  type ImportState =
+    | { status: "idle" }
+    | { status: "importing" }
+    | { status: "success"; report: ImportReport }
+    | { status: "error"; message: string };
+  const [importState, setImportState] = useState<ImportState>({ status: "idle" });
+
+  async function handleImport() {
+    setImportState({ status: "importing" });
+    try {
+      const report = await importArchiveViaPicker();
+      if (report === null) {
+        // 用户按了取消——不是失败，回到 idle，不弹红色提示。
+        setImportState({ status: "idle" });
+        return;
+      }
+      setImportState({ status: "success", report });
+      accountsState.reload(); // 导入可能新建了账号/记录，立即刷新本页的账号列表
+    } catch (err) {
+      setImportState({ status: "error", message: err instanceof Error ? err.message : String(err) });
+    }
+  }
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <header className="flex shrink-0 flex-col px-7 pt-4.5 pb-3.5">
         <h1 className="text-[19px] font-bold tracking-tight">设置</h1>
-        <p className="mt-0.5 text-[11.5px] text-muted-foreground">管理游戏目录、通用偏好与版本信息</p>
+        <p className="mt-0.5 text-[11.5px] text-muted-foreground">管理账号数据、通用偏好与版本信息</p>
       </header>
 
       <Tabs defaultValue="game" className="flex min-h-0 flex-1 flex-col">
@@ -63,20 +92,38 @@ export function Settings() {
 
         <div className="scroll-area min-h-0 flex-1 overflow-y-auto overflow-x-hidden">
           <TabsContent value="game" className="px-7 py-5">
-            <SectionLabel>游戏与目录</SectionLabel>
-            <div className="flex flex-col gap-3">
-              {games.length === 0 && (
-                <p className="text-[12.5px] text-muted-foreground">尚未启用任何游戏。</p>
+            <SectionLabel>导入数据</SectionLabel>
+            <Card className="mb-3">
+              <div className="flex items-center justify-between gap-3">
+                <span className="text-[12.5px] text-muted-foreground">
+                  从导出工具（UIGF / WWGacha 等存档格式）导入抽卡记录。存档里的账号在本地不存在时会新建，已存在则合并去重。
+                </span>
+                <Button size="sm" onClick={() => void handleImport()} disabled={importState.status === "importing"}>
+                  <Upload className={cn(importState.status === "importing" && "animate-spin")} />
+                  {importState.status === "importing" ? "导入中…" : "导入存档"}
+                </Button>
+              </div>
+              {importState.status === "success" && <ImportSuccessSummary report={importState.report} />}
+              {importState.status === "error" && (
+                <p className="mt-2.5 border-t border-border pt-2.5 text-[11.5px] text-destructive">{importState.message}</p>
               )}
-              {games.map((game) => (
-                <GameSettingsCard
-                  key={game.id}
-                  game={game}
-                  dirOverride={dirOverrides[game.id]}
-                  onChangeDirClick={() => setDirDialogGameId(game.id)}
-                />
-              ))}
-            </div>
+            </Card>
+
+            <SectionLabel>游戏与账号</SectionLabel>
+            {accountsState.status === "loading" && <LoadingState label="正在加载账号列表…" />}
+            {accountsState.status === "error" && <ErrorState message={accountsState.message} onRetry={accountsState.reload} />}
+            {accountsState.status === "ready" && (
+              <div className="flex flex-col gap-3">
+                {games.length === 0 && <p className="text-[12.5px] text-muted-foreground">尚未启用任何游戏。</p>}
+                {games.map((game) => (
+                  <GameSettingsCard
+                    key={game.id}
+                    game={game}
+                    accounts={accountsState.data.filter((a) => a.pluginId === game.id)}
+                  />
+                ))}
+              </div>
+            )}
           </TabsContent>
 
           <TabsContent value="general" className="flex flex-col gap-6 px-7 py-5">
@@ -88,15 +135,30 @@ export function Settings() {
           </TabsContent>
         </div>
       </Tabs>
+    </div>
+  );
+}
 
-      <GameDirDialog
-        gameId={dirDialogGameId}
-        onOpenChange={(open) => !open && setDirDialogGameId(undefined)}
-        onConfirm={(gameId, override) => {
-          setDirOverrides((prev) => ({ ...prev, [gameId]: override }));
-          setDirDialogGameId(undefined);
-        }}
-      />
+function ImportSuccessSummary({ report }: { report: ImportReport }) {
+  return (
+    <div className="mt-2.5 border-t border-border pt-2.5 text-[11.5px]">
+      <p className="text-primary">
+        已按 <span className="font-semibold">{report.formatId}</span> 格式导入
+      </p>
+      <ul className="mt-1.5 flex flex-col gap-1">
+        {report.accounts.map((acc) => (
+          <li key={acc.accountId} className="text-muted-foreground">
+            {acc.gameId} · UID {maskUid(acc.uid)}：识别 {formatCount(acc.recordsSeen)} 条，新增{" "}
+            <span className="font-semibold text-foreground">{formatCount(acc.recordsInserted)}</span> 条
+            {acc.recordsSkipped > 0 && (
+              <>
+                ，跳过 {formatCount(acc.recordsSkipped)} 条重复
+                {acc.recordsSkipped === acc.recordsSeen && "（与已有数据完全重复，属正常现象，不是导入失败）"}
+              </>
+            )}
+          </li>
+        ))}
+      </ul>
     </div>
   );
 }
@@ -113,19 +175,7 @@ function SectionLabel({ children }: { children: ReactNode }) {
 // 游戏 tab
 // ============================================================
 
-function GameSettingsCard({
-  game,
-  dirOverride,
-  onChangeDirClick,
-}: {
-  game: MockGameMeta;
-  dirOverride: DirOverride | undefined;
-  onChangeDirClick: () => void;
-}) {
-  const primaryAccount = accountsOf(game.id)[0];
-  const dirPath = dirOverride?.path ?? primaryAccount?.gameDirPath;
-  const dirValid = dirOverride?.valid ?? primaryAccount?.gameDirValid ?? true;
-
+function GameSettingsCard({ game, accounts }: { game: GameMeta; accounts: AccountView[] }) {
   const [iconUrl, setIconUrl] = useState(game.iconUrl ?? "");
   const [iconState, setIconState] = useState<
     { status: "idle" } | { status: "loading" } | { status: "success"; previewSrc: string } | { status: "error"; message: string }
@@ -152,7 +202,7 @@ function GameSettingsCard({
   }
 
   return (
-    <Card className={cn(!dirValid && "border-destructive bg-destructive-bg")}>
+    <Card>
       <CardHeader>
         <GameIcon
           displayName={game.displayName}
@@ -161,34 +211,36 @@ function GameSettingsCard({
         />
         <CardTitleGroup>
           <CardTitle>{game.displayName}</CardTitle>
+          <span className="text-[11.5px] text-muted-foreground">{accounts.length} 个账号</span>
         </CardTitleGroup>
-        {!dirValid && (
-          <Badge variant="destructive" className="ml-auto">
-            <OctagonAlert />
-            目录已失效
-          </Badge>
-        )}
       </CardHeader>
 
-      <div>
-        <span className="mb-1.5 block text-[11.5px] text-muted-foreground">游戏目录</span>
-        <div className="flex items-center gap-2.5">
-          <span
-            className={cn(
-              "min-w-0 flex-1 overflow-hidden font-mono text-[12.5px] text-ellipsis whitespace-nowrap",
-              !dirValid && "text-destructive",
-            )}
-          >
-            {dirPath ?? "尚未配置"}
-          </span>
-          <Button variant="outline" size="sm" onClick={onChangeDirClick}>
-            更改
-          </Button>
+      {accounts.length === 0 ? (
+        <p className="text-[11.5px] text-muted-foreground">还没有本地账号，导入存档后会出现在这里。</p>
+      ) : (
+        <div className="flex flex-col">
+          {accounts.map((account) => (
+            <div
+              key={account.id}
+              className="flex items-center justify-between gap-3 border-b border-border py-1.75 text-[12.5px] last:border-b-0"
+            >
+              <span className="font-mono tabular-nums">{maskUid(account.gameUid)}</span>
+              <span className="text-muted-foreground">{account.region}</span>
+              <span className="font-mono text-muted-foreground tabular-nums">{formatCount(account.recordCount)} 条</span>
+              <span className="text-muted-foreground">
+                {account.lastCollectedAt ? `${formatDate(account.lastCollectedAt)} 采集` : "从未采集"}
+              </span>
+            </div>
+          ))}
         </div>
-      </div>
+      )}
 
       <div className="mt-3">
-        <span className="mb-1.5 block text-[11.5px] text-muted-foreground">游戏图标</span>
+        <span className="mb-1.5 block text-[11.5px] text-muted-foreground">
+          游戏图标
+          {/* GameView 目前不透出 iconUrl（见 lib/games.ts 的 GameMeta 文档），
+              这里填的地址只在本次会话内生效，刷新即丢失，纯粹用于预览下载校验逻辑。 */}
+        </span>
         <div className="flex items-center gap-2.5">
           <Input
             value={iconUrl}
@@ -207,134 +259,6 @@ function GameSettingsCard({
         {iconState.status === "error" && <p className="mt-1.5 text-[11px] text-destructive">{iconState.message}</p>}
       </div>
     </Card>
-  );
-}
-
-function GameDirDialog({
-  gameId,
-  onOpenChange,
-  onConfirm,
-}: {
-  gameId: GameId | undefined;
-  onOpenChange: (open: boolean) => void;
-  onConfirm: (gameId: GameId, override: DirOverride) => void;
-}) {
-  const game = MOCK_GAMES.find((g) => g.id === gameId);
-  const account = gameId ? accountsOf(gameId)[0] : undefined;
-  const [selectedPath, setSelectedPath] = useState<string | undefined>(undefined);
-  const [manualPath, setManualPath] = useState("");
-
-  const candidates = account
-    ? [
-        { path: account.gameDirPath, source: "注册表", recommended: true },
-        { path: `${account.gameDirPath}\\..\\Backup`, source: "常见安装位置", recommended: false },
-      ]
-    : [];
-
-  const finalPath = manualPath.trim() || selectedPath || candidates[0]?.path;
-
-  // Dialog 容器保持常驻挂载，只把内容按 game/account 是否就绪来决定渲染——
-  // 这样 onOpenChange(false) 时 Radix 能正常跑完关闭动画，而不是父组件
-  // 一把状态清空导致整棵子树连着动画一起被硬拔掉。
-  return (
-    <Dialog open={gameId !== undefined} onOpenChange={onOpenChange}>
-      {game && account && (
-      <DialogContent size="lg">
-        <DialogHeader>
-          <DialogTitle>选择游戏目录 · {game.displayName}</DialogTitle>
-          <DialogDescription>
-            Gacha Studio 需要读取游戏目录下的缓存文件来获取抽卡记录链接。目录不会被修改。
-          </DialogDescription>
-        </DialogHeader>
-        <DialogBody>
-          {!account.gameDirValid && (
-            <div className="mb-3.5 flex items-start gap-2.5 rounded-[var(--radius)] border border-destructive bg-destructive-bg px-3.5 py-2.5 text-destructive">
-              <OctagonAlert className="mt-px size-4 shrink-0" />
-              <div>
-                <span className="mb-0.5 block text-[12.5px] font-semibold">当前记录的目录已失效</span>
-                <span className="block font-mono text-xs opacity-85">{account.gameDirPath}</span>
-              </div>
-            </div>
-          )}
-
-          <div className="mb-2.5 text-[11px] font-semibold tracking-wider text-faint-foreground uppercase">
-            自动检测结果
-          </div>
-          <div className="mb-4 flex flex-col gap-1.5">
-            {candidates.map((candidate) => (
-              <label
-                key={candidate.path}
-                className={cn(
-                  "relative flex items-center gap-3 rounded-[var(--radius)] border border-border bg-card px-3.5 py-2.25",
-                  (selectedPath ?? candidates[0]?.path) === candidate.path &&
-                    !manualPath &&
-                    "border-primary bg-primary-tint",
-                )}
-              >
-                <input
-                  type="radio"
-                  name="dir-candidate"
-                  className="size-3.75 accent-primary"
-                  checked={(selectedPath ?? candidates[0]?.path) === candidate.path && !manualPath}
-                  onChange={() => {
-                    setSelectedPath(candidate.path);
-                    setManualPath("");
-                  }}
-                />
-                <div className="flex min-w-0 flex-1 flex-col gap-1">
-                  <span className="overflow-hidden font-mono text-[12.5px] text-ellipsis whitespace-nowrap">
-                    {candidate.path}
-                  </span>
-                  <div className="flex items-center gap-2">
-                    <Badge variant="neutral">{candidate.source}</Badge>
-                    <Badge variant="neutral">
-                      <Check />
-                      可用
-                    </Badge>
-                  </div>
-                </div>
-                {candidate.recommended && <Badge variant="primary">推荐</Badge>}
-              </label>
-            ))}
-          </div>
-
-          <div className="mb-2.5 text-[11px] font-semibold tracking-wider text-faint-foreground uppercase">
-            手动选择
-          </div>
-          <div className="mb-3.5 flex items-center gap-2.5">
-            <Input
-              value={manualPath}
-              onChange={(e) => setManualPath(e.target.value)}
-              placeholder="粘贴或输入游戏目录路径…"
-              className="flex-1"
-            />
-            <Button variant="outline">
-              <FolderOpen />
-              浏览…
-            </Button>
-          </div>
-
-          <p className="flex items-center gap-2 border-t border-border pt-3 text-[11.5px] text-muted-foreground">
-            <ShieldCheck className="size-3.5 shrink-0 text-faint-foreground" />
-            数据仅在本机读取，凭据不会离开你的电脑
-          </p>
-        </DialogBody>
-        <DialogFooter>
-          <Button variant="outline" onClick={() => onOpenChange(false)}>
-            取消
-          </Button>
-          <Button
-            onClick={() => {
-              if (!gameId || !finalPath) return;
-              onConfirm(gameId, { path: finalPath, valid: true });
-            }}
-          >
-            使用此目录
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-      )}
-    </Dialog>
   );
 }
 
@@ -387,6 +311,8 @@ function GeneralTab() {
             </Select>
           </SettingsRow>
         </Card>
+        {/* TODO：主题偏好目前只落 localStorage，没有走宿主持久化——设置项持久化
+            需要新的 kv 表 + Rust 迁移，本轮 IPC 面未提供，超出本次改动范围。 */}
       </section>
 
       <section>
@@ -394,35 +320,24 @@ function GeneralTab() {
         <Card>
           <SettingsRow label="数据库位置">
             <div className="flex items-center gap-2.5">
-              <span className="font-mono text-[11.5px] text-muted-foreground">
-                ~/AppData/Roaming/GachaStudio/data/gacha-studio.db
-              </span>
-              <Button variant="outline" size="sm">
+              <span className="font-mono text-[11.5px] text-muted-foreground">（暂无对应 IPC 命令可读取真实路径）</span>
+              <Button variant="outline" size="sm" disabled title={NOT_WIRED_HINT}>
                 <FolderOpen />
                 打开所在文件夹
               </Button>
             </div>
           </SettingsRow>
           <SettingsRow label="备份">
-            <div className="flex items-center gap-2.5">
-              <span className="text-[11.5px] text-muted-foreground">上次备份：3 天前</span>
-              <Button variant="outline" size="sm">
-                <Save />
-                立即备份
-              </Button>
-            </div>
+            <Button variant="outline" size="sm" disabled title={NOT_WIRED_HINT}>
+              <Save />
+              立即备份
+            </Button>
           </SettingsRow>
-          <SettingsRow label="导入 / 导出">
-            <div className="flex items-center gap-2.5">
-              <Button variant="outline" size="sm">
-                <Upload />
-                导入
-              </Button>
-              <Button variant="outline" size="sm">
-                <Download />
-                导出
-              </Button>
-            </div>
+          <SettingsRow label="导出">
+            <Button variant="outline" size="sm" disabled title={NOT_WIRED_HINT}>
+              <Download />
+              导出
+            </Button>
           </SettingsRow>
         </Card>
       </section>
@@ -473,13 +388,10 @@ function AboutTab() {
         <SectionLabel>更新</SectionLabel>
         <Card>
           <SettingsRow label="检查更新">
-            <div className="flex items-center gap-2.5">
-              <span className="text-[11.5px] text-muted-foreground">上次检查：3 天前</span>
-              <Button variant="outline" size="sm">
-                <RefreshCw />
-                检查更新
-              </Button>
-            </div>
+            <Button variant="outline" size="sm" disabled title={NOT_WIRED_HINT}>
+              <RefreshCw />
+              检查更新
+            </Button>
           </SettingsRow>
         </Card>
       </section>

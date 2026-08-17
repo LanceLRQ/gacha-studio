@@ -1,8 +1,9 @@
-import { useRef, useState } from "react";
+import { useState } from "react";
 import type { ReactNode } from "react";
-import { Check, RefreshCw, Table as TableIcon } from "lucide-react";
+import { RefreshCw, Table as TableIcon } from "lucide-react";
 import { Link, Navigate, useParams } from "react-router-dom";
 
+import { EmptyState, ErrorState, LoadingState } from "@/components/async-view";
 import { GameIcon } from "@/components/game-icon";
 import { PityBar } from "@/components/pity-bar";
 import { RarityBar } from "@/components/rarity-bar";
@@ -14,49 +15,141 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useAppState } from "@/lib/app-state";
 import { formatCount, formatDate, maskUid } from "@/lib/format";
-import {
-  MOCK_GAMES,
-  RETENTION_CONSERVATIVE_DAYS,
-  accountsOf,
-  bannerRarityDistribution,
-  getGameDetail,
-  type MockBanner,
-  type MockTierLabels,
-} from "@/lib/mock-data";
-import { computeAccountRisk } from "@/lib/risk";
+import { localizedText, rarityTiers, tierLabel, type GameMeta } from "@/lib/games";
+import { accountAnalysis, listAccounts, listRecords } from "@/lib/ipc-client";
+import type { AccountAnalysisView, AccountView, CurveEvaluationView, PityPullView } from "@/lib/ipc/generated";
+import { useAsync } from "@/lib/use-async";
+import type { BannerSpec, RaritySpec } from "gs-plugin-kit/types";
 
 /**
- * 游戏详情页——对应 ui-demo/game-genshin.html。总视图 tab + 每卡池一个 tab
- * （§4.7）。栅格自适应卡池数量，不写死列数（`repeat(auto-fit,minmax(...))`，
- * 规避 §4.6 绝区零第四卡池导致换行错位的三方教训）。
+ * 单个卡池的统计口径——由两条独立数据源拼出来，两者覆盖范围不同，务必分清楚：
  *
- * ⚠️ min-height:0 落点：本页根节点、Tabs 根节点、scroll-area 容器均需要
- * 显式声明——Radix Tabs.Root 默认渲染一个普通 div，不会替你补上 flex 布局，
- * 这一层必须自己接上，否则 TabsList 会被内容撑到跟着滚动。
+ * - `totalDraws`/`rarityCounts`/`otherCount`：来自 `list_records` 按
+ *   `bannerKey`/`rarities` 过滤后的 `total`（每档一次轻量调用，`pageSize=1`
+ *   只为拿计数，不拉记录正文）。覆盖**这个卡池的全部记录**，与是否声明
+ *   共享保底无关。
+ * - `pity`：来自 `account_analysis` 的 `pityProgress`。**只覆盖 manifest
+ *   `pityGroups` 声明过的卡池**——原神的 302/200/500/100 这类未声明共享
+ *   保底的卡池，这里恒为 `undefined`，如实反映"没有声明就没有保底数据"。
+ */
+interface BannerStats {
+  banner: BannerSpec;
+  totalDraws: number;
+  /** 键为稀有度码，值为该卡池内命中该档的记录数（来自 list_records total）。 */
+  rarityCounts: Record<string, number>;
+  /** `totalDraws` 减去 `rarityCounts` 已知档位之和——稀有度未知/不在声明范围内的记录，两者混在一起，因为这里的计数口径拿不到再细分的依据。 */
+  otherCount: number;
+  pity?: {
+    groupKey: string;
+    hardPity: number;
+    currentPity: number;
+    nextPullProbability: CurveEvaluationView;
+    unknownRarityCount: number;
+    /** 命中该卡池顶级保底目标的抽取，按时间倒序。 */
+    topTierPulls: PityPullView[];
+    /** 与本卡池共享同一保底池的其它卡池展示名（不含本卡池自己）。 */
+    sharedWith: string[];
+    avgGap?: number;
+    worstGap?: number;
+    bestGap?: number;
+  };
+}
+
+async function loadBannerStats(
+  accountId: number,
+  banners: BannerSpec[],
+  ladder: string[],
+  analysis: AccountAnalysisView,
+  bannerLabel: (id: string) => string,
+): Promise<BannerStats[]> {
+  return Promise.all(
+    banners.map(async (banner) => {
+      const [totalPage, ...rarityPages] = await Promise.all([
+        listRecords({ accountId, bannerKey: banner.id, pageSize: 1 }),
+        ...ladder.map((code) => listRecords({ accountId, bannerKey: banner.id, rarities: [code], pageSize: 1 })),
+      ]);
+      const rarityCounts: Record<string, number> = {};
+      ladder.forEach((code, i) => {
+        rarityCounts[code] = rarityPages[i]?.total ?? 0;
+      });
+      const knownSum = Object.values(rarityCounts).reduce((sum, n) => sum + n, 0);
+      const otherCount = Math.max(0, totalPage.total - knownSum);
+
+      const group = analysis.pityProgress.find((g) => g.pulls.some((p) => p.bannerKey === banner.id));
+      let pity: BannerStats["pity"];
+      if (group) {
+        const bannerPulls = group.pulls.filter((p) => p.bannerKey === banner.id);
+        const topTierPulls = bannerPulls.filter((p) => p.isPityHit).slice().reverse();
+        const gaps = topTierPulls.map((p) => p.pullsSinceLastHit);
+        const sharedWith = Array.from(new Set(group.pulls.map((p) => p.bannerKey)))
+          .filter((id) => id !== banner.id)
+          .map(bannerLabel);
+        pity = {
+          groupKey: group.pityGroupKey,
+          hardPity: group.hardPity,
+          currentPity: group.currentPity,
+          nextPullProbability: group.nextPullProbability,
+          unknownRarityCount: group.unknownRarityCount,
+          topTierPulls,
+          sharedWith,
+          avgGap: gaps.length > 0 ? Math.round((gaps.reduce((a, b) => a + b, 0) / gaps.length) * 10) / 10 : undefined,
+          worstGap: gaps.length > 0 ? Math.max(...gaps) : undefined,
+          bestGap: gaps.length > 0 ? Math.min(...gaps) : undefined,
+        };
+      }
+
+      return { banner, totalDraws: totalPage.total, rarityCounts, otherCount, pity };
+    }),
+  );
+}
+
+/**
+ * 游戏详情页——对应 ui-demo/game-genshin.html。总视图 tab + 每卡池一个 tab。
+ *
+ * ⚠️ 与原始设计稿的偏差（均因真实 IPC 面没有对应数据，不编造）：
+ * 1. 账号头部不再展示"保留期风险倒计时"——原始实现依赖
+ *    `RetentionPolicy.conservativeDays`，`GameView` 未透出该字段。
+ * 2. "抽卡时间线（按月）"整节移除——需要对账号全部记录做月度聚合，现有
+ *    `list_records` 是分页窄口（`MAX_PAGE_SIZE=200`），拉全量记录来客户端
+ *    聚合违反这个窄口存在的理由（见 `src-tauri/src/commands.rs` 顶部注释）。
+ *    改为一行说明文字，不假装图表存在。
+ * 3. 每卡池"五星记录"表去掉了"是否歪"列——`GuaranteeRule`（50/50 命中与否）
+ *    不在 `PityPullView` 里，没有数据支撑。
+ *
+ * ⚠️ min-height:0 落点同旧版注释：本页根节点、Tabs 根节点、scroll-area
+ * 容器均需要显式声明。
  */
 export function GameDetail() {
   const { gameId } = useParams<{ gameId: string }>();
-  const { enabledGameIds } = useAppState();
-  const game = MOCK_GAMES.find((g) => g.id === gameId);
+  const { games, enabledGameIds } = useAppState();
+  const game = games.find((g) => g.id === gameId);
 
-  const accounts = game ? accountsOf(game.id) : [];
-  const [selectedAccountId, setSelectedAccountId] = useState<number | undefined>(accounts[0]?.id);
+  const accountsState = useAsync(() => listAccounts(), []);
+  const [selectedAccountId, setSelectedAccountId] = useState<number | undefined>(undefined);
   const [activeTab, setActiveTab] = useState("overview");
-  const scrollRef = useRef<HTMLDivElement>(null);
+
+  // ⚠️ 下面两个 useAsync/useState 调用不能放到「game 不存在就 Navigate」这条
+  // 早退之后——React 的 Hooks 规则要求每次渲染调用的 hook 数量与顺序一致，
+  // 一旦某次渲染因为早退跳过了后面的 hook 调用，下一次渲染只要 game 又存在
+  // 了就会对不上顺序。因此这里先把依赖 game 的计算都算出来（用可选链兜底
+  // game 可能是 undefined 的情况），早退判断挪到所有 hook 调用之后。
+  const accounts: AccountView[] =
+    accountsState.status === "ready" && game ? accountsState.data.filter((a) => a.pluginId === game.id) : [];
+  const account = accounts.find((a) => a.id === selectedAccountId) ?? accounts[0];
+
+  const detailState = useAsync(async () => {
+    if (!account || !game) return undefined;
+    const analysis = await accountAnalysis(account.id);
+    const bannerStats = await loadBannerStats(account.id, game.banners, game.rarity.ladder, analysis, (id) => {
+      const banner = game.banners.find((b) => b.id === id);
+      return banner ? localizedText(banner.displayName, id) : id;
+    });
+    return { analysis, bannerStats };
+  }, [account?.id, game?.id]);
 
   if (!game || !enabledGameIds.has(game.id)) {
     return <Navigate to="/" replace />;
   }
-
-  const account = accounts.find((a) => a.id === selectedAccountId) ?? accounts[0];
-  const detail = getGameDetail(game.id);
-  const risk = account
-    ? computeAccountRisk({
-        gameDirValid: account.gameDirValid,
-        lastSuccessfulUpdateAt: account.lastSuccessfulUpdateAt,
-        retentionConservativeDays: RETENTION_CONSERVATIVE_DAYS,
-      })
-    : undefined;
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
@@ -67,41 +160,28 @@ export function GameDetail() {
             <h1 className="text-[19px] font-bold tracking-tight">{game.displayName}</h1>
             {account && (
               <p className="mt-0.5 text-[11.5px] text-muted-foreground">
-                UID <span className="font-mono tabular-nums">{maskUid(account.uid)}</span> · {account.serverLabel} ·
-                上次更新 {account.lastSuccessfulUpdateAt ? formatDate(account.lastSuccessfulUpdateAt) : "从未更新"}
-                {risk && (
-                  <>
-                    {" "}
-                    · {risk.remainingDays <= 0 ? "数据已超出保留期" : (
-                      <>
-                        还剩 <span className="font-mono font-semibold text-foreground tabular-nums">{risk.remainingDays}</span> 天
-                      </>
-                    )}
-                  </>
-                )}
+                UID <span className="font-mono tabular-nums">{maskUid(account.gameUid)}</span> · {account.region} ·
+                上次采集 {account.lastCollectedAt ? formatDate(account.lastCollectedAt) : "从未采集"}
               </p>
             )}
           </div>
         </div>
         <div className="flex items-center gap-2">
           {accounts.length > 1 && account && (
-            <Select
-              value={String(account.id)}
-              onValueChange={(v) => setSelectedAccountId(Number(v))}
-            >
+            <Select value={String(account.id)} onValueChange={(v) => setSelectedAccountId(Number(v))}>
               <SelectTrigger>
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
                 {accounts.map((a) => (
                   <SelectItem key={a.id} value={String(a.id)}>
-                    {maskUid(a.uid)}
+                    {maskUid(a.gameUid)}
                   </SelectItem>
                 ))}
               </SelectContent>
             </Select>
           )}
-          <Button>
+          <Button disabled title="采集/更新功能尚未接入 IPC，请到设置页使用「导入存档」">
             <RefreshCw />
             更新记录
           </Button>
@@ -116,163 +196,202 @@ export function GameDetail() {
         </div>
       </header>
 
-      <Tabs
-        value={activeTab}
-        onValueChange={(value) => {
-          setActiveTab(value);
-          scrollRef.current?.scrollTo({ top: 0 });
-        }}
-        className="flex min-h-0 flex-1 flex-col"
-      >
-        <TabsList>
-          <TabsTrigger value="overview">总视图</TabsTrigger>
-          {detail.banners.map((banner) => (
-            <TabsTrigger key={banner.id} value={banner.id}>
-              {banner.displayName}
-            </TabsTrigger>
-          ))}
-        </TabsList>
+      {accountsState.status === "loading" && <LoadingState label="正在加载账号列表…" />}
+      {accountsState.status === "error" && <ErrorState message={accountsState.message} onRetry={accountsState.reload} />}
+      {accountsState.status === "ready" && accounts.length === 0 && (
+        <EmptyState
+          title="该游戏下还没有本地账号"
+          description="前往设置页导入一份抽卡存档后，这里会展示保底进度与稀有度分布。"
+          action={
+            <Button asChild size="sm">
+              <Link to="/settings">前往设置页导入</Link>
+            </Button>
+          }
+        />
+      )}
+      {accountsState.status === "ready" && account && (
+        <>
+          {detailState.status === "loading" && <LoadingState label="正在计算保底进度与卡池统计…" />}
+          {detailState.status === "error" && <ErrorState message={detailState.message} onRetry={detailState.reload} />}
+          {detailState.status === "ready" && detailState.data && (
+            <GameDetailTabs
+              game={game}
+              activeTab={activeTab}
+              onTabChange={setActiveTab}
+              analysis={detailState.data.analysis}
+              bannerStats={detailState.data.bannerStats}
+            />
+          )}
+        </>
+      )}
+    </div>
+  );
+}
 
-        <div ref={scrollRef} className="scroll-area min-h-0 flex-1 overflow-y-auto overflow-x-hidden">
-          <TabsContent value="overview" className="flex flex-col gap-6 px-7 pt-5 pb-7">
-            <section>
-              <SectionLabel>卡池保底概览</SectionLabel>
-              <div className="grid grid-cols-[repeat(auto-fit,minmax(180px,1fr))] gap-3">
-                {detail.banners.map((banner) => (
-                  <PoolOverviewCard key={banner.id} banner={banner} topTierLabel={game.tierLabels.top} />
-                ))}
-              </div>
-            </section>
+function GameDetailTabs({
+  game,
+  activeTab,
+  onTabChange,
+  analysis,
+  bannerStats,
+}: {
+  game: GameMeta;
+  activeTab: string;
+  onTabChange: (value: string) => void;
+  analysis: AccountAnalysisView;
+  bannerStats: BannerStats[];
+}) {
+  const tiers = rarityTiers(game.rarity);
+  const recentTopTier = bannerStats
+    .flatMap((s) => (s.pity ? s.pity.topTierPulls.map((p) => ({ pull: p, bannerName: localizedText(s.banner.displayName, s.banner.id) })) : []))
+    .sort((a, b) => b.pull.occurredAt - a.pull.occurredAt)
+    .slice(0, 10);
 
-            <section>
-              <SectionLabel>最近{game.tierLabels.top}记录</SectionLabel>
+  return (
+    <Tabs value={activeTab} onValueChange={onTabChange} className="flex min-h-0 flex-1 flex-col">
+      <TabsList>
+        <TabsTrigger value="overview">总视图</TabsTrigger>
+        {bannerStats.map((s) => (
+          <TabsTrigger key={s.banner.id} value={s.banner.id}>
+            {localizedText(s.banner.displayName, s.banner.id)}
+          </TabsTrigger>
+        ))}
+      </TabsList>
+
+      <div className="scroll-area min-h-0 flex-1 overflow-y-auto overflow-x-hidden">
+        <TabsContent value="overview" className="flex flex-col gap-6 px-7 pt-5 pb-7">
+          <section>
+            <SectionLabel>卡池保底概览</SectionLabel>
+            <div className="grid grid-cols-[repeat(auto-fit,minmax(180px,1fr))] gap-3">
+              {bannerStats.map((s) => (
+                <PoolOverviewCard key={s.banner.id} stats={s} topCode={tiers.top} topTierLabel={tierLabel(tiers.top)} />
+              ))}
+            </div>
+          </section>
+
+          <section>
+            <SectionLabel>最近{tierLabel(tiers.top)}记录</SectionLabel>
+            {recentTopTier.length === 0 ? (
+              <p className="text-[11.5px] text-muted-foreground">
+                暂无{tierLabel(tiers.top)}记录，或该账号所有卡池均未声明共享保底（无法计算命中记录）。
+              </p>
+            ) : (
               <div className="flex flex-wrap gap-2.5">
-                {detail.recentFiveStars.map((entry) => (
+                {recentTopTier.map(({ pull, bannerName }) => (
                   <div
-                    key={`${entry.itemName}-${entry.occurredAt}`}
+                    key={pull.recordId}
                     className="flex w-[176px] shrink-0 flex-col gap-1 rounded-[var(--radius)] border border-border bg-card px-3 py-2.5"
                   >
                     <div className="flex items-baseline gap-1.5">
                       <span className="-mr-0.5 size-1.5 shrink-0 rounded-full bg-rarity-5" />
                       <span className="min-w-0 flex-1 overflow-hidden text-[12.5px] font-semibold text-ellipsis whitespace-nowrap">
-                        {entry.itemName}
+                        {pull.itemId}
                       </span>
-                      <span className="shrink-0 text-[10px] whitespace-nowrap text-faint-foreground">
-                        {entry.poolLabel}
-                      </span>
+                      <span className="shrink-0 text-[10px] whitespace-nowrap text-faint-foreground">{bannerName}</span>
                     </div>
-                    <div className="font-mono text-[11px] text-muted-foreground tabular-nums">
-                      {formatDate(entry.occurredAt)}
-                    </div>
+                    <div className="font-mono text-[11px] text-muted-foreground tabular-nums">{formatDate(pull.occurredAt)}</div>
                     <div className="text-[11.5px] text-muted-foreground">
-                      距上次 <span className="font-mono font-semibold text-foreground tabular-nums">{entry.gap}</span> 抽
+                      距上次 <span className="font-mono font-semibold text-foreground tabular-nums">{pull.pullsSinceLastHit}</span> 抽
                     </div>
                   </div>
                 ))}
               </div>
-            </section>
+            )}
+          </section>
 
-            <section>
-              <SectionLabel>抽卡时间线（按月）</SectionLabel>
-              <MonthlyTimeline entries={detail.timeline} />
-            </section>
+          <section>
+            <SectionLabel>抽卡时间线（按月）</SectionLabel>
+            <p className="text-[11.5px] text-muted-foreground">
+              该图表需要对账号全部记录做月度聚合统计，现有 `list_records` 是带上限的分页窄口
+              （单页 ≤200 条），为画一张图拉取全量记录违反这个窄口存在的理由，本轮未实现，需要后端新增聚合接口后再补上。
+            </p>
+          </section>
 
-            <section>
-              <SectionLabel>稀有度分布</SectionLabel>
-              <RarityBar {...detail.rarityDistribution} labels={game.tierLabels} />
-            </section>
+          <section>
+            <SectionLabel>稀有度分布</SectionLabel>
+            <RarityBar distribution={analysis.rarityDistribution} rarity={game.rarity} />
+          </section>
+        </TabsContent>
+
+        {bannerStats.map((s) => (
+          <TabsContent key={s.banner.id} value={s.banner.id} className="flex flex-col gap-6 px-7 pt-5 pb-7">
+            <BannerPanel stats={s} rarity={game.rarity} />
           </TabsContent>
-
-          {detail.banners.map((banner) => (
-            <TabsContent key={banner.id} value={banner.id} className="flex flex-col gap-6 px-7 pt-5 pb-7">
-              <BannerPanel banner={banner} tierLabels={game.tierLabels} />
-            </TabsContent>
-          ))}
-        </div>
-      </Tabs>
-    </div>
+        ))}
+      </div>
+    </Tabs>
   );
 }
 
 function SectionLabel({ children }: { children: ReactNode }) {
   return (
-    <div className="mb-2.5 text-[11px] font-semibold tracking-wider text-faint-foreground uppercase">
-      {children}
-    </div>
+    <div className="mb-2.5 text-[11px] font-semibold tracking-wider text-faint-foreground uppercase">{children}</div>
   );
 }
 
-function PoolOverviewCard({ banner, topTierLabel }: { banner: MockBanner; topTierLabel: string }) {
+function PoolOverviewCard({ stats, topCode, topTierLabel }: { stats: BannerStats; topCode: string; topTierLabel: string }) {
   return (
     <Card>
-      <CardTitle>{banner.displayName}</CardTitle>
-      {banner.completed ? (
-        <div className="flex min-h-[34px] items-center">
-          <Badge variant="neutral">
-            <Check />
-            已完成
-          </Badge>
+      <CardTitle>{localizedText(stats.banner.displayName, stats.banner.id)}</CardTitle>
+      {stats.pity ? (
+        <div className="my-1">
+          <PityBar current={stats.pity.currentPity} cap={stats.pity.hardPity} tone="r5" />
         </div>
       ) : (
-        banner.pity5 && (
-          <div className="my-1">
-            <PityBar current={banner.pity5.current} cap={banner.pity5.cap} tone="r5" />
-          </div>
-        )
+        <p className="text-[11px] text-faint-foreground">未声明共享保底，无进度数据</p>
       )}
       <p className="text-[11.5px] text-muted-foreground">
-        总抽数 <span className="font-mono tabular-nums">{formatCount(banner.totalDraws)}</span> · {topTierLabel}{" "}
-        <span className="font-mono tabular-nums">{banner.fiveStarCount}</span> 个
+        总抽数 <span className="font-mono tabular-nums">{formatCount(stats.totalDraws)}</span> · {topTierLabel}{" "}
+        <span className="font-mono tabular-nums">{formatCount(stats.rarityCounts[topCode] ?? 0)}</span> 个
       </p>
     </Card>
   );
 }
 
-function BannerPanel({
-  banner,
-  tierLabels,
-}: {
-  banner: MockBanner;
-  tierLabels: MockTierLabels;
-}) {
-  const rarity = bannerRarityDistribution(banner);
+function BannerPanel({ stats, rarity }: { stats: BannerStats; rarity: RaritySpec }) {
+  const tiers = rarityTiers(rarity);
+  const distribution = {
+    counts: stats.rarityCounts,
+    unknownCount: stats.otherCount,
+    unrecognizedCount: 0,
+  };
+
   return (
     <>
       <section>
         <SectionLabel>保底进度</SectionLabel>
         <Card>
-          {banner.completed ? (
-            <div className="flex items-center gap-2.5">
-              <Badge variant="neutral">
-                <Check />
-                已完成
-              </Badge>
-              <span className="text-xs text-muted-foreground">
-                {banner.displayName}为一次性卡池，{formatCount(banner.totalDraws)} 抽已全部抽完，不再产生新的保底进度。
-              </span>
-            </div>
-          ) : (
+          {stats.pity ? (
             <>
-              {banner.pity5 && (
-                <PityBar label={`${tierLabels.top}保底`} current={banner.pity5.current} cap={banner.pity5.cap} tone="r5" />
-              )}
-              {banner.pity4 && (
-                <div className="mt-2.5">
-                  <PityBar
-                    label={`${tierLabels.second}保底`}
-                    current={banner.pity4.current}
-                    cap={banner.pity4.cap}
-                    tone="r4"
-                  />
-                </div>
-              )}
-              {banner.toNextPity5 !== undefined && (
+              <PityBar label={`${tierLabel(tiers.top)}保底`} current={stats.pity.currentPity} cap={stats.pity.hardPity} tone="r5" />
+              {stats.pity.nextPullProbability.kind === "value" ? (
                 <p className="mt-2.5 border-t border-border pt-2.5 text-xs text-muted-foreground">
-                  距离下次{tierLabels.top}保底还有{" "}
-                  <span className="font-mono font-semibold text-foreground tabular-nums">{banner.toNextPity5}</span> 抽
+                  下一抽命中概率约{" "}
+                  <span className="font-mono font-semibold text-foreground tabular-nums">
+                    {(stats.pity.nextPullProbability.value * 100).toFixed(1)}%
+                  </span>
+                </p>
+              ) : (
+                <p className="mt-2.5 border-t border-border pt-2.5 text-xs text-muted-foreground">
+                  概率曲线暂不支持计算：{stats.pity.nextPullProbability.reason}
+                </p>
+              )}
+              {stats.pity.sharedWith.length > 0 && (
+                <p className="mt-1.5 text-[11px] text-faint-foreground">
+                  该保底与「{stats.pity.sharedWith.join("、")}」共享同一计数
+                </p>
+              )}
+              {stats.pity.unknownRarityCount > 0 && (
+                <p className="mt-1.5 text-[11px] text-faint-foreground">
+                  另有 {stats.pity.unknownRarityCount} 条记录稀有度未知，未计入保底计数
                 </p>
               )}
             </>
+          ) : (
+            <div className="flex items-center gap-2.5">
+              <Badge variant="neutral">未声明共享保底</Badge>
+              <span className="text-xs text-muted-foreground">该卡池未在插件 manifest 的 pityGroups 中声明，没有保底进度数据。</span>
+            </div>
           )}
         </Card>
       </section>
@@ -280,19 +399,18 @@ function BannerPanel({
       <section>
         <SectionLabel>关键指标</SectionLabel>
         <div className="flex overflow-hidden rounded-md border border-border bg-card">
-          <StatCell value={formatCount(banner.totalDraws)} label="总抽数" />
-          <StatCell value={banner.fiveStarCount} label={`${tierLabels.top}数`} />
-          <StatCell value={banner.fourStarCount} label={`${tierLabels.second}数`} />
-          {banner.avgDraws !== undefined && <StatCell value={banner.avgDraws} label="平均出货抽数" />}
-          {banner.worstGap !== undefined && <StatCell value={banner.worstGap} label="最非欧一次" />}
-          {banner.bestGap !== undefined && <StatCell value={banner.bestGap} label="最欧一次" />}
+          <StatCell value={formatCount(stats.totalDraws)} label="总抽数" />
+          <StatCell value={formatCount(stats.rarityCounts[tiers.top] ?? 0)} label={`${tierLabel(tiers.top)}数`} />
+          {tiers.second && <StatCell value={formatCount(stats.rarityCounts[tiers.second] ?? 0)} label={`${tierLabel(tiers.second)}数`} />}
+          {stats.pity?.avgGap !== undefined && <StatCell value={stats.pity.avgGap} label="平均出货抽数" />}
+          {stats.pity?.worstGap !== undefined && <StatCell value={stats.pity.worstGap} label="最非欧一次" />}
+          {stats.pity?.bestGap !== undefined && <StatCell value={stats.pity.bestGap} label="最欧一次" />}
         </div>
-        {banner.note && <p className="mt-2.5 text-xs text-muted-foreground">{banner.note}</p>}
       </section>
 
-      {banner.fiveStarRecords && banner.fiveStarRecords.length > 0 && (
+      {stats.pity && stats.pity.topTierPulls.length > 0 && (
         <section>
-          <SectionLabel>{tierLabels.top}记录</SectionLabel>
+          <SectionLabel>{tierLabel(tiers.top)}记录</SectionLabel>
           <Card className="p-0">
             <Table>
               <TableHeader>
@@ -300,20 +418,18 @@ function BannerPanel({
                   <TableHead>物品</TableHead>
                   <TableHead>稀有度</TableHead>
                   <TableHead>抽数间隔</TableHead>
-                  <TableHead>是否歪</TableHead>
                   <TableHead>时间</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {banner.fiveStarRecords.map((row) => (
-                  <TableRow key={`${row.itemName}-${row.date}`}>
-                    <TableCell>{row.itemName}</TableCell>
+                {stats.pity.topTierPulls.map((pull) => (
+                  <TableRow key={pull.recordId}>
+                    <TableCell>{pull.itemId}</TableCell>
                     <TableCell>
-                      <Badge variant="r5">{tierLabels.top}</Badge>
+                      <Badge variant="r5">{tierLabel(tiers.top)}</Badge>
                     </TableCell>
-                    <TableCell className="font-mono tabular-nums">{row.gap}</TableCell>
-                    <TableCell>{row.isLoss ? "是" : "否"}</TableCell>
-                    <TableCell className="font-mono tabular-nums">{formatDate(row.date)}</TableCell>
+                    <TableCell className="font-mono tabular-nums">{pull.pullsSinceLastHit}</TableCell>
+                    <TableCell className="font-mono tabular-nums">{formatDate(pull.occurredAt)}</TableCell>
                   </TableRow>
                 ))}
               </TableBody>
@@ -324,7 +440,7 @@ function BannerPanel({
 
       <section>
         <SectionLabel>稀有度分布</SectionLabel>
-        <RarityBar {...rarity} labels={tierLabels} />
+        <RarityBar distribution={distribution} rarity={rarity} />
       </section>
     </>
   );
@@ -335,57 +451,6 @@ function StatCell({ value, label }: { value: string | number; label: string }) {
     <div className="flex-1 border-r border-border px-[18px] py-[13px] last:border-r-0">
       <span className="block font-mono text-[21px] font-bold tracking-tight tabular-nums">{value}</span>
       <span className="block text-[11.5px] text-muted-foreground">{label}</span>
-    </div>
-  );
-}
-
-function MonthlyTimeline({
-  entries,
-}: {
-  entries: readonly { month: string; draws: number; fiveStarCount: number }[];
-}) {
-  const maxDraws = Math.max(1, ...entries.map((e) => e.draws));
-  return (
-    <div>
-      <div className="flex h-[110px] items-end gap-1 border-b border-border">
-        {entries.map((entry) => (
-          <div key={entry.month} className="flex h-full min-w-0 flex-1 flex-col items-center justify-end">
-            <div className="flex h-3.5 items-end justify-center gap-0.5">
-              {Array.from({ length: entry.fiveStarCount }).map((_, i) => (
-                <span key={i} className="size-1.5 shrink-0 rounded-full bg-rarity-5" />
-              ))}
-            </div>
-            <div
-              className="w-3/5 max-w-8 rounded-t-sm bg-border-strong"
-              style={{ height: `${Math.round((entry.draws / maxDraws) * 96)}px` }}
-              title={`${entry.month} · ${entry.draws} 抽${entry.fiveStarCount > 0 ? ` · 五星 ${entry.fiveStarCount} 个` : ""}`}
-            />
-          </div>
-        ))}
-      </div>
-      <div className="mt-1.5 flex gap-1">
-        {entries.map((entry, idx) => (
-          <span
-            key={entry.month}
-            className="min-w-0 flex-1 text-center font-mono text-[10px] text-faint-foreground tabular-nums"
-          >
-            {idx % 2 === 0 ? entry.month.slice(2) : ""}
-          </span>
-        ))}
-      </div>
-      <div className="mt-2 flex flex-wrap gap-4 text-[11.5px] text-muted-foreground">
-        <span className="flex items-center gap-1.5">
-          <span className="size-[7px] shrink-0 rounded-full bg-rarity-5" />
-          出货月份
-        </span>
-        <span>
-          合计{" "}
-          <span className="font-mono font-semibold text-foreground tabular-nums">
-            {formatCount(entries.reduce((sum, e) => sum + e.draws, 0))}
-          </span>{" "}
-          抽 · <span className="font-mono font-semibold text-foreground tabular-nums">{entries.length}</span> 个月
-        </span>
-      </div>
     </div>
   );
 }
