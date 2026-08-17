@@ -276,8 +276,26 @@ pub fn import_batch(
         records_seen += banner.records.len() as u64;
 
         // lang：导入路径没有采集会话那样的凭据 URL 可以现取 &lang= 参数，
-        // 存档本身也不携带语言信息（`GameUser.cs` 没有这个字段）——留空，
-        // 是诚实地表达"确实没有"，不编造一个默认语言。
+        // 这里固定传 `None`——留空，是诚实地表达"确实没有"，不编造一个
+        // 默认语言。
+        //
+        // ⚠️ 这句话对两种存档格式并不同样成立。wwgacha 存档确实不携带
+        // 语言信息（`GameUser.cs` 没有这个字段），`None` 就是唯一诚实的
+        // 表达；但 UIGF v4 存档的 `UigfProject.lang` 字段本身携带了这个
+        // 信息（`gs_exchange::uigf` 已经在 `hk4e_item_to_api_shape` 等
+        // 函数里把它广播回每条记录的 API 形状，只是那份广播值目前只用于
+        // 还原信封形状，没有被读出来传回这里）——`ImportAccount` 没有暴露
+        // `lang` 字段，本函数因此对两种格式一律传 `None`，不是刻意的设计
+        // 选择，是"存档带 lang 却没接进 GachaRecord"这个尚未补上的缺口。
+        // 把它接上需要给 `ImportAccount` 加字段、改 hk4e/hkrpg/nap 三个
+        // `*_project_to_batch`，规模超出"给已经流过来的 lang 值做别名
+        // 归一化"这一件事，留给专门的任务处理，这里不顺带做。
+        //
+        // 归一化保证：不管这个参数将来从 `None` 换成什么取值，都会经过
+        // `AuthkeyApiPipeline::build_records` 里唯一的赋值点做语言代码别名
+        // 归一化（`gs_p_authkey` crate 内部的 `locale` 模块，见
+        // `build_records` 那一行旁的注释）——本函数不需要、也不应该在这里
+        // 重复归一化一遍。
         //
         // page_tz_offset_hours：改传 `batch.account.tz_offset_hours`，不再
         // 硬编码 `None`——存档自带时区偏移的情况下（如 UIGF），这就是那个

@@ -17,6 +17,8 @@
 //!
 //! 模块划分：
 //! - [`cache_scan`]——L0 原子：`data_2` 缓存扫描三步语义
+//! - [`locale`]——语言代码别名归一化（不对外暴露，只有 `pipeline` 一个
+//!   消费者，未出现第二个消费者之前不导出到 crate 公开 API）
 //! - [`pipeline`]——L1 流程：[`pipeline::AuthkeyApiPipeline`]
 //! - [`rate_limit`]——L0 原子：限速与重试策略
 //!
@@ -29,6 +31,7 @@
 use gs_core::GsError;
 
 pub mod cache_scan;
+mod locale;
 pub mod log_scan;
 pub mod pipeline;
 pub mod rate_limit;

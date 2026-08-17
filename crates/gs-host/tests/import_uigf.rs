@@ -258,6 +258,20 @@ fn import_batch_persists_uigf_genshin_archive_and_is_idempotent() {
             .all(|r| r.source == RecordSource::Import),
         "导入路径落库的记录 source 应当全部是 RecordSource::Import"
     );
+    // ⚠️ 这条锁定的是当前行为，不是理想行为——UIGF 存档的
+    // `UigfProject.lang` 字段实测就是 "zh-cn"（本 fixture 顶层可查），但
+    // `ImportAccount` 目前没有暴露这个字段，`import_batch` 对导入路径统一
+    // 传 `None`，见 `crates/gs-host/src/import.rs` 里那段 `lang` 注释。
+    // 这条断言存在的意义是：一旦有人以后把 UIGF 的 lang 接进来，这里必须
+    // 跟着改成 `Some("zh-cn")`，不能悄悄漏改。
+    assert!(
+        records_301
+            .iter()
+            .chain(records_400.iter())
+            .all(|r| r.lang.is_none()),
+        "UIGF 导入路径的 lang 目前恒为 None（ImportAccount 未暴露该字段），\
+         这条断言锁定的是这个已知缺口的当前状态"
+    );
 
     // ★ occurred_at 精确到毫秒，字面量独立算出、不经过被测代码：
     // fixture 里 id "1400000000000000006" 那条记录 time = "2026-06-01

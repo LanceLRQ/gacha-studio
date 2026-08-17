@@ -19,7 +19,8 @@ import { pathToFileURL } from 'node:url';
 import { findRepoRoot } from '../lib/repo-root.mjs';
 import { renderResult, renderSummary } from '../lib/report.mjs';
 
-const GATE_TITLE_BASE = 'HC-3 类型生成（codegen 一致性 + fixture 回归 + zod 覆盖率）';
+const GATE_TITLE_BASE =
+  'HC-3 类型生成（codegen 一致性 + fixture 回归 + zod 覆盖率 + 跨语言 SDK 版本同步）';
 const TYPES_DIR = 'packages/gs-plugin-kit/types/';
 const GENERATED_TYPES_FILE = 'packages/gs-plugin-kit/types/generated.ts';
 const SCHEMA_FILE = 'packages/gs-plugin-kit/schema/index.ts';

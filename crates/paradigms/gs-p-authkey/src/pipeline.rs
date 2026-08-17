@@ -1971,7 +1971,17 @@ impl<'rt> AuthkeyApiPipeline<'rt> {
                 banner_key: banner_identity_key.to_string(),
                 pity_group: self.pity_group_for(banner_identity_key),
                 record_key: RecordKey::new(record_key_text)?,
-                lang: lang.map(str::to_string),
+                // 归一化落在这里，而不是调用方提取 lang 的那一刻——
+                // `build_records` 是 `GachaRecord.lang` 唯一的赋值点，
+                // 采集（`collect_banner` 传入从凭据 URL 解出的真实值）与
+                // 导入（`gs-host::import::import_batch` 目前固定传
+                // `None`）两条路径都收敛到这一行，不会有第三条路径绕开
+                // 它。若改成在 `collect_banner` 提取 URL 参数的地方就近
+                // 归一化，导入路径未来接上真实 lang 来源时会需要在两处
+                // 各自记得调用同一个函数——这正是本项目反复强调要避免的
+                // "两处各存一份、改一处漏一处"。规则本身见 `crate::locale`
+                // 模块文档。
+                lang: lang.map(crate::locale::normalize_lang_alias),
                 occurred_at,
                 occurred_raw: fields.time.clone(),
                 tz_origin,
@@ -2570,6 +2580,73 @@ mod tests {
         // 因此这里只验证查询本身不出错；banner_snapshot 是否正确写入用
         // 一次直接的 repository 调用一致性检查（见下方独立断言）。
         let _ = snapshots;
+    }
+
+    /// 语言代码别名归一化接入 `collect_banner`（M1-S2 遗留缺口的修复验证）：
+    /// 凭据 URL 里的 `&lang=EN`（大写两位短码）落库时应当归一化成规范
+    /// 全称 `en-us`，不能原样存成 `"EN"`——大小写与短码两条规则在同一个
+    /// 取值上都要生效。归一化规则见 `crate::locale` 模块文档。
+    #[test]
+    fn collect_banner_normalizes_lang_alias_from_credential_url() {
+        let storage = Storage::open_in_memory().expect("应当能打开内存数据库");
+        let (runtime, account_id) = setup_pipeline_and_account(&storage);
+        // singleRequest：只需要注册一次响应，不需要额外准备一页空响应来
+        // 触发 emptyPage 终止条件——这条用例只关心 lang 归一化，不关心
+        // 分页终止语义，选最省 fixture 的 stopCondition。
+        let manifest_value = genshin_manifest_with(|v| {
+            v["collect"]["params"]["stopCondition"] =
+                serde_json::json!({ "kind": "singleRequest" });
+        });
+        let pipeline =
+            AuthkeyApiPipeline::from_manifest_json_for_test("genshin", &runtime, manifest_value)
+                .expect("应当能构造 pipeline");
+
+        let credential_url = "https://public-operation-hk4e.mihoyo.com/gacha_info/api/getGachaLog?authkey=FAKE&lang=EN&gacha_type=301";
+        let expected_url = pipeline
+            .build_page_url(credential_url, "301", 1)
+            .expect("URL 构造应当成功");
+
+        let response_body = serde_json::json!({
+            "retcode": 0,
+            "message": "OK",
+            "data": {
+                "list": [{
+                    "uid": "100000000", "gacha_type": "301", "count": "1",
+                    "time": "2026-06-18 21:15:32", "name": "测试五星角色A", "lang": "en",
+                    "item_type": "角色", "rank_type": "5", "id": "1400000000000000010"
+                }]
+            }
+        })
+        .to_string();
+
+        let transport = FixtureTransport::new();
+        transport.register(expected_url, response_body);
+
+        let repo = storage.repository();
+        let lang = crate::cache_scan::extract_query_param(credential_url, "lang");
+        pipeline
+            .collect_banner(
+                &transport,
+                &repo,
+                account_id,
+                "301",
+                credential_url,
+                "100000000",
+                None,
+                lang.as_deref(),
+                1_754_812_801_000,
+            )
+            .expect("采集应当成功");
+
+        let records = repo
+            .find_records_by_banner(account_id, "301")
+            .expect("查询应当成功");
+        assert_eq!(records.len(), 1);
+        assert_eq!(
+            records[0].lang.as_deref(),
+            Some("en-us"),
+            "凭据 URL 的 lang=EN 落库后应当归一化成 en-us，不是原样存成大写短码"
+        );
     }
 
     /// 真正的"缓存扫描 → 分页拉取"全链路：不像上一个用例那样把 credential
