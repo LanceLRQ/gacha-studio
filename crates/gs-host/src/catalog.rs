@@ -24,6 +24,7 @@ pub fn list_games() -> Vec<GameView> {
             display_name: gs_analysis::display_name_for(plugin_id),
             rarity: gs_analysis::rarity_spec_for(plugin_id),
             banners: gs_analysis::banners_for(plugin_id),
+            supports_current_platform: gs_analysis::supports_current_platform(plugin_id),
         })
         .collect()
 }
@@ -54,6 +55,23 @@ mod tests {
         assert_eq!(genshin.rarity.pity_target, "5");
         assert!(genshin.banners.iter().any(|b| b.id == "301"
             && b.display_name.0.get("zh-CN").map(String::as_str) == Some("角色活动祈愿")));
+    }
+
+    #[test]
+    fn all_games_share_the_same_supports_current_platform_value_since_they_all_declare_windows_only()
+     {
+        // 不断言具体的 true/false（取决于跑测试的机器是 Windows 还是
+        // macOS），只断言"四个插件既然声明了同一份 platforms: ["windows"]，
+        // 在同一台机器上跑就应当得到同一个判定结果"——这条关系与运行测试的
+        // 操作系统无关，可以放心跑在任何 CI/开发机上。
+        let games = list_games();
+        let values: std::collections::HashSet<bool> =
+            games.iter().map(|g| g.supports_current_platform).collect();
+        assert_eq!(
+            values.len(),
+            1,
+            "四个插件都声明 platforms: [\"windows\"]，理应得到同一个判定结果，实际：{games:?}"
+        );
     }
 
     #[test]

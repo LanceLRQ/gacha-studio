@@ -14,7 +14,7 @@
 //! - [`baseline`]：`BaselineProvider::InGamePageCount` 的区间核对
 //! - [`banner_meta_seed`]：原神卡池元数据的初始种子（`data_ver = 1`）
 //! - [`manifest_lookup`]：按任意已注册插件 id（不止 genshin）读取展示名 /
-//!   稀有度阶梯 / 保底组 / 卡池 / 保留期策略，供 `gs-host` 的
+//!   稀有度阶梯 / 保底组 / 卡池 / 保留期策略 / 支持平台，供 `gs-host` 的
 //!   `list_games`/保底进度编排/保留期风险评估使用
 
 mod banner_meta_seed;
@@ -30,7 +30,8 @@ pub use banner_meta_seed::{
 };
 pub use baseline::{DrawCountRange, IntegrityGap, evaluate_draw_count_gap};
 pub use manifest_lookup::{
-    banners_for, display_name_for, pity_groups_for, rarity_spec_for, retention_policy_for,
+    banners_for, display_name_for, pity_groups_for, platform_supported, platforms_for,
+    rarity_spec_for, retention_policy_for, supports_current_platform,
 };
 pub use pity::{
     CurveEvaluation, HitOutcome, PityCounter, PityGroupReport, PityPull, analyze_pity_group,

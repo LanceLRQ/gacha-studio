@@ -126,6 +126,26 @@ const EXCLUDED_RUST_SCAN_DIRS = ['crates/gs-plugin-runtime/generated'];
  *     （TS interface 语法），不是类型别名——见 Precondition 区块。
  *   - `consumption: 'literalRead'`：没有具名 Rust 镜像结构体，靠字面量
  *     `.get("字段名")` 判定消费——见下方 checkLiteralReadSection。
+ *
+ * 第三个可选字段 `onlyFields`（2026-08-17 新增，见 PluginManifest 区块）：
+ * 把本区块实际检查的字段范围缩小到这个数组列出的子集，其余从 TS 类型里
+ * 提取出的字段完全不检查（既不要求消费，也不出现在输出里）。
+ *
+ * 存在动机：`PluginManifest` 是一个近 20 字段的大接口，多数字段本来就不该
+ * 由本门判定——要么已经通过它们各自的具名类型（`BannerSpec`/`TimeConfig`/
+ * `PityGroup`/`RetentionPolicy`/…）单独登记过，要么是 `id`/`displayName`/
+ * `collect`/`fields` 这类字段，真实消费点用的是 `root["字段名"]` 下标语法
+ * （`crates/gs-analysis/src/manifest_lookup.rs` 的
+ * `pity_groups_for`/`rarity_spec_for`/`banners_for`/`display_name_for`
+ * 等），不是 `literalRead` 模式认的 `.get("字段名")` 字面量形状——把整个
+ * `PluginManifest` 登记成一个区块会把这批字段一起拖进来，制造与登记动机
+ * 无关的假阳性。`onlyFields` 让一次登记只精确覆盖真正要新增判定的字段，
+ * 其余交给各自已有的登记路径或"本来就不该登记"的既定原则（文件头部
+ * "覆盖范围是显式登记制"一节），不重复判定。
+ *
+ * 若 `onlyFields` 列出的字段在源码里实际提取不出来（比如字段改名、类型改
+ * 写法），本门会在这里报一条 finding 提示登记已过期，不会静默漏检——见
+ * `checkSection` 里对 `onlyFields` 子集的校验。
  */
 const CONTRACT_SECTIONS = [
   {
@@ -318,6 +338,88 @@ const CONTRACT_SECTIONS = [
           '不像 BannerSpec.displayName 那样有可以类比的"前端读原始 JSON"路径（`web/` 的 tsconfig 不 include ' +
           '插件 manifest bundle，见 crates/gs-host/src/views.rs 模块文档），如果后续要在界面上展示这段文案，' +
           '需要与 conservativeDays 一样通过 IPC 视图透出，届时应在这里移除本条白名单，不是继续加理由续期。',
+      },
+    ],
+  },
+  {
+    // 2026-08-17：扫描 PluginManifest 全部顶层字段（19 个）发现登记制留下的
+    // 盲区——platforms/sdkVersion 是两个"承重"字段（真正驱动 L1 执行行为），
+    // 却从未被登记过，也从未被消费过；iconUrl/metadata/drawCounting/
+    // maintainers/exchangeFormats 五个字段同样从未登记，但逐个核实后确认
+    // 是"暂时确无消费点，但理由各不相同"的白名单，不是遗漏。
+    //
+    // 只用 onlyFields 登记这 7 个字段，不登记整个 PluginManifest——理由见
+    // CONTRACT_SECTIONS 顶部关于 onlyFields 的说明，这里不重复。
+    tsType: 'PluginManifest',
+    tsFile: 'packages/gs-plugin-kit/manifest.ts',
+    tsKind: 'interface',
+    consumption: 'literalRead',
+    onlyFields: [
+      'platforms',
+      'sdkVersion',
+      'iconUrl',
+      'metadata',
+      'drawCounting',
+      'maintainers',
+      'exchangeFormats',
+    ],
+    // 两个真消费点分别落在 gs-analysis（platforms_for，crates/gs-analysis/
+    // src/manifest_lookup.rs）与 gs-plugin-runtime（sdkVersion 校验，
+    // crates/gs-plugin-runtime/src/lib.rs），不在同一个文件——literalRead
+    // 模式下 rustFile 只是人工定位用的元信息，不参与实际扫描（扫描范围本就
+    // 是整个 crates/**/*.rs），这里指向前者。
+    rustFile: 'crates/gs-analysis/src/manifest_lookup.rs',
+    knownUnconsumed: [
+      {
+        field: 'iconUrl',
+        reason:
+          '图标下载/缓存管线尚未实现——manifest.ts 对本字段的文档已经写清楚落地形态（限 https、由宿主下载' +
+          '缓存、不提供通用 fetchAsset 窄口、落盘前按 content-type + magic bytes 校验、不按扩展名判断），' +
+          '但当前四个插件全部省略这个可选字段（0/4 声明），Rust 侧自然没有消费点——没有值可读，谈不上' +
+          '"声明了没消费"。前端已经有"游戏名首字 + 游戏色圆底"的兜底渲染（web/src/lib/game-icon.ts 等），' +
+          '缺省路径完整可用，不是被卡住的功能。移除条件：任意插件真的声明 iconUrl 且宿主落地了' +
+          '下载/缓存/校验管线（iconUrl 从 manifest 纯数据 JSON 被读出、下载、按 content-type + magic bytes ' +
+          '校验后落盘）之后。',
+      },
+      {
+        field: 'metadata',
+        reason:
+          'MetadataProviderConfig 声明的元数据 Provider（online/builtin 两种）尚无 Rust 消费点，且当前 0/4 ' +
+          '插件声明它。它对应的能力是"把 itemIdSource: displayName 标记为 meta_state: pending 的记录，' +
+          '反查回真正的 itemId"——标记侧已经实现（crates/paradigms/gs-p-authkey/src/pipeline.rs 的 ' +
+          'determine_meta_state，itemIdSource === "displayName" 时打 MetaState::Pending），回填侧（真正调用 ' +
+          'metadata Provider 把 pending 记录解析成 complete）从未实现，crates/ 里对 "回填"/"backfill" 唯一的 ' +
+          '命中是保留期的 backfill_missing_retention_days，与元数据无关。移除条件：任意一个消费 metadata ' +
+          '字段、把 pending 记录解析出真实 itemId 的回填实现落地之后。',
+      },
+      {
+        field: 'drawCounting',
+        reason:
+          'DrawCountingConfig 类型本身已经导出（crates/gs-core/src/record.rs 的 PerRecord/Custom 判别联合，' +
+          'gs-codegen 里已登记），但那只是类型定义——manifest 顶层的 drawCounting 字段本身没有任何 Rust ' +
+          '代码读取过，0/4 插件声明它（全部隐式落在 perRecord 默认值）。crates/gs-host/src/views.rs 的 ' +
+          'OverviewStatsView.total_draws 文档注释已经明写"尚未消费 DrawCountingConfig，若日后有插件声明 ' +
+          'custom 计数口径，这里会需要改成走该插件的 hooks.countDraws"——这是写在代码里的已知 TODO，不是本次' +
+          '扫描第一次发现的缺口。移除条件：total_draws（或任何抽数统计路径）真正按 drawCounting.kind 分支，' +
+          'custom 时改走插件 hooks.countDraws 之后。',
+      },
+      {
+        field: 'maintainers',
+        reason:
+          '纯展示字段（插件维护者名单），4/4 插件都声明了（均为 ["gacha-studio"]），但目前没有任何界面展示' +
+          '"这个插件谁在维护"，Rust 侧因此没有消费点——性质与 BannerSpec.displayName/Precondition.describe ' +
+          '那两条白名单一致（展示字段），区别是这次连一个"插件详情/关于面板"式的展示入口都还没做，不像 ' +
+          'displayName 好歹已经有 list_games 命令把它送到前端。移除条件：出现任何把 maintainers 送到界面的 ' +
+          'IPC 视图字段之后。',
+      },
+      {
+        field: 'exchangeFormats',
+        reason:
+          '声明"这个插件支持导出到哪些交换格式"，1/4 插件声明了（genshin: ["uigf-v4"]），但 ' +
+          'crates/gs-exchange/src/uigf.rs 的 FORMAT_ID = "uigf-v4" 是独立硬编码的常量，源码注释只是说明两处 ' +
+          '取值"对齐"，从未真正读取这个字段做门控（比如"某插件没声明 uigf-v4 就拒绝对它执行 uigf 导入/导出"' +
+          '这类校验完全不存在）。移除条件：导入/导出流程真正读取某插件的 exchangeFormats 来决定是否允许对它' +
+          '执行某种交换格式之后。',
       },
     ],
   },
@@ -833,17 +935,43 @@ function checkSection(repoRoot, section) {
     return { findings: [{ file: section.tsFile, line: 0, column: 0, reason: `读取契约类型文件失败：${err.message}` }], notes };
   }
 
-  const tsFields =
+  const extractedFields =
     section.tsKind === 'interface'
       ? extractTsInterfaceFields(tsSource, section.tsType)
       : extractTsTypeFields(tsSource, section.tsType);
 
-  if (tsFields === null) {
+  if (extractedFields === null) {
     const reason =
       section.tsKind === 'interface'
         ? `未能在文件里找到 "export interface ${section.tsType} {"——契约类型可能已改名、删除或语法有变，CONTRACT_SECTIONS 需要同步更新`
         : `未能在文件里找到 "export type ${section.tsType} = "——契约类型可能已改名或删除，CONTRACT_SECTIONS 需要同步更新`;
     return { findings: [{ file: section.tsFile, line: 0, column: 0, reason }], notes };
+  }
+
+  // `onlyFields`：把本区块实际检查的字段范围缩小到登记时列出的子集，见
+  // CONTRACT_SECTIONS 上方的文档。先校验子集本身没有过期（列出的字段名在
+  // 源码里确实提取得到），过期的登记本身就是一个应该报出来的问题，不能
+  // 悄悄跳过不检查。
+  let tsFields = extractedFields;
+  if (section.onlyFields) {
+    const extractedSet = new Set(extractedFields);
+    const stale = section.onlyFields.filter((field) => !extractedSet.has(field));
+    if (stale.length > 0) {
+      return {
+        findings: [
+          {
+            file: section.tsFile,
+            line: 0,
+            column: 0,
+            reason:
+              `${section.tsType} 的 onlyFields 登记了 ${stale.join(', ')}，但在 ${section.tsType} ` +
+              `里提取不到这些字段——登记可能已经过期（字段改名/删除），CONTRACT_SECTIONS 需要同步更新`,
+          },
+        ],
+        notes,
+      };
+    }
+    tsFields = section.onlyFields;
   }
 
   const knownUnconsumed = new Map((section.knownUnconsumed ?? []).map((entry) => [entry.field, entry.reason]));

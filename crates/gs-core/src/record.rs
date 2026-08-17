@@ -42,6 +42,41 @@ pub enum Platform {
     Macos,
 }
 
+impl Platform {
+    /// 应用当前实际编译/运行的操作系统对应的 [`Platform`]，识别不出（如
+    /// Linux 开发机）时返回 `None`。
+    ///
+    /// ## 为什么用 `std::env::consts::OS` 而不是 `#[cfg(target_os = ...)]`
+    ///
+    /// 两者在"能不能被单元测试覆盖多个分支"这件事上没有本质差别——
+    /// `std::env::consts::OS` 本身也是目标三元组在编译期烧进二进制的字符串，
+    /// 不是真正的运行时探测；不管选哪种，同一次 `cargo test` 都只能实际跑到
+    /// 当前编译目标对应的那一条分支，另一条分支在这台机器上永远执行不到。
+    /// 选 `std::env::consts::OS` 单纯是因为它是一次字符串匹配，不需要为每个
+    /// 已知平台各写一个 `#[cfg(target_os = "...")]` 分支再加一个
+    /// `#[cfg(not(any(...)))]` 兜底才能穷尽，维护量更小。
+    ///
+    /// 真正解决"可测试性"的方式是把这个函数保持成最薄的一层胶水（只做
+    /// OS 字符串到 [`Platform`] 的映射），把"某个插件声明的平台列表是否
+    /// 覆盖当前平台"这个真正需要覆盖分支测试的判断逻辑，拆成一个显式接收
+    /// `Platform` 参数的纯函数——调用方测试时直接用字面量
+    /// `Platform::Windows`/`Platform::Macos` 构造两侧输入，不必依赖测试
+    /// 实际运行所在的操作系统。这个纯函数不需要在 `gs-core` 里再提供一份
+    /// （`declared.contains(&current)` 本身已经是标准库的纯函数），拆分点
+    /// 落在调用方（`gs-analysis::manifest_lookup::platform_supported`）。
+    ///
+    /// 识别不出的操作系统返回 `None`——调用方应当按"这个平台不支持任何插件
+    /// 的采集能力"处理（fail closed，不是 fail open）：宁可界面上多禁用一个
+    /// 采集入口，也不要在一个未声明过的平台上假装采集能力可用。
+    pub fn current() -> Option<Platform> {
+        match std::env::consts::OS {
+            "windows" => Some(Platform::Windows),
+            "macos" => Some(Platform::Macos),
+            _ => None,
+        }
+    }
+}
+
 /// 一款游戏的稀有度阶梯声明。
 ///
 /// `ladder` 不假设长度或具体取值——绝区零是 `["2","3","4"]`，米哈游三游是
@@ -360,6 +395,19 @@ mod tests {
         assert_eq!(value, serde_json::json!("windows"));
         let value = serde_json::to_value(Platform::Macos).unwrap();
         assert_eq!(value, serde_json::json!("macos"));
+    }
+
+    #[test]
+    fn platform_current_matches_one_of_the_two_known_variants_or_none() {
+        // 本仓库当前只跑在 Windows/macOS 开发机上（CI 平台待定，见
+        // CLAUDE.local.md「M0 剩余项」），两者都应当被正确识别；未识别的
+        // 操作系统（如 Linux 开发机跑 `cargo test`）不应 panic，只应返回
+        // `None`——这条断言本身不依赖测试实际运行在哪个操作系统上，
+        // `matches!` 三个分支穷尽了 `current()` 的全部可能返回值。
+        assert!(matches!(
+            Platform::current(),
+            Some(Platform::Windows) | Some(Platform::Macos) | None
+        ));
     }
 
     #[test]

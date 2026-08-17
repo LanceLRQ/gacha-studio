@@ -13,7 +13,7 @@
 //! 公共函数保留不动（`pity.rs`/`rarity.rs`/`rare_event.rs` 的测试与集成测试
 //! 都在用），内部实现改为调用本模块，避免两份反序列化逻辑漂移。
 
-use gs_core::{BannerSpec, LocalizedText, PityGroup, RaritySpec, RetentionPolicy};
+use gs_core::{BannerSpec, LocalizedText, PityGroup, Platform, RaritySpec, RetentionPolicy};
 
 /// 取某个插件 manifest 的纯数据根节点，找不到就 panic——manifest 纯数据
 /// 缺失意味着没跑过 `node scripts/gs-bundle-plugins.mjs`，属于开发期配置
@@ -87,6 +87,51 @@ pub fn display_name_for(plugin_id: &str) -> String {
         .unwrap_or_else(|| plugin_id.to_string())
 }
 
+/// `plugin_id` 声明支持在哪些平台上运行，直接来自 manifest `platforms`
+/// 字段——**必填字段**（不像 `retention`/`pityGroups` 可省略），manifest
+/// JSON 里缺这个键属于打包脚本产出异常，因此用 `.get(...)` + panic 而不是
+/// `Option` 返回值：`.get("platforms")` 找不到就说明契约脱节，应当在这里
+/// 就暴露，不是让调用方（`supports_current_platform`）拿到一个空列表后，把
+/// "manifest 缺字段"误判成"这个插件不支持任何平台"，两者含义完全不同。
+pub fn platforms_for(plugin_id: &str) -> Vec<Platform> {
+    let root = manifest_root(plugin_id);
+    let value = root.get("platforms").unwrap_or_else(|| {
+        panic!(
+            "插件 \"{plugin_id}\" manifest 缺少必填字段 \"platforms\"——PluginManifest.platforms \
+             是必填字段，这份 JSON 由 scripts/gs-bundle-plugins.mjs 生成，不应手改"
+        )
+    });
+    deserialize_or_panic(plugin_id, "platforms", value)
+}
+
+/// 纯函数：`declared`（插件声明的支持平台列表）是否覆盖 `current`。
+///
+/// 拆成独立函数是为了可测试性——[`supports_current_platform`] 绑死了
+/// `gs_core::Platform::current()`，实际编译到的目标平台是什么，测试只能
+/// 覆盖那一条分支；把"覆盖判断"单独抽出来后，测试可以显式构造
+/// `Platform::Windows`/`Platform::Macos` 两侧输入，不依赖测试运行所在的
+/// 操作系统。详细理由见 [`gs_core::Platform::current`] 的文档。
+pub fn platform_supported(declared: &[Platform], current: Platform) -> bool {
+    declared.contains(&current)
+}
+
+/// `plugin_id` 是否声明支持当前实际运行的操作系统。
+///
+/// 消费点：`gs-host::catalog::list_games` 用它填 `GameView.supports_current_platform`
+/// ——`CLAUDE.local.md`"Windows 优先，macOS 只读——采集能力需可缺省"在界面层
+/// 的落点，前端据此在 macOS 上干净地禁用采集入口，而不是让用户点了才失败。
+///
+/// 无法识别当前操作系统时（[`gs_core::Platform::current`] 返回 `None`，如
+/// Linux 开发机）按"不支持"处理——fail closed，不是 fail open：宁可界面上
+/// 多禁用一个采集入口，也不要在一个未声明过的平台上假装采集能力可用。
+pub fn supports_current_platform(plugin_id: &str) -> bool {
+    let declared = platforms_for(plugin_id);
+    match Platform::current() {
+        Some(current) => platform_supported(&declared, current),
+        None => false,
+    }
+}
+
 /// `plugin_id` 声明的保留期策略，直接来自 manifest `retention` 字段。
 ///
 /// 与 [`pity_groups_for`]/[`rarity_spec_for`]/[`banners_for`] 不同，
@@ -111,6 +156,47 @@ pub fn retention_policy_for(plugin_id: &str) -> Option<RetentionPolicy> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn platforms_for_reads_windows_only_declaration_for_every_registered_plugin() {
+        // 当前四个插件都只声明了 platforms: ["windows"]（M0/M1 阶段现实：
+        // 尚无任何插件真正支持 macOS 采集），用它验证真实反序列化路径成立，
+        // 而不是只靠下面 platform_supported 的纯函数测试自证。
+        for plugin_id in ["genshin", "starrail", "wuwa", "zzz"] {
+            assert_eq!(platforms_for(plugin_id), vec![Platform::Windows]);
+        }
+    }
+
+    #[test]
+    fn platform_supported_true_when_declared_list_contains_current() {
+        assert!(platform_supported(&[Platform::Windows], Platform::Windows));
+        assert!(platform_supported(
+            &[Platform::Windows, Platform::Macos],
+            Platform::Macos
+        ));
+    }
+
+    #[test]
+    fn platform_supported_false_when_declared_list_lacks_current() {
+        assert!(!platform_supported(&[Platform::Windows], Platform::Macos));
+    }
+
+    #[test]
+    fn platform_supported_false_for_empty_declared_list() {
+        assert!(!platform_supported(&[], Platform::Windows));
+    }
+
+    #[test]
+    fn supports_current_platform_matches_platform_supported_applied_to_declared_list() {
+        // 不断言具体的 true/false（那取决于测试实际运行在哪个操作系统上），
+        // 只断言"这个函数确实是 platform_supported 应用在 platforms_for 结果
+        // 上"这条关系本身——用 gs_core::Platform::current() 独立算一遍期望值，
+        // 与被测函数的实现路径不同源，不是同语反复。
+        let expected = gs_core::Platform::current()
+            .map(|current| platform_supported(&platforms_for("genshin"), current))
+            .unwrap_or(false);
+        assert_eq!(supports_current_platform("genshin"), expected);
+    }
 
     #[test]
     fn retention_policy_for_reads_genshin_conservative_days_and_display_text() {

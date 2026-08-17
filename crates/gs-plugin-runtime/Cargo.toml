@@ -12,6 +12,10 @@ serde_json.workspace = true
 # 就能用），本 crate 只是转发它的 plugin_manifest_data，保持既有调用方
 # （如 gs-p-authkey）的调用路径不变。见该 crate 顶部说明。
 gs-manifest-data.workspace = true
+# 插件加载路径校验 sdkVersion 兼容性用到的宿主版本基准与比较规则，定义在
+# gs-core（零重量级依赖，多个上层 crate 共同依赖的领域层），理由见
+# crates/gs-core/src/sdk_version.rs 顶部说明。
+gs-core.workspace = true
 # 插件运行时：内嵌 JS 引擎，见 src/lib.rs 顶部说明。选 QuickJS（而非
 # V8/deno_core）是 M1-S3 的架构裁定——二进制体积增量以 KB 计，不是
 # V8/deno_core 那种几十 MB 级别，符合桌面应用分发的体积预算。

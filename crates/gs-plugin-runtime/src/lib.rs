@@ -217,6 +217,70 @@ impl std::fmt::Display for PluginCallError {
 
 impl std::error::Error for PluginCallError {}
 
+// ============================================================
+// SDK 版本校验
+// ============================================================
+
+/// 逐个校验 [`gs_manifest_data::registered_plugin_ids`] 里每一个已注册插件
+/// 声明的 `sdkVersion` 是否与宿主当前支持的版本（[`gs_core::HOST_SDK_VERSION`]）
+/// 兼容，任何一个不兼容就立即拒绝，不继续检查其余插件、也不继续启动运行时。
+///
+/// 这是 HC-4「声明必被消费」要防的典型场景在 `sdkVersion` 这个字段上的
+/// 落点：这个字段若只是从 JSON 解析出来摆在那儿从不比对，插件与宿主契约
+/// 实际脱节时不会有任何信号，会一路带着不兼容的假设跑下去，直到某个具体
+/// 字段在完全不相关的位置反序列化失败——那时候排查者看到的错误信息里根本
+/// 不会提到"SDK 版本不兼容"这个真正的根因。
+///
+/// 当前四个插件全部在仓库内、随宿主同版本编译打包，`sdkVersion` 与
+/// `HOST_SDK_VERSION` 恒为同一个值，这个函数今天不可能返回 `Err`——它存在的
+/// 意义是 `CLAUDE.local.md`「贡献者要求」预告的外部贡献者场景：那时一个
+/// 声明了不兼容 SDK 版本的插件必须在这里被拦住，而不是被静默接受。
+fn assert_all_registered_plugins_support_host_sdk_version() -> Result<(), PluginRuntimeError> {
+    for plugin_id in gs_manifest_data::registered_plugin_ids() {
+        let manifest = gs_manifest_data::plugin_manifest_data(plugin_id).unwrap_or_else(|| {
+            panic!(
+                "插件 \"{plugin_id}\" 来自 registered_plugin_ids 的返回值，manifest 纯数据不应缺失\
+                 ——两者共用同一份底层解析结果，见 gs-manifest-data 的实现"
+            )
+        });
+        let declared = manifest
+            .get("sdkVersion")
+            .and_then(|v| v.as_str())
+            .unwrap_or_else(|| {
+                panic!(
+                    "插件 \"{plugin_id}\" manifest 缺少必填字符串字段 \"sdkVersion\"——\
+                 PluginManifest.sdkVersion 是必填字段，这份 JSON 由 scripts/gs-bundle-plugins.mjs \
+                 生成，不应手改"
+                )
+            });
+        validate_plugin_sdk_version(plugin_id, declared)?;
+    }
+    Ok(())
+}
+
+/// 校验单个插件声明的 SDK 版本，纯函数（不读取任何全局 manifest 状态）。
+///
+/// 从 [`assert_all_registered_plugins_support_host_sdk_version`] 里拆出来是
+/// 为了可测试性：那个函数只能测到当前四个已注册插件（全部声明兼容版本
+/// `"1.0.0"`），测不出"声明了不兼容版本会被拒绝"这个只有外部贡献者到来
+/// 之后才会真实发生的场景。拆出的这个函数不依赖 `gs_manifest_data` 的全局
+/// 状态，测试可以直接喂合成的 `(plugin_id, declared)` 验证拒绝行为，不需要
+/// 改动真实的 `plugins.manifest.json`（那是打包脚本产出物，禁止手改）。
+fn validate_plugin_sdk_version(plugin_id: &str, declared: &str) -> Result<(), PluginRuntimeError> {
+    match gs_core::is_sdk_version_compatible(declared) {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(PluginRuntimeError(format!(
+            "插件 \"{plugin_id}\" 声明的 SDK 版本 \"{declared}\" 与宿主当前支持的版本 \"{}\" \
+             不兼容（主版本号不同）——拒绝加载。这不是可以静默跳过的情况：HC-4「声明必被消费」的\
+             立场是宁可拒绝启动，也不要带着已经脱节的契约继续跑。",
+            gs_core::HOST_SDK_VERSION
+        ))),
+        Err(err) => Err(PluginRuntimeError(format!(
+            "插件 \"{plugin_id}\" 声明的 SDK 版本 \"{declared}\" 无法解析：{err}——拒绝加载"
+        ))),
+    }
+}
+
 /// 插件运行时：持有一个已经加载完 bundle 的 QuickJS `Runtime` + `Context`。
 ///
 /// 不是 `Send`/`Sync`（QuickJS 的值带生命周期绑定，rquickjs 的 `Context`
@@ -232,8 +296,15 @@ pub struct PluginRuntime {
 }
 
 impl PluginRuntime {
-    /// 启动运行时：创建 QuickJS 引擎、加载插件 bundle、执行 HC-2 自检。
+    /// 启动运行时：校验全部已注册插件的 SDK 版本兼容性、创建 QuickJS 引擎、
+    /// 加载插件 bundle、执行 HC-2 自检。
+    ///
+    /// SDK 版本校验放在最前面，先于创建 QuickJS 引擎——版本不兼容是纯数据
+    /// 判断，不需要引擎就能做出，把它放前面能让"契约脱节"这类错误尽快、
+    /// 尽量廉价地暴露，而不是先花掉一次引擎初始化的开销才发现。
     pub fn new() -> Result<Self, PluginRuntimeError> {
+        assert_all_registered_plugins_support_host_sdk_version()?;
+
         let runtime = Runtime::new()
             .map_err(|err| PluginRuntimeError(format!("创建 QuickJS Runtime 失败：{err}")))?;
         let context = Context::full(&runtime)
@@ -521,6 +592,41 @@ fn decode_base64(input: &str) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn validate_plugin_sdk_version_accepts_same_major_version() {
+        validate_plugin_sdk_version("hypothetical-plugin", gs_core::HOST_SDK_VERSION)
+            .expect("宿主自己声明的版本号必须视为兼容");
+    }
+
+    #[test]
+    fn validate_plugin_sdk_version_rejects_incompatible_major_version() {
+        // 未来外部贡献者场景的直接证明：一个声明了不兼容 major 版本号的插件
+        // 必须在这里被拒绝，不能被静默接受——这正是本函数存在的理由，见其
+        // 文档注释。当前仓库内四个插件不可能触发这条路径（全部声明
+        // "1.0.0"），因此必须用合成输入单独证明。
+        let err = validate_plugin_sdk_version("hypothetical-plugin", "2.0.0")
+            .expect_err("主版本号不同应当被拒绝");
+        let message = err.to_string();
+        assert!(message.contains("hypothetical-plugin"));
+        assert!(message.contains("2.0.0"));
+        assert!(message.contains(gs_core::HOST_SDK_VERSION));
+    }
+
+    #[test]
+    fn validate_plugin_sdk_version_rejects_malformed_version_string() {
+        let err = validate_plugin_sdk_version("hypothetical-plugin", "not-a-version")
+            .expect_err("无法解析的版本号应当被拒绝，而不是放行");
+        assert!(err.to_string().contains("无法解析"));
+    }
+
+    #[test]
+    fn assert_all_registered_plugins_support_host_sdk_version_passes_for_the_real_bundle() {
+        // 回归覆盖：真实的四个已注册插件全部声明 "1.0.0"，与
+        // gs_core::HOST_SDK_VERSION 同一个 major，逐个校验应当全部通过。
+        assert_all_registered_plugins_support_host_sdk_version()
+            .expect("当前仓库内四个插件的 sdkVersion 都应当与宿主兼容");
+    }
 
     #[test]
     fn decode_base64_round_trips_known_vectors() {

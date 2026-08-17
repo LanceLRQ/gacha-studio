@@ -14,6 +14,7 @@ mod error;
 mod pity;
 mod record;
 mod record_key;
+mod sdk_version;
 
 pub use collect::{
     BackoffKind, ErrorSemantic, GameClientSize, HostEnv, PreconditionLevel, PreconditionStatus,
@@ -28,3 +29,4 @@ pub use record::{
     RequestTemplate, RetentionPolicy, TzOrigin, UnifiedRecordFields,
 };
 pub use record_key::RecordKey;
+pub use sdk_version::{HOST_SDK_VERSION, SdkVersionError, is_sdk_version_compatible};

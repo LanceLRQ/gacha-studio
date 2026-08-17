@@ -172,6 +172,17 @@ pub struct GameView {
     pub rarity: gs_core::RaritySpec,
     #[ts(type = "BannerSpec[]")]
     pub banners: Vec<gs_core::BannerSpec>,
+    /// 当前运行的操作系统是否在该插件声明的 `platforms` 列表内，取值来自
+    /// `gs_analysis::supports_current_platform`。
+    ///
+    /// **最坏情况能做什么**：这只是一个只读判定结果，不携带任何可执行能力
+    /// ——即使这里判定为 `true`，具体某次采集仍可能因为凭据/客户端等其它
+    /// 原因失败；判定为 `false` 时前端应当据此禁用该游戏的采集入口，而不是
+    /// 让用户点了才在运行时报错，这是 `CLAUDE.local.md`"Windows 优先，
+    /// macOS 只读——采集能力需可缺省"在界面层的落点。识别不出当前操作系统时
+    /// （如未来的 Linux 构建）恒为 `false`——fail closed，不假装一个未声明
+    /// 支持的平台可以采集。
+    pub supports_current_platform: bool,
 }
 
 /// [`gs_analysis::CurveEvaluation`] 的可序列化投影。

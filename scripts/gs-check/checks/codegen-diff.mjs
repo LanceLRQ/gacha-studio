@@ -102,6 +102,95 @@ function runFixtureRegression(repoRoot) {
 }
 
 // ============================================================
+// ④ 跨语言 SDK 版本常量同步
+// ============================================================
+
+const HOST_SDK_VERSION_FILE = 'crates/gs-core/src/sdk_version.rs';
+const KIT_SDK_VERSION_FILE = 'packages/gs-plugin-kit/manifest.ts';
+
+/**
+ * 同一个 SDK 版本号在两侧语言各有一个落点：Rust 的 `HOST_SDK_VERSION`
+ * （宿主运行时用它拒绝不兼容插件）与 TS 的 `CURRENT_SDK_VERSION`
+ * （插件作者编译期照着它填 `manifest.sdkVersion`）。
+ *
+ * 为什么这需要一道机械检查，而不是靠注释约定：`sdk_version.rs` 里那条
+ * 注释已经写明「必须手动保持同步」，并且**自己精确描述了失败模式**——
+ * 「任何一处漏改都会让『插件声明的版本』与『宿主实际支持的版本』出现
+ * 假象上的一致」。这正是 HC-4 那条 founding story 的形状：类型检查、
+ * review、注释全绿，运行时静默不生效。两侧一旦漂移，宿主会用旧基准去
+ * 校验按新契约写的插件，而**校验本身仍然「通过」**，因为 major 相等——
+ * 这道门要拦的就是那种通过。
+ *
+ * 放在 HC-3 而不是新开一道门：HC-3 的职责本来就是「Rust 与 TS 两侧必须
+ * 保持一致」，codegen 产物一致性是这件事的一个面，跨语言常量同步是另一个面。
+ */
+function checkSdkVersionSync(repoRoot) {
+  const read = (relPath) => {
+    try {
+      return readFileSync(path.join(repoRoot, relPath), 'utf8');
+    } catch {
+      return null;
+    }
+  };
+
+  const rustSource = read(HOST_SDK_VERSION_FILE);
+  const kitSource = read(KIT_SDK_VERSION_FILE);
+  if (rustSource === null || kitSource === null) {
+    const missing = rustSource === null ? HOST_SDK_VERSION_FILE : KIT_SDK_VERSION_FILE;
+    return {
+      findings: [{ file: missing, line: 0, column: 0, reason: '读取失败——本子检查依赖这两个文件同时存在' }],
+      hostVersion: null,
+      kitVersion: null,
+    };
+  }
+
+  const hostMatch = rustSource.match(/pub const HOST_SDK_VERSION:\s*&str\s*=\s*"([^"]+)"/);
+  const kitMatch = kitSource.match(/export const CURRENT_SDK_VERSION\s*=\s*"([^"]+)"/);
+
+  // 提取不到 ≠ 同步没问题：常量被改名或改写法时，静默跳过等于这道门
+  // 从此形同虚设，所以提取失败本身就是 finding。
+  if (!hostMatch || !kitMatch) {
+    const missing = !hostMatch ? HOST_SDK_VERSION_FILE : KIT_SDK_VERSION_FILE;
+    return {
+      findings: [
+        {
+          file: missing,
+          line: 0,
+          column: 0,
+          reason:
+            '提取不到 SDK 版本常量——常量可能被改名或换了写法。本子检查靠固定形状匹配，' +
+            '提取不到时不能当作"同步没问题"放行，否则这道门会静默失效',
+        },
+      ],
+      hostVersion: hostMatch?.[1] ?? null,
+      kitVersion: kitMatch?.[1] ?? null,
+    };
+  }
+
+  const hostVersion = hostMatch[1];
+  const kitVersion = kitMatch[1];
+  if (hostVersion !== kitVersion) {
+    return {
+      findings: [
+        {
+          file: HOST_SDK_VERSION_FILE,
+          line: 0,
+          column: 0,
+          reason:
+            `SDK 版本两侧不一致：Rust HOST_SDK_VERSION="${hostVersion}"，` +
+            `TS CURRENT_SDK_VERSION="${kitVersion}"（${KIT_SDK_VERSION_FILE}）——` +
+            '两者是同一个版本号在两侧的落点，必须在同一次提交里一起改',
+        },
+      ],
+      hostVersion,
+      kitVersion,
+    };
+  }
+
+  return { findings: [], hostVersion, kitVersion };
+}
+
+// ============================================================
 // ③ zod schema 覆盖率
 // ============================================================
 
@@ -318,8 +407,14 @@ export async function run() {
   // 不能因为①已经报了错就假设②③"反正也过不了"而跳过。
   const fixtureCheck = runFixtureRegression(repoRoot);
   const zodCheck = checkZodCoverage(repoRoot);
+  const sdkVersionCheck = checkSdkVersionSync(repoRoot);
 
-  const findings = [...structuralFindings, ...fixtureCheck.findings, ...zodCheck.findings];
+  const findings = [
+    ...structuralFindings,
+    ...fixtureCheck.findings,
+    ...zodCheck.findings,
+    ...sdkVersionCheck.findings,
+  ];
 
   const notes = [
     dirtyEntries.length === 0
@@ -330,6 +425,9 @@ export async function run() {
         ? `，另有 ${fixtureCheck.skippedCount} 个插件目录没有 fixture.test.ts，未纳入本次回归（不计入失败）`
         : ''),
     `③ zod schema 覆盖率：已核对 types/generated.ts 导出的 ${zodCheck.typeCount} 个类型`,
+    sdkVersionCheck.findings.length === 0
+      ? `④ 跨语言 SDK 版本同步：Rust HOST_SDK_VERSION 与 TS CURRENT_SDK_VERSION 均为 "${sdkVersionCheck.hostVersion}"`
+      : '④ 跨语言 SDK 版本同步：发现不一致（见上方命中详情）',
   ];
 
   return {

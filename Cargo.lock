@@ -1305,6 +1305,7 @@ dependencies = [
 name = "gs-plugin-runtime"
 version = "0.1.0"
 dependencies = [
+ "gs-core",
  "gs-manifest-data",
  "rquickjs",
  "serde_json",
