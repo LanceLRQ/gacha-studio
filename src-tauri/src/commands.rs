@@ -74,11 +74,21 @@ pub fn host_runtime_ready() -> bool {
 ///
 /// **最坏情况能做什么**：读出本地库里的账号列表，含游戏 UID。UID 本就是
 /// 用户自己的数据、不出网；这条命令也不接受任何参数，没有注入面。
+///
+/// 调用前会先补齐历史账号里为空的 `retention_days`
+/// （[`gs_host::retention::backfill_missing_retention_days`]）——账号列表是
+/// 唯一一个"每次打开应用都会被调用、且遍历全部账号"的入口，补写的理由见
+/// 该函数的文档。补写只会把 `NULL` 列改成插件 manifest 声明的保守天数，
+/// 不读取、不返回任何路径/凭据类内容，不扩大本命令的"最坏情况"范围。
 #[tauri::command]
 pub fn list_accounts(state: RuntimeState<'_>) -> Result<Vec<AccountView>, String> {
     let runtime = state.lock().map_err(|_| POISONED.to_string())?;
     let repo = runtime.storage().repository();
+
+    gs_host::retention::backfill_missing_retention_days(&repo).map_err(to_message)?;
+
     let accounts = repo.list_accounts().map_err(to_message)?;
+    let now = now_millis();
 
     accounts
         .into_iter()
@@ -86,6 +96,7 @@ pub fn list_accounts(state: RuntimeState<'_>) -> Result<Vec<AccountView>, String
             let record_count = repo
                 .count_records(account.id, &RecordFilter::default())
                 .map_err(to_message)?;
+            let retention_risk = gs_host::retention::evaluate_account_retention_risk(&account, now);
             Ok(AccountView {
                 id: account.id,
                 plugin_id: account.plugin_id,
@@ -95,6 +106,7 @@ pub fn list_accounts(state: RuntimeState<'_>) -> Result<Vec<AccountView>, String
                 last_collected_at: account.last_collected_at,
                 earliest_record_at: account.earliest_record_at,
                 record_count,
+                retention_risk,
             })
         })
         .collect()

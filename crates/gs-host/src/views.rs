@@ -51,6 +51,54 @@ pub struct AccountView {
     pub earliest_record_at: Option<i64>,
     /// 该账号名下的记录总数。
     pub record_count: i64,
+    /// 保留期风险评估，由 [`gs_analysis::retention_policy_for`] 声明的
+    /// 保守天数与本账号的采集边界推算，见 `gs_host::retention` 模块文档。
+    ///
+    /// `None` 表示"无法评估"，**不是"安全"**——插件没有声明保留期策略
+    /// （如鸣潮）、或该账号还一条记录都没有时，都没有可靠的判断依据，
+    /// 编一个等级出来（无论安全还是告警）都是给用户一个假象。
+    pub retention_risk: Option<RetentionRiskView>,
+}
+
+/// 保留期风险等级。三档对应"还有充裕缓冲 / 该去采集了 / 保守估计已超期"。
+///
+/// 只有三档、没有第四档"未知"——"无法评估"这件事由外层 `Option` 表达
+/// （见 [`AccountView::retention_risk`]），不塞进这个枚举里：等级本身要回答
+/// 的是"风险有多急"，与"有没有能力回答这个问题"是两个维度，混在一起会让
+/// 消费方每次 match 这个枚举时都要顺带处理一个语义完全不同的"哨兵值"。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename_all = "camelCase")]
+pub enum RetentionRiskLevel {
+    /// 距保守估计的过期时刻还有 30 天以上缓冲。
+    Safe,
+    /// 缓冲已经进入 30 天以内（含 0 天）——该提醒用户尽快采集了。
+    Watch,
+    /// 已经超出保守估计的保留期。**不是"数据已丢失"的断言**——保留期本身
+    /// 是保守估计，服务端实际策略可能比这个估计更宽松；措辞与
+    /// [`AccountView::retention_risk`] 一致，一律说"可能已丢失"。
+    Alert,
+}
+
+/// 单个账号的保留期风险评估结果，[`RetentionRiskLevel`] 的三档判据与
+/// `possible_loss_from`/`possible_loss_to` 的取值来源见
+/// `gs_host::retention::evaluate_account_retention_risk` 的文档。
+#[derive(Debug, Clone, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct RetentionRiskView {
+    pub level: RetentionRiskLevel,
+    /// 距"最早本地记录理论过期时刻"还剩的天数，可能为负——为负表示已经
+    /// 超出保守估计的保留期（对应 [`RetentionRiskLevel::Alert`]）。
+    pub remaining_days: i64,
+    /// 仅 [`RetentionRiskLevel::Alert`] 时有值：这段时间区间内发生的记录，
+    /// 按保留期保守估计**可能**已经无法再从官方接口取回（UTC 毫秒，闭区间）。
+    /// 措辞刻意用"可能"——不断言"已丢失"，见字段所在结构体的文档。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub possible_loss_from: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub possible_loss_to: Option<i64>,
 }
 
 /// 一页记录。

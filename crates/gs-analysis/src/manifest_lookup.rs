@@ -1,5 +1,6 @@
 //! 按任意已注册插件 id 读取 manifest 声明的展示名 / 稀有度阶梯 / 保底组 /
-//! 卡池——全部从 `gs-manifest-data` 暴露的纯数据 JSON 直接反序列化。
+//! 卡池 / 保留期策略——全部从 `gs-manifest-data` 暴露的纯数据 JSON 直接
+//! 反序列化。
 //!
 //! ## 与 `banner_meta_seed.rs` 的分工
 //!
@@ -12,7 +13,7 @@
 //! 公共函数保留不动（`pity.rs`/`rarity.rs`/`rare_event.rs` 的测试与集成测试
 //! 都在用），内部实现改为调用本模块，避免两份反序列化逻辑漂移。
 
-use gs_core::{BannerSpec, LocalizedText, PityGroup, RaritySpec};
+use gs_core::{BannerSpec, LocalizedText, PityGroup, RaritySpec, RetentionPolicy};
 
 /// 取某个插件 manifest 的纯数据根节点，找不到就 panic——manifest 纯数据
 /// 缺失意味着没跑过 `node scripts/gs-bundle-plugins.mjs`，属于开发期配置
@@ -86,9 +87,47 @@ pub fn display_name_for(plugin_id: &str) -> String {
         .unwrap_or_else(|| plugin_id.to_string())
 }
 
+/// `plugin_id` 声明的保留期策略，直接来自 manifest `retention` 字段。
+///
+/// 与 [`pity_groups_for`]/[`rarity_spec_for`]/[`banners_for`] 不同，
+/// `retention` 在 `PluginManifest` 里是**可选字段**（省略表示这个游戏不做
+/// 保留期监测——鸣潮就是真实的例子，`plugins/wuwa/manifest.ts` 明确注释了
+/// "没有任何来源给出鸣潮官方记录保留期，不跨游戏挪用米哈游三游『6 个月』
+/// 的说法"，宁可不声明也不编造一个数字）。因此这里不能像那几个
+/// 必填字段一样对缺失 panic——`retention` 键本身可能在 manifest JSON 里
+/// 整个不存在（`JSON.stringify` 会丢弃值为 `undefined` 的可选键），用
+/// `Value::get` 返回 `Option` 而不是 `manifest_root` 那种"找不到就 panic"
+/// 的处理方式，调用方（`gs-host` 的建账号/风险评估逻辑）必须显式处理
+/// "这个游戏没有保留期基准"这个真实存在的情况，不能假设它总有值。
+pub fn retention_policy_for(plugin_id: &str) -> Option<RetentionPolicy> {
+    let root = manifest_root(plugin_id);
+    let value = root.get("retention")?;
+    if value.is_null() {
+        return None;
+    }
+    Some(deserialize_or_panic(plugin_id, "retention", value))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retention_policy_for_reads_genshin_conservative_days_and_display_text() {
+        let policy = retention_policy_for("genshin").expect("genshin manifest 已声明 retention");
+        assert_eq!(policy.conservative_days, 168); // 6 * 28
+        assert_eq!(
+            policy.display_text.0.get("zh-CN").map(String::as_str),
+            Some("6 个月")
+        );
+    }
+
+    #[test]
+    fn retention_policy_for_returns_none_when_plugin_does_not_declare_it() {
+        // 鸣潮真实场景：manifest 明确不声明 retention（没有可靠来源给出保留
+        // 期天数），这里必须老实返回 None，不能编出一个数字冒充有依据。
+        assert_eq!(retention_policy_for("wuwa"), None);
+    }
 
     #[test]
     fn rarity_spec_for_reads_non_standard_ladder_for_zzz() {

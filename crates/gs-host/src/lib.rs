@@ -17,6 +17,7 @@ pub mod analysis;
 pub mod archive;
 pub mod catalog;
 pub mod import;
+pub mod retention;
 pub mod views;
 
 /// 宿主运行时：当前只承载一个存储连接，后续随 IPC 命令实现逐步扩充

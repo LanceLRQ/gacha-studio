@@ -67,6 +67,49 @@ fn imports_a_uigf_archive_end_to_end_and_creates_the_account() {
 }
 
 #[test]
+fn creating_a_new_account_during_import_writes_retention_days_from_the_manifest() {
+    let runtime = PluginRuntime::new().expect("插件运行时应当能正常启动");
+    let storage = Storage::open_in_memory().expect("应当能打开内存数据库");
+    let repo = storage.repository();
+
+    let bytes = read_fixture_bytes("fixtures/genshin/archive/uigf_v4_genshin.json");
+    let report = import_archive_bytes(&bytes, &runtime, &repo, CAPTURED_AT)
+        .expect("UIGF 存档应当能端到端导入");
+
+    let account = repo
+        .find_account(report.accounts[0].account_id)
+        .expect("查询应当成功")
+        .expect("账号应当存在");
+    assert_eq!(
+        account.retention_days,
+        Some(168),
+        "genshin manifest 声明了 retention.conservativeDays = 6*28，\
+         新建账号时应当直接写入这一列，不该留 NULL 等着日后补"
+    );
+}
+
+#[test]
+fn creating_a_new_account_for_a_plugin_without_a_retention_policy_leaves_it_null() {
+    // 鸣潮真实场景：manifest 没有声明 retention，新建账号时不该编一个天数。
+    let runtime = PluginRuntime::new().expect("插件运行时应当能正常启动");
+    let storage = Storage::open_in_memory().expect("应当能打开内存数据库");
+    let repo = storage.repository();
+
+    let bytes = read_fixture_bytes("fixtures/wuwa/archive/wwgacha_archive.json");
+    let report = import_archive_bytes(&bytes, &runtime, &repo, CAPTURED_AT)
+        .expect("wwgacha 存档应当能端到端导入");
+
+    let account = repo
+        .find_account(report.accounts[0].account_id)
+        .expect("查询应当成功")
+        .expect("账号应当存在");
+    assert_eq!(
+        account.retention_days, None,
+        "鸣潮插件没有声明 retention 策略，不能默认任何天数"
+    );
+}
+
+#[test]
 fn imports_a_wwgacha_archive_end_to_end() {
     let runtime = PluginRuntime::new().expect("插件运行时应当能正常启动");
     let storage = Storage::open_in_memory().expect("应当能打开内存数据库");

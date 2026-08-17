@@ -157,7 +157,17 @@ const CONTRACT_SECTIONS = [
     knownUnconsumed: [
       {
         field: 'displayName',
-        reason: '纯展示字段，前端直接读 manifest bundle 原始 JSON 渲染，L1 执行逻辑不需要它。',
+        reason:
+          '展示字段，L1 采集流水线不需要它（本区块盯的 BannerSpecJson 是 gs-p-authkey ' +
+          '的采集侧镜像，它只关心怎么把卡池拉下来，不关心卡池叫什么）。' +
+          '⚠️ 但它**不是没人消费**：gs-host/src/catalog.rs 读 gs_core::BannerSpec 的 ' +
+          'display_name 并经 list_games 命令送给前端，有测试断言（catalog.rs ' +
+          '“genshin_view_carries_display_name_ladder_and_banner_labels”）。' +
+          '本白名单豁免的只是“L1 采集侧镜像不消费”这一条，不代表该字段是死字段。' +
+          '（2026-08-17 更正：此处原写“前端直接读 manifest bundle 原始 JSON 渲染”，' +
+          '那是错的——插件打包进 crates/gs-plugin-runtime/generated/plugins.bundle.js ' +
+          '给 QuickJS 用，web/tsconfig.json 只 include src，前端根本读不到它。' +
+          'list_games 命令存在的全部理由就是这个。）',
       },
     ],
   },
@@ -262,8 +272,14 @@ const CONTRACT_SECTIONS = [
       {
         field: 'describe',
         reason:
-          '纯展示字段（前置条件的说明文案），前端/UI 直接读原始 manifest JSON 渲染，不需要 Rust 消费点——' +
-          '与上面 BannerSpec.displayName 白名单同类理由，见 manifest.ts Precondition.describe 的字段注释。',
+          '展示字段（前置条件的说明文案），Rust 侧确无消费点。但**不是无人把关**：' +
+          'REQWORD 门（checks/precondition-wording.mjs）从 plugins.manifest.json 读它，' +
+          '机械检查 level 为 required 的文案里不得出现「建议/推荐/最好」——' +
+          '措辞与代码行为不一致比不写更有害，那道门就是为它建的。' +
+          '⚠️ 呈现侧尚未落地：前端 grep "precondition" 零命中，SDK §3.8 要求的三个呈现时机' +
+          '（入口渲染 / 触发前禁用 / 失败补救）一个都没做，随 S3 采集接线一并补。' +
+          '（2026-08-17 更正：此处原写“前端/UI 直接读原始 manifest JSON 渲染”，' +
+          '那是错的——前端读不到 manifest bundle，理由同 BannerSpec.displayName 那条白名单。）',
       },
       {
         field: 'check',
@@ -272,6 +288,36 @@ const CONTRACT_SECTIONS = [
           '而是通过 self.plugin_runtime.call(&self.plugin_id, &format!("manifest.preconditions.{index}.check"), ...) ' +
           '按路径字符串调用 QuickJS 里的实际函数（见 pipeline.rs check_preconditions 方法），不适用' +
           '"字段名对应 Rust 消费"这个判定框架，无论是 rustStruct 模式还是 literalRead 模式都测不出来。',
+      },
+    ],
+  },
+  {
+    // 「数据保留期提醒」功能补的登记：manifest 的 retention 字段声明了三个月
+    // （从 M1-S1 落地到 2026-08-17）都没有被 Rust 侧读过——`conservativeDays`
+    // 一直只是从 JSON 反序列化出来又立刻被丢弃，`account.retention_days`
+    // 这一列因此从建库起就恒为 NULL，本门当时还没登记这个区块，看不见这个
+    // 缺口。这次补上消费点（`crates/gs-host/src/archive.rs` 建账号时写入、
+    // `crates/gs-host/src/retention.rs` 补写历史空洞的账号）之后，顺带把
+    // 登记也补上，避免同一类"声明了没人读"的缺口再次不被发现。
+    //
+    // 自己镜像自己，理由与上面 PityGroup 完全一致：`RetentionPolicy` 定义
+    // 在 crates/gs-core/src/record.rs，本身就带
+    // `#[derive(..., Serialize, Deserialize, TS)]`，ts-rs 直接从它生成
+    // types/generated.ts 里的 RetentionPolicy 类型，不是另找了个 `*Json`
+    // 后缀的副本，所以 rustStruct 直接写 'RetentionPolicy'。
+    tsType: 'RetentionPolicy',
+    tsFile: 'packages/gs-plugin-kit/types/generated.ts',
+    rustStruct: 'RetentionPolicy',
+    rustFile: 'crates/gs-core/src/record.rs',
+    knownUnconsumed: [
+      {
+        field: 'displayText',
+        reason:
+          '保留期的展示文案（如"6 个月"）。本轮任务范围只覆盖 conservativeDays 驱动的风险计算与建账号补写' +
+          '（crates/gs-host/src/archive.rs、crates/gs-host/src/retention.rs），displayText 尚无 Rust 消费点——' +
+          '不像 BannerSpec.displayName 那样有可以类比的"前端读原始 JSON"路径（`web/` 的 tsconfig 不 include ' +
+          '插件 manifest bundle，见 crates/gs-host/src/views.rs 模块文档），如果后续要在界面上展示这段文案，' +
+          '需要与 conservativeDays 一样通过 IPC 视图透出，届时应在这里移除本条白名单，不是继续加理由续期。',
       },
     ],
   },

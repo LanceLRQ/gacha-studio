@@ -209,6 +209,15 @@ fn import_one_batch(
     })
 }
 
+/// 按插件 manifest 声明的保留期换算出建账号时应写入的 `retention_days`。
+///
+/// manifest 没有声明 `retention`（`RetentionPolicy` 是可选字段，鸣潮就是
+/// 真实的"不声明"案例）时返回 `None`——不默认任何天数，理由见
+/// `gs_analysis::retention_policy_for` 与 `gs_host::retention` 模块文档。
+fn retention_days_for_new_account(plugin_id: &str) -> Option<i64> {
+    gs_analysis::retention_policy_for(plugin_id).map(|policy| i64::from(policy.conservative_days))
+}
+
 /// 把存档里的账号标识解析成本地 `account.id`，必要时新建。
 ///
 /// 分两条路，取决于存档**有没有声明区服**：
@@ -235,7 +244,7 @@ fn resolve_account_id(
             game_uid: uid.to_string(),
             region: region.to_string(),
             display_name: None,
-            retention_days: None,
+            retention_days: retention_days_for_new_account(plugin_id),
             created_at: captured_at,
         })?);
     }
@@ -252,7 +261,7 @@ fn resolve_account_id(
             // 本函数不越权去改已有账号的身份字段。
             region: String::new(),
             display_name: None,
-            retention_days: None,
+            retention_days: retention_days_for_new_account(plugin_id),
             created_at: captured_at,
         })?),
         _ => Err(ArchiveImportError::AmbiguousAccount {

@@ -32,7 +32,8 @@ use gs_core::{
 use gs_host::views::{
     AccountAnalysisView, AccountView, CurveEvaluationView, GameView, ImportReport,
     ImportedAccountReport, OverviewStatsView, PityGroupProgressView, PityPullView,
-    PluginRarityDistributionView, RarityDistributionView, RecordPage,
+    PluginRarityDistributionView, RarityDistributionView, RecordPage, RetentionRiskLevel,
+    RetentionRiskView,
 };
 use std::fs;
 use std::path::PathBuf;
@@ -126,6 +127,9 @@ fn main() {
     // （一句话：那份是插件契约、要过 HC-3 的 zod 覆盖率检查，这份是应用
     // 自己的 IPC 形状、给它写 zod 是用运行时校验去验自己的输出）。
     let ipc_decls: Vec<(&str, String)> = vec![
+        // --- 账号列表（list_accounts），保留期风险先于引用它的 AccountView ---
+        ("RetentionRiskLevel", RetentionRiskLevel::decl(&cfg)),
+        ("RetentionRiskView", RetentionRiskView::decl(&cfg)),
         ("AccountView", AccountView::decl(&cfg)),
         ("RecordPage", RecordPage::decl(&cfg)),
         ("ImportReport", ImportReport::decl(&cfg)),

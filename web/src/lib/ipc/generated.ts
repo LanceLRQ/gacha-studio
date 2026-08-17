@@ -1,6 +1,19 @@
 // 本文件由 gs-codegen 生成，禁止手改。修改请改 crates/gs-host/src/views.rs 后重跑 `cargo run -p gs-host --bin gs-codegen`。
 import type { GachaRecord, RaritySpec, BannerSpec } from "gs-plugin-kit/types";
 
+export type RetentionRiskLevel = "safe" | "watch" | "alert";
+export type RetentionRiskView = { level: RetentionRiskLevel, 
+/**
+ * 距"最早本地记录理论过期时刻"还剩的天数，可能为负——为负表示已经
+ * 超出保守估计的保留期（对应 [`RetentionRiskLevel::Alert`]）。
+ */
+remainingDays: number, 
+/**
+ * 仅 [`RetentionRiskLevel::Alert`] 时有值：这段时间区间内发生的记录，
+ * 按保留期保守估计**可能**已经无法再从官方接口取回（UTC 毫秒，闭区间）。
+ * 措辞刻意用"可能"——不断言"已丢失"，见字段所在结构体的文档。
+ */
+possibleLossFrom?: number, possibleLossTo?: number, };
 export type AccountView = { id: number, 
 /**
  * 归属插件，即游戏标识（`genshin` / `wuwa` / `starrail` / `zzz`）。
@@ -19,7 +32,16 @@ earliestRecordAt: number | null,
 /**
  * 该账号名下的记录总数。
  */
-recordCount: number, };
+recordCount: number, 
+/**
+ * 保留期风险评估，由 [`gs_analysis::retention_policy_for`] 声明的
+ * 保守天数与本账号的采集边界推算，见 `gs_host::retention` 模块文档。
+ *
+ * `None` 表示"无法评估"，**不是"安全"**——插件没有声明保留期策略
+ * （如鸣潮）、或该账号还一条记录都没有时，都没有可靠的判断依据，
+ * 编一个等级出来（无论安全还是告警）都是给用户一个假象。
+ */
+retentionRisk: RetentionRiskView | null, };
 export type RecordPage = { 
 /**
  * 当前筛选条件下的记录总数，供界面算总页数。

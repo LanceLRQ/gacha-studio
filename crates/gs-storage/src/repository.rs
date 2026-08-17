@@ -1092,6 +1092,30 @@ impl<'conn> Repository<'conn> {
             .map_err(storage_err)
     }
 
+    /// 补写账号的 `retention_days`。
+    ///
+    /// 只用于**补齐历史空洞**——账号创建时（`create_account`）本该已经从
+    /// 插件 manifest 的 `retention.conservativeDays` 写好这一列；本方法存在
+    /// 的唯一理由是修正"创建时没能写上"的既成事实（这一列在这条消费路径
+    /// 补齐之前一律是 `NULL`），调用方（`gs_host::retention::
+    /// backfill_missing_retention_days`）已经自行判断过"这一列确实是
+    /// `NULL`"才会调用，本方法因此不做条件更新（不带 `WHERE retention_days
+    /// IS NULL`），无条件覆盖——调用方的判断就是唯一的守门条件，这里重复
+    /// 一遍只会让"什么时候真的会写"这件事分散在两个地方。
+    pub fn update_account_retention_days(
+        &self,
+        id: i64,
+        retention_days: i64,
+    ) -> Result<(), GsError> {
+        self.conn
+            .execute(
+                "UPDATE account SET retention_days = ?2 WHERE id = ?1",
+                params![id, retention_days],
+            )
+            .map_err(storage_err)?;
+        Ok(())
+    }
+
     /// 一次成功采集后更新账号的采集边界。`earliest_record_at` 只在传入
     /// `Some` 时覆盖（`COALESCE` 到旧值），因为它语义是"本地最早记录时间"，
     /// 一次采集若没有比现有记录更早的新记录，不应该被冲掉。
@@ -1295,7 +1319,42 @@ impl<'conn> Repository<'conn> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Storage;
     use gs_core::{MetaState, RecordSource, TzOrigin};
+
+    #[test]
+    fn update_account_retention_days_backfills_a_previously_null_column() {
+        let storage = Storage::open_in_memory().expect("应当能打开内存数据库");
+        let repo = storage.repository();
+        let account_id = repo
+            .create_account(&NewAccount {
+                plugin_id: "wuwa".to_string(),
+                game_uid: "100000000".to_string(),
+                region: "official".to_string(),
+                display_name: None,
+                retention_days: None,
+                created_at: 1_754_800_000_000,
+            })
+            .expect("创建账号应当成功");
+
+        let before = repo
+            .find_account(account_id)
+            .expect("查询应当成功")
+            .expect("账号应当存在");
+        assert_eq!(before.retention_days, None, "补写前应当是 NULL");
+
+        repo.update_account_retention_days(account_id, 168)
+            .expect("补写应当成功");
+
+        let after = repo
+            .find_account(account_id)
+            .expect("查询应当成功")
+            .expect("账号应当存在");
+        assert_eq!(after.retention_days, Some(168), "补写后应当读到新值");
+        // 补写只动 retention_days 这一列，其余字段应当原样保留。
+        assert_eq!(after.plugin_id, before.plugin_id);
+        assert_eq!(after.game_uid, before.game_uid);
+    }
 
     #[test]
     fn normalize_empty_turns_empty_string_into_none() {
