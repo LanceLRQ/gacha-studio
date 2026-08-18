@@ -13,10 +13,27 @@ packages:
 # 共享依赖的单一版本源。各包写 "catalog:" 引用，避免版本在多处漂移
 # —— 插件数量会随里程碑增长，每个插件一份 package.json，分散声明必然失同步。
 catalog:
-  # 锁在 6.x：typescript-eslint 的 peer 要求为 >=4.8.4 <6.1.0，
-  # TypeScript 7 尚未提供稳定的 programmatic API（预计 7.1），
-  # 导致 typescript-eslint 无法工作。本项目的 lint 承担 HC-1 静态检查职责
-  # （禁 eval / new Function / 动态 import），属安全基础设施，不可缺。
+  # ⚠️ 2026-08-18 更正：本条原先写的锁定理由**不成立**，已重写。
+  #
+  # 原文称「typescript-eslint 的 peer 要求为 >=4.8.4 <6.1.0，TS 7 尚未提供稳定的
+  # programmatic API，导致 typescript-eslint 无法工作。本项目的 lint 承担 HC-1
+  # 静态检查职责，属安全基础设施，不可缺」。逐条核实后三处都对不上：
+  #   ① **全仓没有 eslint**——没有任何 eslint 配置文件，没有 eslint 依赖，
+  #      也没有任何包声明 `lint` 脚本。为一个不存在的依赖付版本锁定的代价。
+  #   ② **HC-1 不是 typescript-eslint 做的**——它是
+  #      `scripts/gs-check/checks/no-dynamic-import.mjs`，一个对
+  #      `plugins/**/*.ts` 做文本扫描的自研脚本，**根本不 import `typescript`**。
+  #   ③ 全仓 `scripts/` 下没有任何地方使用 TypeScript 的 programmatic API
+  #      （无 `createProgram`/`createSourceFile`/`ts-morph`），所以「TS 7 缺稳定
+  #      programmatic API」这件事对本仓库当前用法不构成障碍——`typescript` 在
+  #      这里的唯一用途是 `tsc --noEmit`（根 `package.json` 的 `typecheck`）。
+  #
+  # 现在为什么仍然锁在 6.x：**只是还没有验证过 TS 7**。TS 7 是 Go 重写的
+  # 新实现，`tsc --noEmit` 在本仓库这套配置（`verbatimModuleSyntax` +
+  # `noUncheckedIndexedAccess` + `isolatedModules` + Bundler 解析）下行为是否
+  # 一致尚未实测。这是「未验证」，不是「有已知阻塞」——两者不该用同一句话
+  # 描述，前者是可以安排的一次验证，后者会让人以为此路不通而不再尝试。
+  # 升级前请实测，不要仅凭本注释放行。
   typescript: ^6.0.3
   zod: ^4.4.3
 

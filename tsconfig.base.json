@@ -14,6 +14,15 @@
     "skipLibCheck": true,
     "strict": true,
     "noUncheckedIndexedAccess": true,
+    // 2026-08-18 开启。此前死 import 与死变量在 `pnpm typecheck` 下完全静默，
+    // 而全仓没有 eslint、也没有任何 lint 脚本——等于前端侧「有没有留下没用的
+    // 东西」这件事没有任何机械把关。触发它的实例：删设置页图标 URL 输入框
+    // 区块时，是靠逐个符号 `grep -c` 人工数出来的（数到 1 说明只剩 import 那行），
+    // 可行但不可持续，这类清理今后只会更多。
+    // 开启前实测六个包（web / gs-plugin-kit / 四个插件）**零违规**，
+    // 因此是零清理成本的纯增益，不需要配套的一次性整改。
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
     "noEmit": true
   }
 }
