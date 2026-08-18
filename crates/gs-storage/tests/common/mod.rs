@@ -1,5 +1,5 @@
 //! 集成测试共用的构造函数，避免每个测试文件重复拼一遍
-//! `GachaRecord` 的 19 个字段。
+//! `GachaRecord` 的 21 个字段。
 //!
 //! `allow(dead_code)`：Rust 的集成测试是**每个 tests/*.rs 一个独立编译单元**，
 //! `mod common` 会在每个单元里各编译一遍，用不到全部函数的那些单元就会报
@@ -74,5 +74,7 @@ pub fn sample_record(account_id: i64, banner_key: &str, record_key: &str) -> Gac
         captured_at: 1_754_812_801_000,
         raw_ref: None,
         extra: None,
+        stable_id: None,
+        gacha_id: None,
     }
 }

@@ -30,12 +30,14 @@ pub use banner_meta_seed::{
 };
 pub use baseline::{DrawCountRange, IntegrityGap, evaluate_draw_count_gap};
 pub use manifest_lookup::{
-    banners_for, display_name_for, pity_groups_for, platform_supported, platforms_for,
-    rarity_spec_for, retention_policy_for, supports_current_platform,
+    banners_for, display_name_for, online_metadata_request_for, pity_groups_for,
+    platform_supported, platforms_for, rarity_spec_for, retention_policy_for,
+    supports_current_platform, tier_labels_for,
 };
 pub use pity::{
     CurveEvaluation, HitOutcome, PityCounter, PityGroupReport, PityPull, analyze_pity_group,
-    apply_guarantee_rule, evaluate_curve, hit_outcomes_from_rare_events,
+    apply_guarantee_rule, evaluate_curve, hit_outcome_from_is_rate_up,
+    hit_outcomes_from_rare_events,
 };
 pub use rare_event::derive_rare_events;
 pub use rarity::{

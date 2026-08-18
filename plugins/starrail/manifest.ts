@@ -205,16 +205,22 @@ export const manifest = {
         time: toNonEmptyString(record.time) ?? "",
         // bannerId 用 gacha_type（卡池类别码：1/2/11/12/21/22），不是
         // gacha_id——gacha_id 是具体卡池实例 id（如同一类别码下随时间推出的
-        // 不同期数，research/03 §1.2 实测有 49 种真实取值），
-        // UnifiedRecordFields 没有字段能承载它，会导致 banners[] 需要枚举
-        // 持续增长的实例 id，维护负担远高于按类别声明，因此不落地这个信息，
-        // 只保留 gacha_type 这一层卡池类别。
+        // 不同期数，research/03 §1.2 实测有 49 种真实取值）。把它塞进
+        // bannerId 会导致 banners[] 需要枚举持续增长的实例 id，维护负担远
+        // 高于按类别声明，因此卡池归属仍然只用 gacha_type 这一层类别；
+        // gacha_id 改走下方独立的 gachaId 字段留底（不参与卡池归属判定）。
         bannerId: toNonEmptyString(record.gacha_type) ?? "",
         count: toCount(record.count),
         name: toNonEmptyString(record.name),
         itemType: toNonEmptyString(record.item_type),
         rarity: toNonEmptyString(record.rank_type),
         stableId: toNonEmptyString(record.id),
+        // 星铁 API 原生返回 gacha_id（真实存档实测，research/03 §1.2/§1.3
+        // 样例记录里的 "gacha_id": "2041"）。UnifiedRecordFields.gachaId 现已
+        // 承载这个字段（UIGF v4.2 hkrpg 段把它列为 required），原样落库留底；
+        // ⚠️ 不用它做卡池归属判定——49 种真实取值无法可靠映射回稳定的
+        // BannerSpec，理由同上方 bannerId 的说明，本次改动不改变这一点。
+        gachaId: toNonEmptyString(record.gacha_id),
       };
     },
   },
@@ -303,7 +309,15 @@ export const manifest = {
   // 本轮只声明 5★ 保底组，不声明 4★ 组——基线 plugins/genshin/manifest.ts
   // 同样没有 4★ 分组，保持可比；本轮未覆盖，留待后续有分桶数据支撑时再补。
 
-  rarity: { ladder: ["3", "4", "5"], pityTarget: "5" },
+  rarity: {
+    ladder: ["3", "4", "5"],
+    pityTarget: "5",
+    tierLabels: {
+      "3": { "zh-CN": "三星" },
+      "4": { "zh-CN": "四星" },
+      "5": { "zh-CN": "五星" },
+    },
+  },
 
   time: {
     // 直连官方 API，得到的是服务器本地时间字符串，不带时区

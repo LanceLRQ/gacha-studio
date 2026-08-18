@@ -18,6 +18,15 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 tauri = { version = "2", features = [] }
 gs-host.workspace = true
+# backfill_pending_metadata 命令要按插件维度枚举"哪些插件声明了在线元数据
+# Provider"（gs_analysis::online_metadata_request_for）并遍历全部已注册插件
+# id（gs_analysis::registered_plugin_ids）——gs-host 已经依赖 gs-analysis，
+# 但同样不能只靠传递依赖使用它，理由同上面 gs-storage 那条注释。
+gs-analysis.workspace = true
+# online_metadata_request_for 返回 gs_core::RequestTemplate，本文件需要按
+# 名字引用这个类型（resolve_dictionary_for_lang 的参数类型），同样不能只靠
+# gs-analysis/gs-host 的传递依赖使用它。
+gs-core.workspace = true
 gs-plugin-runtime.workspace = true
 # list_records 的筛选条件要装进 gs_storage::RecordFilter 传给 gs-host——
 # gs-host 已经依赖 gs-storage，但 Rust 不允许只靠传递依赖使用一个 crate，

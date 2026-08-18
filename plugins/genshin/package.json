@@ -4,7 +4,7 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
-    "test": "node --experimental-strip-types fixture.test.ts"
+    "test": "node --experimental-strip-types fixture.test.ts && node --experimental-strip-types metadata.test.ts"
   },
   "dependencies": {
     "gs-plugin-kit": "workspace:*"

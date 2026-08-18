@@ -2,9 +2,27 @@
 //!
 //! 现有的第三方抽卡记录工具会把采集结果导出成各自的本地存档文件（例如鸣潮
 //! 参考项目 `WWGachaExport` 的本地 JSON 存档，见 [`wwgacha`] 模块）。本 crate
-//! 的职责只有两步：**识别**（sniff）出一个文件是不是某种已知存档格式，
+//! 最初的职责只有两步：**识别**（sniff）出一个文件是不是某种已知存档格式，
 //! **导入**（import）成本项目能消费的中间形状——让用户能把已有的第三方导出
 //! 存档一键导入进来，不用重新走一遍采集流程。
+//!
+//! ## 第三个职责：UIGF 导出侧的单条记录组装（`uigf` 模块新增）
+//!
+//! 本项目落地"导出"功能时，`uigf` 模块新增了 `hk4e_export_item` /
+//! `hkrpg_export_item` / `nap_export_item` 三个函数，把落库后的
+//! [`gs_core::GachaRecord`] 反方向组装成 UIGF v4 的单条 item——与已有的
+//! `import` 方向对称，两个方向需要的都是"UIGF 每个游戏段的字段形状是什么样"
+//! 这同一份知识（`gacha_id` 在 hk4e 不存在/hkrpg 必填/nap 可选、`400→301`
+//! 的 `uigf_gacha_type` 归一化等）。把这份知识拆到两个 crate 里各存一份，
+//! 才是真正违反"职责单一"的做法——因此选择让本 crate 的职责从"识别 + 导入"
+//! 扩成"识别 + 导入 + （UIGF 专属的）导出侧记录组装"，而不是新开一个只装得下
+//! 导出一半逻辑的 crate。
+//!
+//! **跨账号编排（CSV、遍历 `Repository` 里的全部账号、拼出最终 IPC 报告）
+//! 不在这里**——那需要 `gs-storage`，本 crate 明确不依赖它（见
+//! `Cargo.toml` 的依赖注释），因此落在 `gs_host::export`，是"内核在
+//! `gs-exchange`、编排在 `gs-host`"的同一种分工，与 `gs_host::archive` 之于
+//! `gs_host::import` 的关系一致。
 //!
 //! **已接线（M2-S6）**：`gs-host` 的 `import` 模块依赖本 crate，把
 //! [`ExchangeAdapter::import`] 产出的每个 [`ImportBatch`] 交给采集用的同一条
@@ -137,6 +155,27 @@ pub struct ImportAccount {
     /// 的存档本身已经带着这个偏移量，效果上等价，不需要再假装"没有响应体
     /// 就一定拿不到时区"。
     pub tz_offset_hours: Option<i32>,
+    /// 存档自身声明的语言标签，原样传出——**不在这里做别名归一化**。
+    ///
+    /// UIGF v4 的 `UigfProject.lang` 落在这里，语义与 `tz_offset_hours`
+    /// 同构：project 级（= 每游戏每账号）属性，属于账号，不属于整份文件。
+    ///
+    /// 不做归一化的理由：`GachaRecord.lang` 只有一个赋值点——
+    /// `AuthkeyApiPipeline::build_records` 内部
+    /// `lang.map(gs_p_authkey::locale::normalize_lang_alias)`
+    /// （`pipeline.rs` 该行注释："`build_records` 是 `GachaRecord.lang`
+    /// 唯一的赋值点……若改成在别处就近归一化，导入路径未来接上真实 lang
+    /// 来源时会需要在两处各自记得调用同一个函数"）。这里如果抢先归一化
+    /// 一遍，就是在制造第二处"记得调用同一个函数"的义务，正是这段注释要
+    /// 避免的问题——因此本字段原样保留 UIGF 给出的取值，归一化留给
+    /// `build_records` 那一处。
+    ///
+    /// 不携带语言信息的交换格式（如 wwgacha，`GameUser.cs` 没有这个字段）
+    /// 填 `None`；UIGF 声明为空字符串时同样原样传 `Some(String::new())`，
+    /// 不在这里提前折叠成 `None`——`None` 与空字符串在下游殊途同归，
+    /// `build_records` 之后的 `gs_storage::repository::normalize_empty`
+    /// 会把两者统一规整成 `NULL`，这里不需要越俎代庖。
+    pub lang: Option<String>,
 }
 
 /// 一个卡池维度的导入结果。

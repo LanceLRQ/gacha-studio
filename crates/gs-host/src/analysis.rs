@@ -12,13 +12,14 @@
 
 use std::collections::BTreeMap;
 
-use gs_analysis::{CurveEvaluation, PityGroupReport, PityPull, RarityDistribution};
-use gs_core::GsError;
+use gs_analysis::{CurveEvaluation, HitOutcome, PityGroupReport, PityPull, RarityDistribution};
+use gs_core::{GsError, PityGroup};
 use gs_storage::Repository;
 
 use crate::views::{
-    AccountAnalysisView, CurveEvaluationView, OverviewStatsView, PityGroupProgressView,
-    PityPullView, PluginRarityDistributionView, RarityDistributionView,
+    AccountAnalysisView, CurveEvaluationView, HitOutcomeView, MonthlyActivityView,
+    OverviewStatsView, PityGroupProgressView, PityPullView, PluginRarityDistributionView,
+    RarityDistributionView,
 };
 
 /// 单个账号的保底进度 + 稀有度分布，游戏详情页与记录明细表"保底内第几抽"
@@ -42,7 +43,24 @@ pub fn account_analysis(
     for group in &pity_groups {
         let records = repo.find_records_by_pity_group(account_id, &group.key)?;
         let report = gs_analysis::analyze_pity_group(group, &rarity_spec, &records);
-        pity_progress.push(pity_group_progress_view(report));
+
+        // "顶级记录是否歪"这一列的数据来源：在内存里重新跑一遍
+        // derive_rare_events（纯函数，不碰库），不依赖 `rare_event` 表已经
+        // 落过盘——那张表当前还没有任何写入路径接上（见
+        // `gs_analysis::rare_event` 模块文档），account_analysis 本来就是
+        // 每次都从 GachaRecord 现算 pity_progress，这里保持同一套架构，
+        // 不新引入"必须先跑过一次派生写入"这个前提。`derived.events` 的
+        // 顺序与 `report.pulls` 里 `is_pity_hit == true` 的子序列一一对应
+        // ——两者内部都是同一次 analyze_pity_group 调用产出的结果，见
+        // `derive_rare_events` 的文档。
+        let derived = gs_analysis::derive_rare_events(group, &rarity_spec, &records);
+        let hit_outcomes: Vec<HitOutcome> = derived
+            .events
+            .iter()
+            .map(|event| gs_analysis::hit_outcome_from_is_rate_up(event.is_rate_up))
+            .collect();
+
+        pity_progress.push(pity_group_progress_view(group, report, &hit_outcomes));
     }
 
     // 稀有度分布覆盖账号名下**全部**记录，不局限于声明过保底组的卡池——
@@ -56,6 +74,35 @@ pub fn account_analysis(
         pity_progress,
         rarity_distribution: rarity_distribution_view(distribution),
     })
+}
+
+/// 按自然月聚合某个账号的抽卡活动，游戏详情页"抽卡时间线（按月）"的数据
+/// 来源。聚合本身在 SQL 里完成（[`gs_storage::Repository::monthly_activity`]），
+/// 本函数只负责解析出该账号所属插件的顶级保底目标稀有度码（不是字面量
+/// `"5"`——绝区零是 `"4"`），再把查询结果投影成 IPC 视图。
+///
+/// `account_id` 对应的账号必须已存在，理由与错误形态同 [`account_analysis`]。
+pub fn monthly_activity(
+    repo: &Repository<'_>,
+    account_id: i64,
+) -> Result<Vec<MonthlyActivityView>, GsError> {
+    let account = repo.find_account(account_id)?.ok_or_else(|| {
+        GsError::Validation(format!(
+            "账号 id={account_id} 不存在于本地库中，无法统计月度活动"
+        ))
+    })?;
+
+    let rarity_spec = gs_analysis::rarity_spec_for(&account.plugin_id);
+    let rows = repo.monthly_activity(account_id, &rarity_spec.pity_target)?;
+
+    Ok(rows
+        .into_iter()
+        .map(|row| MonthlyActivityView {
+            month: row.month,
+            draws: row.draws,
+            top_tier_hits: row.top_tier_hits,
+        })
+        .collect())
 }
 
 /// 跨账号概览统计，总览页"跨游戏数据"这一块的数据来源。
@@ -107,18 +154,41 @@ pub fn overview_stats(repo: &Repository<'_>) -> Result<OverviewStatsView, GsErro
     })
 }
 
-fn pity_group_progress_view(report: PityGroupReport) -> PityGroupProgressView {
+fn pity_group_progress_view(
+    group: &PityGroup,
+    report: PityGroupReport,
+    hit_outcomes: &[HitOutcome],
+) -> PityGroupProgressView {
+    // `hit_outcomes` 只覆盖 `is_pity_hit == true` 的那些 pull（对应
+    // derive_rare_events 内部的 filter），按 occurred_at 升序，与
+    // `report.pulls` 里同样按 occurred_at 升序出现的命中子序列一一对应——
+    // 用一个游标顺序消费，不是按下标散取。
+    let mut hit_outcomes = hit_outcomes.iter();
     PityGroupProgressView {
         pity_group_key: report.pity_group_key,
+        guarantee: group.guarantee.clone(),
         hard_pity: report.hard_pity,
         current_pity: report.current_pity,
         next_pull_probability: curve_evaluation_view(report.next_pull_probability),
         unknown_rarity_count: report.unknown_rarity_count,
-        pulls: report.pulls.into_iter().map(pity_pull_view).collect(),
+        pulls: report
+            .pulls
+            .into_iter()
+            .map(|pull| {
+                let hit_outcome = if pull.is_pity_hit {
+                    hit_outcomes
+                        .next()
+                        .map(|outcome| hit_outcome_view(*outcome))
+                } else {
+                    None
+                };
+                pity_pull_view(pull, hit_outcome)
+            })
+            .collect(),
     }
 }
 
-fn pity_pull_view(pull: PityPull) -> PityPullView {
+fn pity_pull_view(pull: PityPull, hit_outcome: Option<HitOutcomeView>) -> PityPullView {
     PityPullView {
         banner_key: pull.banner_key,
         occurred_at: pull.occurred_at,
@@ -128,6 +198,15 @@ fn pity_pull_view(pull: PityPull) -> PityPullView {
         is_pity_hit: pull.is_pity_hit,
         record_id: pull.record_id,
         unknown_rarity_since_last_hit: pull.unknown_rarity_since_last_hit,
+        hit_outcome,
+    }
+}
+
+fn hit_outcome_view(outcome: HitOutcome) -> HitOutcomeView {
+    match outcome {
+        HitOutcome::RateUp => HitOutcomeView::RateUp,
+        HitOutcome::Off => HitOutcomeView::Off,
+        HitOutcome::Unknown => HitOutcomeView::Unknown,
     }
 }
 
@@ -166,6 +245,9 @@ mod tests {
     use super::*;
     use gs_core::{GachaRecord, MetaState, RecordKey, RecordSource, TzOrigin};
     use gs_storage::{NewAccount, Storage};
+
+    /// 2026-08-15T10:00:00Z，供 `monthly_activity` 相关测试复用。
+    const AUG_15_MS: i64 = 1_786_788_000_000;
 
     fn create_account(repo: &Repository<'_>, plugin_id: &str, game_uid: &str) -> i64 {
         repo.create_account(&NewAccount {
@@ -216,6 +298,8 @@ mod tests {
             captured_at: occurred_at,
             raw_ref: None,
             extra: None,
+            stable_id: None,
+            gacha_id: None,
         }
     }
 
@@ -288,6 +372,56 @@ mod tests {
         assert_eq!(analysis.rarity_distribution.counts["3"], 1);
         assert_eq!(analysis.rarity_distribution.counts["4"], 2);
         assert_eq!(analysis.rarity_distribution.counts["5"], 1);
+    }
+
+    #[test]
+    fn account_analysis_exposes_guarantee_rule_and_hit_outcome_for_top_tier_pulls() {
+        let storage = Storage::open_in_memory().expect("应当成功打开内存数据库");
+        let repo = storage.repository();
+        let account_id = create_account(&repo, "genshin", "100000000");
+
+        repo.insert_records(&[
+            // 未命中，hit_outcome 必须是 None——"是否歪"对非命中的 pull
+            // 没有意义。
+            record(
+                account_id,
+                "301",
+                "characterEventWish",
+                1,
+                "角色A",
+                Some("4"),
+            ),
+            // 命中：genshin 的 characterEventWish 组是 fiftyFifty，但当前
+            // 没有任何数据源能提供当期 UP 物品列表，hit_outcome 因此必须是
+            // Some(Unknown)——不能被静默当成"没歪"。
+            record(
+                account_id,
+                "301",
+                "characterEventWish",
+                2,
+                "角色B",
+                Some("5"),
+            ),
+        ])
+        .expect("插入应当成功");
+
+        let analysis = account_analysis(&repo, account_id).expect("分析应当成功");
+        let group = &analysis.pity_progress[0];
+
+        assert_eq!(
+            group.guarantee,
+            gs_core::GuaranteeRule::FiftyFifty {},
+            "genshin characterEventWish 声明的是 fiftyFifty，界面据此判断是否渲染「是否歪」列"
+        );
+        assert_eq!(
+            group.pulls[0].hit_outcome, None,
+            "未命中保底目标的 pull，「是否歪」不适用"
+        );
+        assert_eq!(
+            group.pulls[1].hit_outcome,
+            Some(HitOutcomeView::Unknown),
+            "命中了，但当前没有 UP 物品列表数据源，必须如实显示「不知道」，不能伪装成「没歪」"
+        );
     }
 
     #[test]
@@ -429,6 +563,55 @@ mod tests {
         assert_eq!(
             stats.total_pity_target_hits, 1,
             "只有绝区零那条 4 档记录命中了它自己的 pity_target"
+        );
+    }
+
+    #[test]
+    fn monthly_activity_rejects_unknown_account_id() {
+        let storage = Storage::open_in_memory().expect("应当成功打开内存数据库");
+        let repo = storage.repository();
+
+        let err = monthly_activity(&repo, 999).expect_err("不存在的账号应当报错，不是 panic");
+        assert!(matches!(err, GsError::Validation(_)));
+    }
+
+    #[test]
+    fn monthly_activity_resolves_the_accounts_own_pity_target_not_a_literal_five() {
+        // 绝区零形态：顶级保底目标是 "4"，不是米哈游三游习惯的 "5"——
+        // 这条测试锁死 monthly_activity 走 rarity_spec_for(plugin_id).pity_target，
+        // 而不是任何硬编码的稀有度字面量。
+        let storage = Storage::open_in_memory().expect("应当成功打开内存数据库");
+        let repo = storage.repository();
+        let account_id = create_account(&repo, "zzz", "10000001");
+
+        repo.insert_records(&[
+            record(
+                account_id,
+                "2",
+                "exclusiveChannel",
+                AUG_15_MS,
+                "代理人A",
+                Some("3"),
+            ),
+            record(
+                account_id,
+                "2",
+                "exclusiveChannel",
+                AUG_15_MS,
+                "代理人B",
+                Some("4"),
+            ),
+        ])
+        .expect("插入应当成功");
+
+        let months = monthly_activity(&repo, account_id).expect("统计应当成功");
+
+        assert_eq!(months.len(), 1);
+        assert_eq!(months[0].month, "2026-08");
+        assert_eq!(months[0].draws, 2);
+        assert_eq!(
+            months[0].top_tier_hits, 1,
+            "只有 rarity=\"4\" 那条应当算命中，用字面量 \"5\" 去查会得到 0"
         );
     }
 

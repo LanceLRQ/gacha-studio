@@ -515,6 +515,8 @@ struct UnifiedRecordFieldsJson {
     rarity: Option<String>,
     #[serde(rename = "stableId")]
     stable_id: Option<String>,
+    #[serde(rename = "gachaId")]
+    gacha_id: Option<String>,
 }
 
 // ============================================================
@@ -2007,6 +2009,13 @@ impl<'rt> AuthkeyApiPipeline<'rt> {
                 captured_at,
                 raw_ref: None,
                 extra: None,
+                // 此前解析出来即被丢弃（`UnifiedRecordFieldsJson.stable_id`/
+                // `.gacha_id` 有值，`GachaRecord` 却始终填 `None`）。两个字段
+                // 现在原样透传落库，不再丢——`gs_storage::repository` 的写入
+                // 路径会用 `normalize_empty` 把插件产出的空串规整成 NULL，
+                // 这里不需要重复归一化。
+                stable_id: fields.stable_id.clone(),
+                gacha_id: fields.gacha_id.clone(),
             });
         }
 
@@ -2548,6 +2557,22 @@ mod tests {
             "400:1400000000000000008"
         );
 
+        // stable_id 现在原样落库（此前解析出来即被丢弃），值应当与 record_key
+        // 里插件自行编码的雪花 ID 一致；genshin 响应不含 gacha_id 字段，
+        // 插件 extractRecord 也没有声明 gachaId，全部记录应当落 None，
+        // 不是被某个隐式默认值顶替。
+        assert_eq!(
+            records_400[0].stable_id.as_deref(),
+            Some("1400000000000000008")
+        );
+        assert!(
+            records_301
+                .iter()
+                .chain(records_400.iter())
+                .all(|r| r.gacha_id.is_none()),
+            "genshin extractRecord 未声明 gachaId，全部记录的 gacha_id 应为 None"
+        );
+
         // itemIdSource === "displayName"：全部记录都应标 pending，即使
         // name/itemType/rarity 三项都有值。
         assert!(
@@ -2825,6 +2850,16 @@ mod tests {
             .find(|r| r.record_key.as_str() == "11:1500000000000000001")
             .expect("应当能找到这条记录");
         assert_eq!(first_record.occurred_at, expected_utc_ms);
+
+        // stable_id/gacha_id 现在原样落库（此前解析出来即被丢弃）。fixture
+        // `11_page_1.json` 第一条记录是 `{"id": "1500000000000000001",
+        // "gacha_id": "2128", ...}`——两个值应当分别落进对应列，不是被拆
+        // record_key 反解出来，也不是被丢弃成 None。
+        assert_eq!(
+            first_record.stable_id.as_deref(),
+            Some("1500000000000000001")
+        );
+        assert_eq!(first_record.gacha_id.as_deref(), Some("2128"));
 
         // research/03 §1.3 的元数据缺失真实样例：item_id="1223" 有值，
         // name/item_type/rank_type 全为空串。星铁 itemIdSource 缺省

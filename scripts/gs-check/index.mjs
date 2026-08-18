@@ -17,6 +17,10 @@
 //        编号序列——它验证的是"两侧测试覆盖率不能只各自全绿"这件事，与
 //        插件 TS 化架构决策无关，归属同 SANI/FMT，见该门文件头注释）
 //   FMT  cargo fmt --all --check（格式化一致性，不属于 HC 编号序列）
+//   FLIC 前端依赖许可扫描（pnpm licenses list 对齐 deny.toml 的纯允许清单，
+//        不属于 HC 编号序列——它补的是 `docs/_internal/TASKS.md` 记录的已知
+//        缺口"前端侧无等价于 cargo deny 的机械化许可扫描"，与插件 TS 化架构
+//        决策无关，归属同 SANI/FMT/FIXRS，见该门文件头注释）
 // 任一门失守都应该退回 Rust 插件方案，所以这不是普通 lint，是持续门禁——
 // CI 平台还没定不能作为暂缓的理由，本脚本就是本地可跑、真实生效的替代。
 
@@ -29,6 +33,7 @@ import { run as runSanitizeSelfCheck } from './checks/sanitize-self-check.mjs';
 import { run as runPreconditionWording } from './checks/precondition-wording.mjs';
 import { run as runRustFixtureFlow } from './checks/rust-fixture-flow.mjs';
 import { run as runCargoFmt } from './checks/cargo-fmt.mjs';
+import { run as runFrontendLicense } from './checks/frontend-license.mjs';
 import { renderResult, renderSummary } from './lib/report.mjs';
 
 async function main() {
@@ -45,6 +50,7 @@ async function main() {
   results.push(await runPreconditionWording());
   results.push(await runRustFixtureFlow());
   results.push(await runCargoFmt());
+  results.push(await runFrontendLicense());
 
   for (const result of results) {
     renderResult(result);

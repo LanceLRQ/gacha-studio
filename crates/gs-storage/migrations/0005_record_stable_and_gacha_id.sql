@@ -1,0 +1,24 @@
+-- 给 gacha_record 补两列，把此前解析出来却被丢弃的两个字段接上落库路径。
+--
+-- stable_id：服务端返回的记录稳定 ID（米哈游三游的雪花 ID），来自插件
+-- `UnifiedRecordFields.stableId`。此前这个值只活在插件自定义编码的
+-- record_key 里（如原神的 `"${bannerId}:${stableId}"`），宿主不得反解这个
+-- 编码——那是插件私有格式，鸣潮的 record_key 结构完全不同，宿主解析它就是
+-- 越层，是本项目反复强调要避免的"同一逻辑两处各存一份"。本列独立落库，
+-- 供界面展示/校验/未来导出功能直接读取，不需要拆 record_key。
+--
+-- gacha_id：卡池实例 ID（如星铁的 "2003"），来自插件
+-- `UnifiedRecordFields.gachaId`。UIGF v4.2 权威 JSON Schema 对三款米哈游游戏
+-- 的必要性判定完全不同：hkrpg（星铁）段列为 required，nap（绝区零）段列为
+-- 可选，hk4e（原神）段根本不提这个字段——因此宿主契约层只能定成可选。
+--
+-- 两列都可空，且都必须允许 NULL（不是空字符串）：
+-- ① 鸣潮/异环这类没有服务端稳定 ID、也没有卡池实例 ID 的游戏，这两列恒为
+--    NULL，不是空字符串占位；
+-- ② 空串会一路穿过非空校验，只有 NULL 才强制每个消费点显式处理"这条记录
+--    没有这个值"的情况——与 0001_initial.sql 里 rarity 列的既有惯例一致
+--    （该列注释："空串必须在写入前转换为 NULL——空串会一路通过非空校验，
+--    只有 NULL 才强制每个消费点显式处理"），写入路径同样走
+--    repository.rs 的 normalize_empty 把空串规整成 NULL。
+ALTER TABLE gacha_record ADD COLUMN stable_id TEXT;
+ALTER TABLE gacha_record ADD COLUMN gacha_id  TEXT;

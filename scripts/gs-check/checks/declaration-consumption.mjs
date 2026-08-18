@@ -342,6 +342,34 @@ const CONTRACT_SECTIONS = [
     ],
   },
   {
+    // 「恢复稀有度本地化档位文案」补的登记：RaritySpec 新增 tierLabels 字段
+    // （稀有度码 → 本地化展示文案，如绝区零 "4" -> "S"），四个插件各自声明。
+    //
+    // 只登记 tierLabels 这一个字段（onlyFields），不登记整个 RaritySpec——
+    // ladder/pityTarget 早已在 gs-analysis（rarity.rs 的 `spec.ladder`、
+    // pity.rs/gs-host 的 `rarity_spec.pity_target`）有真实消费点，但那些
+    // 消费点是本次改动之前就存在的，把它们一起拉进本区块只会制造与本次
+    // 登记动机无关的重复判断；onlyFields 的语义是"只检查列出的字段，其余
+    // 完全不检查"，与 PluginManifest 区块的 onlyFields 用法同理。
+    //
+    // 自己镜像自己，理由与 PityGroup/RetentionPolicy 完全一致：RaritySpec
+    // 定义在 crates/gs-core/src/record.rs，本身就带
+    // `#[derive(..., Serialize, Deserialize, TS)]`，ts-rs 直接从它生成
+    // types/generated.ts 里的 RaritySpec 类型，不是另找了个 `*Json` 后缀
+    // 的副本，所以 rustStruct 直接写 'RaritySpec'。
+    //
+    // 真实消费点：crates/gs-analysis/src/manifest_lookup.rs 的
+    // `tier_labels_for` 读 `spec.tier_labels` 并解析成展示字符串，经
+    // gs-host 的 `catalog::list_games` 填入 `GameView.tierLabels`，供前端
+    // GameDetail.tsx/games.ts 直接按码取值展示——不再靠"稀有度码 + 星"这个
+    // 通用规则硬拼，绝区零因此能显示"S"而不是"4星"。
+    tsType: 'RaritySpec',
+    tsFile: 'packages/gs-plugin-kit/types/generated.ts',
+    rustStruct: 'RaritySpec',
+    rustFile: 'crates/gs-core/src/record.rs',
+    onlyFields: ['tierLabels'],
+  },
+  {
     // 2026-08-17：扫描 PluginManifest 全部顶层字段（19 个）发现登记制留下的
     // 盲区——platforms/sdkVersion 是两个"承重"字段（真正驱动 L1 执行行为），
     // 却从未被登记过，也从未被消费过；iconUrl/metadata/drawCounting/
@@ -378,17 +406,14 @@ const CONTRACT_SECTIONS = [
     // 是整个 crates/**/*.rs），这里指向前者。
     rustFile: 'crates/gs-analysis/src/manifest_lookup.rs',
     knownUnconsumed: [
-      {
-        field: 'metadata',
-        reason:
-          'MetadataProviderConfig 声明的元数据 Provider（online/builtin 两种）尚无 Rust 消费点，且当前 0/4 ' +
-          '插件声明它。它对应的能力是"把 itemIdSource: displayName 标记为 meta_state: pending 的记录，' +
-          '反查回真正的 itemId"——标记侧已经实现（crates/paradigms/gs-p-authkey/src/pipeline.rs 的 ' +
-          'determine_meta_state，itemIdSource === "displayName" 时打 MetaState::Pending），回填侧（真正调用 ' +
-          'metadata Provider 把 pending 记录解析成 complete）从未实现，crates/ 里对 "回填"/"backfill" 唯一的 ' +
-          '命中是保留期的 backfill_missing_retention_days，与元数据无关。移除条件：任意一个消费 metadata ' +
-          '字段、把 pending 记录解析出真实 itemId 的回填实现落地之后。',
-      },
+      // metadata 的白名单条目已移除——回填侧已落地：
+      // gs_analysis::manifest_lookup::online_metadata_request_for 读取
+      // `root.get("metadata")`（本区块 literalRead 模式认的正是这个形状），
+      // 真正的执行侧在 crates/gs-host/src/metadata_backfill.rs，落库消费点
+      // 是 gs_storage::Repository::resolve_pending_record_item_id /
+      // upsert_item_catalog，触发点是 src-tauri 的 backfill_pending_metadata
+      // 命令。若这道门此刻仍对 metadata 报红，说明上述消费点被回退了，应当
+      // 补回消费点，不应该把白名单加回来糊弄过去。
       {
         field: 'drawCounting',
         reason:

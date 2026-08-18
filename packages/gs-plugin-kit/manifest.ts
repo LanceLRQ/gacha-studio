@@ -461,13 +461,39 @@ export interface FieldMapping {
 
 export type MetadataProviderConfig =
   | {
+      /**
+       * ⚠️ **唯一已验证的在线方向：name → itemId 全量字典**（原神实测机制）。
+       *
+       * 本字段曾经允许 `"idToDetail"`，与 `parseResponse` 的返回类型一起在
+       * 回填侧真实实现校准时发现是错的：`api.uigf.org` 的字典接口
+       * （`docs/_internal/research/01-抽卡工具生态与采集范式调研.md` §3.4、
+       * `research/04-同族工具三方源码对比.md` §4.7；源码核实见
+       * `docs/example-projects/genshin-wish-export/src/main/UIGFJson.js` 的
+       * `fetchItemIdDict`）一次请求返回的是**整个语言的 name → id 映射**
+       * （如 `{"无锋剑": 11101, ...}`），不是单条 `MetadataEntry`——
+       * `MetadataEntry` 只有 `name`/`itemType`/`rarity` 三个展示字段，连 id
+       * 都没有，旧签名 `(response) => MetadataEntry | undefined` 根本没办法
+       * 表达"给我一批 name，还我一批 id"这件事。`idToDetail` 方向在
+       * `kind: "online"` 下没有任何已验证样本（星铁/绝区零虽然也是
+       * idToDetail，但走的是构建期离线字典，即下方 `kind: "builtin"`），
+       * 按三次法则不预留占位分支，直接收窄成唯一已证实的形态。
+       */
       kind: "online";
-      /** 查询方向：原神是 name → itemId，因为米哈游 API 本身不返回 item_id，导出交换格式时才需要反查。 */
-      direction: "nameToId" | "idToDetail";
-      /** 请求模板，机制与 {@link CredentialedApiPipelineParams.request} 一致；纯查询场景通常不需要凭据占位符。 */
+      direction: "nameToId";
+      /**
+       * 请求模板，机制与 {@link CredentialedApiPipelineParams.request} 一致；
+       * 纯查询场景通常不需要凭据占位符。除了通用占位符外，`url` 额外支持
+       * `{{lang}}`——宿主按待回填记录的 `gacha_record.lang`（规范形式，如
+       * `zh-cn`）转换成该字典 API 自己的语言短码后再替换，转换表是"这个具体
+       * 接口"的知识，不是游戏知识，因此不在这里声明，见宿主侧
+       * `gs_host::metadata_backfill` 模块文档。
+       */
       request: RequestTemplate;
-      /** 纯函数，解析宿主已经取回的响应体，不做 IO。 */
-      parseResponse: (response: unknown) => MetadataEntry | undefined;
+      /**
+       * 纯函数，解析宿主已经取回的响应体，产出该语言下**完整**的
+       * name → itemId 映射；响应形状不对时返回 `undefined`。不做任何 IO。
+       */
+      parseResponse: (response: unknown) => Record<string, string> | undefined;
     }
   | {
       kind: "builtin";

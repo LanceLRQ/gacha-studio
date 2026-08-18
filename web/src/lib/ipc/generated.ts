@@ -1,17 +1,18 @@
 // 本文件由 gs-codegen 生成，禁止手改。修改请改 crates/gs-host/src/views.rs 后重跑 `cargo run -p gs-host --bin gs-codegen`。
-import type { GachaRecord, RaritySpec, BannerSpec } from "gs-plugin-kit/types";
+import type { GachaRecord, RaritySpec, BannerSpec, GuaranteeRule } from "gs-plugin-kit/types";
 
-export type RetentionRiskLevel = "safe" | "watch" | "alert";
+export type RetentionRiskLevel = "safe" | "watch" | "urgent" | "blocked";
 export type RetentionRiskView = { level: RetentionRiskLevel, 
 /**
- * 距"最早本地记录理论过期时刻"还剩的天数，可能为负——为负表示已经
- * 超出保守估计的保留期（对应 [`RetentionRiskLevel::Alert`]）。
+ * 距保留期保守估计的过期时刻还剩的天数，可能为负——为负表示已经超出
+ * 保守估计的保留期（落在 [`RetentionRiskLevel::Urgent`] 档内，但
+ * `Urgent` 不止负数这一种情况，还覆盖"剩余 0~27 天、尚未超期"）。
  */
 remainingDays: number, 
 /**
- * 仅 [`RetentionRiskLevel::Alert`] 时有值：这段时间区间内发生的记录，
- * 按保留期保守估计**可能**已经无法再从官方接口取回（UTC 毫秒，闭区间）。
- * 措辞刻意用"可能"——不断言"已丢失"，见字段所在结构体的文档。
+ * 仅 `remaining_days` 为负（已超期）时有值：这段时间区间内发生的
+ * 记录，按保留期保守估计**可能**已经无法再从官方接口取回（UTC 毫秒，
+ * 闭区间）。措辞刻意用"可能"——不断言"已丢失"，见字段所在结构体的文档。
  */
 possibleLossFrom?: number, possibleLossTo?: number, };
 export type AccountView = { id: number, 
@@ -26,7 +27,10 @@ pluginId: string, gameUid: string, region: string, displayName: string | null,
  */
 lastCollectedAt: number | null, 
 /**
- * 库中该账号最早一条记录的时间，供保留期告警计算用。
+ * 库中该账号最早一条记录的时间。**只有展示价值**（"你的记录覆盖 X
+ * 至今"），**不驱动**保留期风险等级——驱动字段是
+ * `max(last_collected_at, latest_record_at)`，理由见
+ * `gs_host::retention` 模块文档。
  */
 earliestRecordAt: number | null, 
 /**
@@ -86,7 +90,15 @@ export type GameView = { pluginId: string,
  * `gs_analysis::display_name_for` 的文档——不是裸的 `LocalizedText`，
  * 界面不需要自己再挑一遍语言。
  */
-displayName: string, rarity: RaritySpec, banners: BannerSpec[], 
+displayName: string, rarity: RaritySpec, 
+/**
+ * `rarity.tier_labels` 解析成"稀有度码 → 展示字符串"后的投影，取值
+ * 优先级见 `gs_analysis::tier_labels_for` 的文档（`"zh-CN"` 优先，
+ * 未声明的码兜底成"N 星"）——与 `display_name` 是同一条理由：界面
+ * 不需要自己再挑一遍语言，也不再靠"稀有度码 + 星"这个通用规则硬拼，
+ * 绝区零因此能显示"S"而不是"4星"。
+ */
+tierLabels: Record<string, string>, banners: BannerSpec[], 
 /**
  * 当前运行的操作系统是否在该插件声明的 `platforms` 列表内，取值来自
  * `gs_analysis::supports_current_platform`。
@@ -101,6 +113,7 @@ displayName: string, rarity: RaritySpec, banners: BannerSpec[],
  */
 supportsCurrentPlatform: boolean, };
 export type CurveEvaluationView = { "kind": "value", value: number, } | { "kind": "unsupported", reason: string, };
+export type HitOutcomeView = "rateUp" | "off" | "unknown";
 export type PityPullView = { 
 /**
  * 记录的原始卡池 id（如 `"301"`/`"400"`），即使这条 pull 参与的是
@@ -120,8 +133,40 @@ recordId: number,
  * 自上一次命中（不含本次）以来，被跳过的稀有度未知记录数——星铁真实
  * 存档里确有 `rank_type` 为空串的记录，这个数字提醒"抽数可能被低估"。
  */
-unknownRaritySinceLastHit: number, };
+unknownRaritySinceLastHit: number, 
+/**
+ * 这次命中是"歪了"还是中了 UP，`None` 表示这条 pull 根本不是一次
+ * 顶级保底命中（`is_pity_hit == false`）——"是否歪"这个问题对非命中
+ * 的 pull 没有意义，用 `None` 而不是塞一个 `Unknown` 占位，让"不适用"
+ * 与"命中了但不知道歪没歪"（`Some(HitOutcomeView::Unknown)`）保持
+ * 可区分的两种状态。
+ *
+ * 取值来自 [`gs_analysis::derive_rare_events`] 产出的 `is_rate_up`
+ * 三态经 [`gs_analysis::hit_outcome_from_is_rate_up`] 映射——当前
+ * 没有任何数据源能提供当期 UP 物品列表，因此命中的 pull 实际取值恒为
+ * `Some(HitOutcomeView::Unknown)`，如实反映"不知道"，不编造。
+ *
+ * ⚠️ **只有 [`PityGroupProgressView::guarantee`] 是 `fiftyFifty` 时，
+ * 这个字段才有"歪"的语义**——`alwaysRateUp`/`none`/`weighted` 三种
+ * 担保规则下，即使这里有值，界面也不应该渲染成"是/否"，理由见
+ * `PityGroupProgressView::guarantee` 的文档。
+ */
+hitOutcome: HitOutcomeView | null, };
 export type PityGroupProgressView = { pityGroupKey: string, hardPity: number, 
+/**
+ * 这个保底组的担保规则，直接复用 [`gs_core::GuaranteeRule`]——manifest
+ * 纯数据 JSON 反序列化出来的就是这个领域类型本身，理由与 `GameView`
+ * 复用 `RaritySpec`/`BannerSpec` 一致，不再造一份形状相同的投影。
+ *
+ * 存在的理由：界面需要用它判断 `pulls[].hit_outcome` 这一列该不该
+ * 渲染成"是否歪"——**只有 `fiftyFifty` 才有"歪"这个概念**，`none`
+ * 没有担保机制，`alwaysRateUp` 结构上不存在"歪"的可能，`weighted`
+ * 虽然理论上也有"未中 UP"的结果，但 `gs_analysis::apply_guarantee_rule`
+ * 本 Stage 未展开成具体的加权状态机（恒返回 `false`，见该函数文档），
+ * 三者都不该在"是否歪"这一列显示"是/否"，否则会显示成一片假的"没歪"
+ * ——那是噪音，不是数据。
+ */
+guarantee: GuaranteeRule, 
 /**
  * 距上一次命中累计抽数，即"当前保底进度"。
  */
@@ -186,3 +231,50 @@ totalDraws: number,
  * 总次数——不是字面量"五星"，绝区零的 `pity_target` 是 `"4"`。
  */
 totalPityTargetHits: number, rarityByPlugin: Array<PluginRarityDistributionView>, };
+export type MonthlyActivityView = { 
+/**
+ * 自然月，格式 `YYYY-MM`。
+ */
+month: string, draws: number, topTierHits: number, };
+export type ThemePreference = "light" | "dark" | "system";
+export type MetadataBackfillReport = { pluginId: string, 
+/**
+ * 成功反查、`item_id` 已替换、`meta_state` 已推进到 `complete`。
+ */
+resolved: number, 
+/**
+ * 有可用字典，但记录的 name 在字典里查不到——保持 `pending`。
+ */
+stillPending: number, 
+/**
+ * `gacha_record.lang` 是 `NULL`，不知道用哪个语言的字典——保持 `pending`。
+ */
+skippedNoLang: number, 
+/**
+ * 这个记录的语言完全没有可用字典（远端下载与本地缓存都失败，或语言
+ * 本身不在已知的字典 API 短码表里）——保持 `pending`。
+ */
+skippedNoDictionary: number, };
+export type ExportFormat = "csv" | "uigfV4";
+export type ExportExclusionReason = "notInUigfScope" | "zzzGachaTypeNotInEnum" | "genshinItemIdUnresolved" | "missingStableId" | "invalidOccurredRaw" | "starrailMissingGachaId" | "timezoneUnavailable";
+export type ExportExclusionBucket = { reason: ExportExclusionReason, count: number, 
+/**
+ * 完整中文说明，即 [`ExportExclusionReason::message`] 的取值——
+ * 冗余存一份是为了前端不需要自己维护映射表，直接渲染即可。
+ */
+message: string, };
+export type ExportReport = { format: ExportFormat, 
+/**
+ * 实际写入导出文件的账号数（CSV：选中的账号数；UIGF：至少有一条记录
+ * 成功进入某个游戏段 project 的账号数，可能小于选中的账号数）。
+ */
+accountsExported: number, 
+/**
+ * 实际写入导出文件的记录条数。
+ */
+recordsExported: number, 
+/**
+ * 逐类排除计数——**CSV 格式恒为空数组**，UIGF 格式覆盖本模块文档
+ * "两种格式的定位完全不同"一节列出的全部场景。
+ */
+excluded: Array<ExportExclusionBucket>, };

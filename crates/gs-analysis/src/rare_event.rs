@@ -141,6 +141,8 @@ mod tests {
             captured_at: occurred_at,
             raw_ref: None,
             extra: None,
+            stable_id: None,
+            gacha_id: None,
         }
     }
 
@@ -317,6 +319,7 @@ mod tests {
         let spec = RaritySpec {
             ladder: vec!["3".to_string(), "4".to_string(), "5".to_string()],
             pity_target: "5".to_string(),
+            tier_labels: std::collections::BTreeMap::new(),
         };
         let group = PityGroup {
             key: "wuwaStandard4Star".to_string(),

@@ -209,7 +209,7 @@ export function Records() {
                 <SelectItem value="all">全部稀有度</SelectItem>
                 {rarityOptions.map((code) => (
                   <SelectItem key={code} value={code}>
-                    仅{tierLabel(code)}
+                    仅{tierLabel(game.tierLabels, code)}
                   </SelectItem>
                 ))}
               </SelectContent>
@@ -379,7 +379,11 @@ function RecordTableRow({
       <TableCell>{record.itemId}</TableCell>
       <TableCell>{record.itemType ?? "—"}</TableCell>
       <TableCell>
-        {record.rarity ? <Badge variant={badgeVariant}>{tierLabel(record.rarity)}</Badge> : <Badge variant="neutral">未知</Badge>}
+        {record.rarity ? (
+          <Badge variant={badgeVariant}>{tierLabel(game.tierLabels, record.rarity)}</Badge>
+        ) : (
+          <Badge variant="neutral">未知</Badge>
+        )}
       </TableCell>
       <TableCell>{bannerName}</TableCell>
       <TableCell className="font-mono tabular-nums">{pity ? pity.pullsSinceLastHit : "—"}</TableCell>

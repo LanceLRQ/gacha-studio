@@ -476,7 +476,15 @@ export const manifest = {
     },
   ]),
 
-  rarity: { ladder: ["3", "4", "5"], pityTarget: "5" },
+  rarity: {
+    ladder: ["3", "4", "5"],
+    pityTarget: "5",
+    tierLabels: {
+      "3": { "zh-CN": "三星" },
+      "4": { "zh-CN": "四星" },
+      "5": { "zh-CN": "五星" },
+    },
+  },
 
   time: {
     // 记录时间就是服务器返回的挂钟时间字符串、未经客户端本地化——

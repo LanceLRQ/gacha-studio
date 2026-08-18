@@ -210,12 +210,17 @@ export const manifest = {
         rarity: toNonEmptyString(record.rank_type),
         stableId: toNonEmptyString(record.id),
         // gacha_id 恒为 '0'（真实存档实测全量记录一致），刻意不读取——
-        // UnifiedRecordFields 没有承载 gacha_id 的字段，卡池期次归属完全交
-        // 给 bannerId（gacha_type 类别码）+ 外部 banner 元数据推导，这条路径
-        // 不要求 gacha_id 有意义。⚠️ 不要把 "恒为 '0'" 当成能依赖的断言去
-        // 写校验逻辑：HoYo.Gacha `crates/url_scraper/src/types.rs:97-102` 对
-        // 这个字段用的是"容忍空字符串"的反序列化（`gacha_log_empty_string_number_into`），
-        // 说明真实响应里这个字段可能是空串，不永远是字面量 "0"。
+        // ⚠️ **前提已更新**：`UnifiedRecordFields` 现在有 `gachaId` 字段了
+        // （星铁插件已接入，见 `plugins/starrail/manifest.ts`），"没有字段能
+        // 承载它"不再是理由。绝区零仍然不读的真实理由：UIGF v4.2 权威 JSON
+        // Schema 里 `nap`（绝区零）段把 `gacha_id` 列为**可选**（不像
+        // `hkrpg` 段列为必填），且这个值恒为 '0'，读了没有信息量——落这一列
+        // 不会让任何下游判断变得更准。卡池期次归属仍然完全交给 bannerId
+        // （gacha_type 类别码）+ 外部 banner 元数据推导，不依赖 gacha_id。
+        // ⚠️ 不要把 "恒为 '0'" 当成能依赖的断言去写校验逻辑：HoYo.Gacha
+        // `crates/url_scraper/src/types.rs:97-102` 对这个字段用的是"容忍空
+        // 字符串"的反序列化（`gacha_log_empty_string_number_into`），说明真实
+        // 响应里这个字段可能是空串，不永远是字面量 "0"。
       };
     },
   },
@@ -310,7 +315,17 @@ export const manifest = {
   // ★ 本插件最重要的验证点：稀有度阶梯是 2/3/4，不是 3/4/5——真实存档全量
   // 记录实测 rank_type 只出现这三个值，最高档是 4（S 级）不是 5。宿主查询
   // 保底命中必须走 `WHERE rarity = :pity_target`，不能有任何 "= 5" 字面量。
-  rarity: { ladder: ["2", "3", "4"], pityTarget: "4" },
+  // 档位文案 B/A/S——绝区零官方术语，不是"2星/3星/4星"（那套说法在这个
+  // 游戏里根本不存在，见 RaritySpec.tierLabels 字段文档）。
+  rarity: {
+    ladder: ["2", "3", "4"],
+    pityTarget: "4",
+    tierLabels: {
+      "2": { "zh-CN": "B" },
+      "3": { "zh-CN": "A" },
+      "4": { "zh-CN": "S" },
+    },
+  },
 
   time: {
     // 直连官方 API 得到的是服务器本地时间，不经过任何第三方工具的二次

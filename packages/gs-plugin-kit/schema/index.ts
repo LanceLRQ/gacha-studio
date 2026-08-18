@@ -174,6 +174,9 @@ export const unifiedRecordFieldsSchema = z.object({
   itemType: optionalNonEmptyString(),
   rarity: optionalNonEmptyString(),
   stableId: optionalNonEmptyString(),
+  // 卡池实例 ID（如星铁 "2003"）。可选依据见 gs_core::UnifiedRecordFields.gacha_id
+  // 的文档注释（UIGF v4.2 权威 JSON Schema：hkrpg 必填、nap 可选、hk4e 不提）。
+  gachaId: optionalNonEmptyString(),
 });
 
 // ============================================================
@@ -341,6 +344,10 @@ export const acquireErrorSchema = z.discriminatedUnion("kind", [
 export const raritySpecSchema = z.object({
   ladder: z.array(z.string()),
   pityTarget: z.string(),
+  // 稀有度码 → 本地化展示文案（如绝区零 "4" -> {"zh-CN": "S"}），键不要求
+  // 覆盖 ladder 全部码——缺失的码由 Rust 侧 tier_labels_for 兜底成"N 星"，
+  // 见 crates/gs-core/src/record.rs 里 RaritySpec.tier_labels 的文档。
+  tierLabels: z.record(z.string(), localizedTextSchema),
 });
 
 export const retentionPolicySchema = z.object({

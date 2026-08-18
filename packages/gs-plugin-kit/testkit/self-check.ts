@@ -67,7 +67,11 @@ const baseManifest: PluginManifest = {
     extractRecord: () => ({ itemId: "1", time: "2026-01-01 00:00:00", bannerId: "301", count: 1 }),
   },
   banners: [],
-  rarity: { ladder: ["3", "4", "5"], pityTarget: "5" },
+  rarity: {
+    ladder: ["3", "4", "5"],
+    pityTarget: "5",
+    tierLabels: { "3": { "zh-CN": "三星" }, "4": { "zh-CN": "四星" }, "5": { "zh-CN": "五星" } },
+  },
 };
 
 async function expectThrows(fn: () => unknown, messageContains?: string): Promise<void> {

@@ -106,7 +106,17 @@ export const manifest = {
   banners: [{ id: "default", displayName: { "zh-CN": "TODO：卡池名称" } }],
 
   // TODO：稀有度阶梯不可省略，按真实游戏的取值调整（绝区零是 2/3/4，不是 3/4/5）。
-  rarity: { ladder: ["3", "4", "5"], pityTarget: "5" },
+  rarity: {
+    ladder: ["3", "4", "5"],
+    pityTarget: "5",
+    // 每档的本地化展示文案——按你的游戏实际术语改（如绝区零是 S/A/B，
+    // 不是"N星"），不要不改就当占位留着，见 RaritySpec.tierLabels 的文档。
+    tierLabels: {
+      "3": { "zh-CN": "三星" },
+      "4": { "zh-CN": "四星" },
+      "5": { "zh-CN": "五星" },
+    },
+  },
 
   // TODO：若 API 不返回任何时区信息，改成 { timezoneSource: { kind: "computed" } }
   // 并在 hooks.ts 里实现 resolveTimezone（参考 plugins/genshin/hooks.ts）。

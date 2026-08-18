@@ -40,6 +40,8 @@ fn record(account_id: i64, occurred_at: i64, item_id: &str, rarity: &str) -> Gac
         captured_at: occurred_at,
         raw_ref: None,
         extra: None,
+        stable_id: None,
+        gacha_id: None,
     }
 }
 

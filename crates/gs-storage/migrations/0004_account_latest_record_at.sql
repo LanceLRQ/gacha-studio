@@ -1,0 +1,18 @@
+-- 账号采集边界补第二列：latest_record_at——账号名下本地已知最晚一条记录的
+-- 游戏内发生时刻（occurred_at 语义，不是"我们何时采集/导入到它"）。
+--
+-- 与既有的 earliest_record_at 是对称的一对，但驱动的东西不同：
+-- earliest_record_at 只有展示价值（"你的记录覆盖 X 至今"）；latest_record_at
+-- 与 last_collected_at 共同驱动保留期风险评估——
+-- `gs_host::retention::evaluate_account_retention_risk` 取两者中较晚（max）
+-- 的一个，作为"我们对官方数据的认知截止到哪一刻"。只取其中一个都会产生
+-- 系统性误判，完整论证见该模块文档：
+-- - 只用 last_collected_at：导入路径从不写它（见下），今天导入一份半年前
+--   导出的存档会被误判为"安全"，而存档终点到现在这段其实已经永久丢失。
+-- - 只用 latest_record_at：用户这次采集了但期间没有新抽卡，这一列不会前进，
+--   会对一个"官方数据我们其实全知道"的账号误报"快丢数据了"。
+--
+-- 写入路径：导入（`crates/gs-host/src/import.rs`）落库成功后写入这一列；
+-- last_collected_at 仍然只由未来的 S3 主动采集路径写——导入只能证明
+-- "我们见过这些记录"，证明不了"官方现在没有更晚的数据"。
+ALTER TABLE account ADD COLUMN latest_record_at INTEGER;

@@ -52,7 +52,22 @@ fn normalize_empty(value: &Option<String>) -> Option<String> {
 
 const GACHA_RECORD_SELECT_COLUMNS: &str = "id, account_id, banner_key, pity_group, record_key, \
     lang, occurred_at, occurred_raw, tz_origin, tz_offset_min, seq_in_batch, item_id, \
-    item_type, rarity, qty, meta_state, source, captured_at, raw_ref, extra";
+    item_type, rarity, qty, meta_state, source, captured_at, raw_ref, extra, stable_id, gacha_id";
+
+/// [`Repository::monthly_activity`] 的一行：某个账号在某个自然月的抽卡活动。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MonthlyActivityRow {
+    /// 自然月，格式 `YYYY-MM`（UTC 日历月），见 `monthly_activity` 的文档。
+    pub month: String,
+    /// 该月抽数（记录条数，`perRecord` 语义，与 `OverviewStatsView.total_draws`
+    /// 同一口径）。
+    pub draws: i64,
+    /// 该月命中调用方传入的稀有度目标（通常是 `RaritySpec.pity_target`）的
+    /// 次数——**是否顶级**由调用方决定，本方法不内置任何具体游戏的稀有度
+    /// 常量，理由同本文件其余按参数化稀有度码查询的方法（如
+    /// [`Repository::find_records_by_rarity`]）。
+    pub top_tier_hits: i64,
+}
 
 /// [`Repository::find_records_paged`] / [`Repository::count_records`] 共用的
 /// 筛选条件。用结构体而不是给这两个方法各加一排 `Option` 参数——它们的
@@ -163,8 +178,8 @@ fn build_record_filter_where(
 /// 语义是"尚未持久化"）。
 const GACHA_RECORD_INSERT_COLUMNS: &str = "account_id, banner_key, pity_group, record_key, \
     lang, occurred_at, occurred_raw, tz_origin, tz_offset_min, seq_in_batch, item_id, \
-    item_type, rarity, qty, meta_state, source, captured_at, raw_ref, extra";
-const GACHA_RECORD_INSERT_ARITY: usize = 19;
+    item_type, rarity, qty, meta_state, source, captured_at, raw_ref, extra, stable_id, gacha_id";
+const GACHA_RECORD_INSERT_ARITY: usize = 21;
 
 /// 从查询结果的一行里取出的原始列值，枚举字段先原样存成 `String`。
 ///
@@ -194,6 +209,8 @@ struct GachaRecordRow {
     captured_at: i64,
     raw_ref: Option<i64>,
     extra: Option<String>,
+    stable_id: Option<String>,
+    gacha_id: Option<String>,
 }
 
 impl GachaRecordRow {
@@ -219,6 +236,8 @@ impl GachaRecordRow {
             captured_at: self.captured_at,
             raw_ref: self.raw_ref,
             extra: self.extra,
+            stable_id: self.stable_id,
+            gacha_id: self.gacha_id,
         })
     }
 }
@@ -245,6 +264,8 @@ fn map_gacha_record_row(row: &Row<'_>) -> rusqlite::Result<GachaRecordRow> {
         captured_at: row.get(17)?,
         raw_ref: row.get(18)?,
         extra: row.get(19)?,
+        stable_id: row.get(20)?,
+        gacha_id: row.get(21)?,
     })
 }
 
@@ -345,12 +366,20 @@ pub struct Account {
     pub display_name: Option<String>,
     pub retention_days: Option<i64>,
     pub last_collected_at: Option<i64>,
+    /// 本地已知最早一条记录的游戏内发生时刻。**只有展示价值**（"你的记录
+    /// 覆盖 X 至今"）——不再驱动保留期风险等级，见
+    /// [`Self::latest_record_at`] 与 `gs_host::retention` 模块文档。
     pub earliest_record_at: Option<i64>,
+    /// 本地已知最晚一条记录的游戏内发生时刻。与 `last_collected_at` 共同
+    /// 驱动 `gs_host::retention::evaluate_account_retention_risk`——取两者
+    /// 中较晚（max）的一个作为"我们对官方数据的认知截止到哪一刻"，理由见
+    /// 该函数文档与迁移 `0004_account_latest_record_at.sql` 的注释。
+    pub latest_record_at: Option<i64>,
     pub created_at: i64,
 }
 
 const ACCOUNT_SELECT_COLUMNS: &str = "id, plugin_id, game_uid, region, display_name, \
-    retention_days, last_collected_at, earliest_record_at, created_at";
+    retention_days, last_collected_at, earliest_record_at, latest_record_at, created_at";
 
 fn map_account_row(row: &Row<'_>) -> rusqlite::Result<Account> {
     Ok(Account {
@@ -362,7 +391,8 @@ fn map_account_row(row: &Row<'_>) -> rusqlite::Result<Account> {
         retention_days: row.get(5)?,
         last_collected_at: row.get(6)?,
         earliest_record_at: row.get(7)?,
-        created_at: row.get(8)?,
+        latest_record_at: row.get(8)?,
+        created_at: row.get(9)?,
     })
 }
 
@@ -420,6 +450,39 @@ pub struct NewBannerMeta {
     pub data_ver: i64,
 }
 
+/// 一条尚未持久化的物品目录条目——MetadataProvider 回填侧写入，见
+/// [`Repository::upsert_item_catalog`]。
+pub struct NewItemCatalogEntry {
+    pub plugin_id: String,
+    pub item_id: String,
+    pub lang: String,
+    pub name: String,
+    pub rarity: Option<String>,
+    pub item_type: Option<String>,
+    pub icon_url: Option<String>,
+    /// 字典版本标记，供未来的远程增量更新比对（`item_catalog` 表注释）。
+    /// MetadataProvider 的在线形态（`api.uigf.org`）不提供版本号，只提供
+    /// MD5——本轮回填未实现基于 MD5 的增量检测（见
+    /// `gs_host::metadata_backfill` 模块文档"已知取舍"一节），因此这里填
+    /// 写入时刻的 UTC 毫秒时间戳，语义是"这条记录最后一次被写入的时间"，
+    /// 单调递增即可满足"新版本覆盖旧版本"的写入语义，不承诺是官方字典的
+    /// 真实版本号。
+    pub data_ver: i64,
+}
+
+/// 一条已持久化的物品目录条目（查询结果），见 [`Repository::find_item_catalog_entry`]。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ItemCatalogEntry {
+    pub plugin_id: String,
+    pub item_id: String,
+    pub lang: String,
+    pub name: String,
+    pub rarity: Option<String>,
+    pub item_type: Option<String>,
+    pub icon_url: Option<String>,
+    pub data_ver: i64,
+}
+
 /// 一条尚未持久化的采集会话。
 pub struct NewCollectSession {
     pub account_id: i64,
@@ -459,6 +522,28 @@ pub struct IntegrityRow {
     pub page_count: Option<i64>,
 }
 
+/// `app_setting.key` 的受控枚举——不接受任意字符串。新增一个设置项就是在
+/// 这里加一个变体：这样"这张表目前到底存了哪些 key"在编译期就能看全，
+/// PR diff 也能一眼看见新增了什么，不是运行时才发现前端传了个没人见过的
+/// key 进来。这与 [`SnapshotOrigin`] 用枚举收窄 `banner_snapshot.origin`
+/// 是同一条纪律：凡是会被拿去当 `WHERE`/`INSERT` 目标的封闭取值集合，都不
+/// 该在类型层面留一个"传任意字符串"的口子。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingKey {
+    /// 界面主题偏好（浅色/深色/跟随系统）。取值语义由
+    /// `gs_host::settings::ThemePreference` 定义，存储层不理解这个字符串
+    /// 的具体含义，只负责原样存取。
+    ThemePreference,
+}
+
+impl SettingKey {
+    fn as_sql(self) -> &'static str {
+        match self {
+            Self::ThemePreference => "theme_preference",
+        }
+    }
+}
+
 /// `v_unknown_banner` 视图的一行：有记录但 `banner_meta` 未收录的卡池。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnknownBannerRow {
@@ -492,16 +577,16 @@ impl<'conn> Repository<'conn> {
     /// 被 IGNORE 掉的冲突行不计入，不需要额外查询前后差集。
     ///
     /// `record.id` 被忽略（见 [`GACHA_RECORD_INSERT_COLUMNS`] 的说明）；
-    /// `lang` / `item_type` / `rarity` 的空字符串会被规整为 `NULL`
-    /// （见 [`normalize_empty`]）。
+    /// `lang` / `item_type` / `rarity` / `stable_id` / `gacha_id` 的空字符串
+    /// 会被规整为 `NULL`（见 [`normalize_empty`]）。
     pub fn insert_records(&self, records: &[GachaRecord]) -> Result<u64, GsError> {
         if records.is_empty() {
             return Ok(0);
         }
 
-        // 多值 INSERT 的占位符个数是 条数 × 19，会撞上 SQLite 的
+        // 多值 INSERT 的占位符个数是 条数 × 21，会撞上 SQLite 的
         // SQLITE_LIMIT_VARIABLE_NUMBER。分页采集每页 20 条撞不到，**只有导入路径会炸**
-        // ——星铁真实存档实测 5372 条（research/03），一次交进来就是 102068 个变量。
+        // ——星铁真实存档实测 5372 条（research/03），一次交进来就是 112812 个变量。
         // 这类坑的特点是单测全绿、真实数据一跑就挂，所以按运行时上限分批。
         //
         // 分批之后单条 execute 的原子性就没了，必须自己包一层事务：
@@ -571,6 +656,8 @@ impl<'conn> Repository<'conn> {
             owned_params.push(Box::new(record.captured_at));
             owned_params.push(Box::new(record.raw_ref));
             owned_params.push(Box::new(record.extra.clone()));
+            owned_params.push(Box::new(normalize_empty(&record.stable_id)));
+            owned_params.push(Box::new(normalize_empty(&record.gacha_id)));
         }
         let param_refs: Vec<&dyn ToSql> = owned_params.iter().map(Box::as_ref).collect();
 
@@ -680,6 +767,69 @@ impl<'conn> Repository<'conn> {
             .query_map(params![account_id], map_gacha_record_row)
             .map_err(storage_err)?;
         rows_into_records(rows)
+    }
+
+    /// 某个插件名下**全部**账号里、`meta_state = 'pending'` 的记录——
+    /// MetadataProvider 回填侧的扫描入口，对应 `idx_record_meta_pending`
+    /// 那条部分索引（`WHERE meta_state != 'complete'`）。
+    ///
+    /// 只筛 `'pending'`，不含 `'unresolvable'`：后者语义是"已经尝试过、
+    /// 确认查不到"，本仓库当前没有任何代码路径会产出这个状态（`determine_
+    /// meta_state` 只会打 `Complete`/`Pending`），但一旦将来有了，回填流程
+    /// 重复扫描"已经放弃"的记录既不必要，也可能与"放弃"背后的业务判断
+    /// 冲突——这是留给那条业务规则落地时再决定的事，不该由本方法隐式代劳。
+    ///
+    /// 用 `JOIN account` 而不是要求调用方先自己查出账号 id 列表再逐个查：
+    /// 一个插件下可能有多个账号（多语言/多区服），回填是按插件维度批量处理
+    /// 的（同一插件的 `metadata` Provider 只声明一次），调用方不需要关心
+    /// 账号边界。
+    pub fn find_pending_records_by_plugin(
+        &self,
+        plugin_id: &str,
+    ) -> Result<Vec<GachaRecord>, GsError> {
+        let sql = format!(
+            "SELECT {cols} FROM gacha_record gr \
+             JOIN account a ON a.id = gr.account_id \
+             WHERE a.plugin_id = ?1 AND gr.meta_state = 'pending' \
+             ORDER BY gr.id",
+            cols = GACHA_RECORD_SELECT_COLUMNS
+                .split(", ")
+                .map(|col| format!("gr.{col}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        let mut stmt = self.conn.prepare(&sql).map_err(storage_err)?;
+        let rows = stmt
+            .query_map(params![plugin_id], map_gacha_record_row)
+            .map_err(storage_err)?;
+        rows_into_records(rows)
+    }
+
+    /// 把一条 `pending` 记录的 `item_id` 替换成 MetadataProvider 反查出的
+    /// 真正物品标识，并把 `meta_state` 推进到 `complete`。
+    ///
+    /// `WHERE ... AND meta_state = 'pending'` 是防御性守卫：只更新仍处于
+    /// `pending` 的行，即使调用方传入一个已经是 `complete`（或未来的
+    /// `unresolvable`）的 `record_id`，也不会覆盖它已有的 `item_id`——
+    /// 调用方（`gs_host::metadata_backfill`）的正常调用序列本来就只会传
+    /// `find_pending_records_by_plugin` 查出的 id，这条守卫是"方法自身的
+    /// 行为契约不依赖调用方永远传对"的纵深防御，成本只是一个 WHERE 条件。
+    ///
+    /// 没有匹配行（id 不存在，或存在但已不是 pending）不是错误——静默
+    /// 0 行更新，调用方不需要为这个边界情况特殊处理返回值。
+    pub fn resolve_pending_record_item_id(
+        &self,
+        record_id: i64,
+        resolved_item_id: &str,
+    ) -> Result<(), GsError> {
+        self.conn
+            .execute(
+                "UPDATE gacha_record SET item_id = ?2, meta_state = 'complete' \
+                 WHERE id = ?1 AND meta_state = 'pending'",
+                params![record_id, resolved_item_id],
+            )
+            .map_err(storage_err)?;
+        Ok(())
     }
 
     /// 列出全部账号，按 `(plugin_id, game_uid)` 升序——界面侧栏与账号切换器
@@ -809,6 +959,63 @@ impl<'conn> Repository<'conn> {
                     ))
                 },
             )
+            .map_err(storage_err)?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(storage_err)
+    }
+
+    /// 按自然月聚合某个账号的抽卡活动：每月抽数 + 命中 `top_tier_rarity`
+    /// 的次数。游戏详情页"抽卡时间线（按月）"的数据来源。
+    ///
+    /// 聚合下沉到 SQL（`GROUP BY` + `SUM(CASE WHEN ...)`），不是"查全量
+    /// 记录再在 Rust 里 group by"——星铁真实存档实测 5372 条，`list_records`
+    /// 是带 200 上限的分页窄口，为画一张图表把全账号记录拉过 IPC 或哪怕只是
+    /// 拉进 Rust 进程内存再手动分组，都违反那道窄口存在的理由；一次 SQL
+    /// 聚合查询只往返一次，返回值大小与"这个账号跨了多少个自然月"成正比
+    /// （通常是几十行），不是与记录条数成正比。
+    ///
+    /// 按 `occurred_at`（已归一化的 UTC 毫秒时间戳）分月，不是
+    /// `occurred_raw`（原始时间字符串）——理由与 [`Self::find_records_paged`]
+    /// 等方法按 `occurred_at` 做时间区间筛选一致，是本仓库对"哪个时间字段
+    /// 代表机器可比较的时刻"这件事的统一口径：`occurred_raw` 的格式因插件
+    /// 声明的 `rawFormat` 而异（`"%Y-%m-%d %H:%M:%S"` 或 ISO 本地时间），
+    /// 不能直接喂给 SQL 日期函数；`occurred_at` 是全账号唯一保证统一单位
+    /// （UTC 毫秒）、可直接用 `strftime` 处理的字段。
+    ///
+    /// 代价如实记录：`tz_origin` 为 `Assumed`（既无来源也无区服，宿主假设
+    /// 本机时区）的记录，其 `occurred_at` 本身就带有这份不确定性，落在
+    /// 月份边界附近的一两条记录可能被聚合进相邻的自然月——这是
+    /// `GachaRecord.occurred_at` 文档已经承认的"是否可信取决于 tz_origin"
+    /// 这条既有设计的自然延伸，本方法复用同一份信任度，不重新发明一套按
+    /// `occurred_raw` 解析时区的独立路径（那条路径本身也不是每个插件都有
+    /// 稳定可用的时区来源，见 `GachaRecord` 时间三元组的文档）。
+    ///
+    /// `strftime('%Y-%m', occurred_at / 1000, 'unixepoch')`：SQLite 的
+    /// `unixepoch` 修饰符要求参数是**秒**，`occurred_at` 是毫秒，先除以
+    /// 1000（整数除法截断到秒精度，聚合到月份粒度不受影响）。
+    pub fn monthly_activity(
+        &self,
+        account_id: i64,
+        top_tier_rarity: &str,
+    ) -> Result<Vec<MonthlyActivityRow>, GsError> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT strftime('%Y-%m', occurred_at / 1000, 'unixepoch') AS month, \
+                 COUNT(*) AS draws, \
+                 SUM(CASE WHEN rarity = ?2 THEN 1 ELSE 0 END) AS top_tier_hits \
+                 FROM gacha_record WHERE account_id = ?1 \
+                 GROUP BY month ORDER BY month",
+            )
+            .map_err(storage_err)?;
+        let rows = stmt
+            .query_map(params![account_id, top_tier_rarity], |row| {
+                Ok(MonthlyActivityRow {
+                    month: row.get(0)?,
+                    draws: row.get(1)?,
+                    top_tier_hits: row.get(2)?,
+                })
+            })
             .map_err(storage_err)?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
             .map_err(storage_err)
@@ -1116,20 +1323,35 @@ impl<'conn> Repository<'conn> {
         Ok(())
     }
 
-    /// 一次成功采集后更新账号的采集边界。`earliest_record_at` 只在传入
-    /// `Some` 时覆盖（`COALESCE` 到旧值），因为它语义是"本地最早记录时间"，
-    /// 一次采集若没有比现有记录更早的新记录，不应该被冲掉。
+    /// 更新账号的采集边界。三个参数各自独立，只在传入 `Some` 时覆盖旧值
+    /// （`COALESCE` 到旧值）——本方法不做 min/max 比较，调用方必须自己算好
+    /// "是否应当覆盖"再传进来（调用方通常已经持有旧账号状态，比如导入路径
+    /// 在写入前会先 `find_account` 读一次）。
+    ///
+    /// # 三个字段各自的语义，不能互相替代
+    ///
+    /// - `last_collected_at`：主动确认"到此刻为止我全知道"。**只有真正执行
+    ///   过一次采集（S3 采集链路，本仓库尚未接线）才应该传 `Some`**——导入
+    ///   路径必须永远传 `None`，因为导入只能证明"我们见过这些记录"，证明
+    ///   不了"官方现在没有更晚的数据"；今天导入一份半年前的存档不等于
+    ///   今天采集过一次，见 `gs_host::retention` 模块文档的反例②。
+    /// - `earliest_record_at` / `latest_record_at`：本地已知最早/最晚一条
+    ///   记录的游戏内发生时刻，导入与采集路径都可以写。
     pub fn touch_account_collection_bounds(
         &self,
         id: i64,
-        last_collected_at: i64,
+        last_collected_at: Option<i64>,
         earliest_record_at: Option<i64>,
+        latest_record_at: Option<i64>,
     ) -> Result<(), GsError> {
         self.conn
             .execute(
-                "UPDATE account SET last_collected_at = ?2, \
-                 earliest_record_at = COALESCE(?3, earliest_record_at) WHERE id = ?1",
-                params![id, last_collected_at, earliest_record_at],
+                "UPDATE account SET \
+                 last_collected_at = COALESCE(?2, last_collected_at), \
+                 earliest_record_at = COALESCE(?3, earliest_record_at), \
+                 latest_record_at = COALESCE(?4, latest_record_at) \
+                 WHERE id = ?1",
+                params![id, last_collected_at, earliest_record_at, latest_record_at],
             )
             .map_err(storage_err)?;
         Ok(())
@@ -1205,6 +1427,74 @@ impl<'conn> Repository<'conn> {
             )
             .map_err(storage_err)?;
         Ok(())
+    }
+
+    // ------------------------------------------------------------------
+    // item_catalog：MetadataProvider 回填侧的落点
+    // ------------------------------------------------------------------
+
+    /// 写入（或按 `(plugin_id, item_id, lang)` 主键覆盖）一条物品目录条目。
+    ///
+    /// 消费点：`gs_host::metadata_backfill`——用 MetadataProvider 反查出真正
+    /// `item_id` 之后，把反查用到的 name（回填前的 `gacha_record.item_id`
+    /// 旧值）连同该记录本来就有的 `rarity`/`item_type` 一并写进这张表，让
+    /// `(plugin_id, item_id, lang)` 三元组第一次有了真实的写入方——建库以来
+    /// 这张表只有 schema，没有任何代码写过它。
+    ///
+    /// 覆盖写入而非拒绝重复：字典可能远程更新（`data_ver` 正是为此设计），
+    /// 同一物品在新版本字典里改名/换稀有度是合法的业务场景，与
+    /// [`Self::upsert_banner_meta`] 同一模式。
+    pub fn upsert_item_catalog(&self, new: &NewItemCatalogEntry) -> Result<(), GsError> {
+        self.conn
+            .execute(
+                "INSERT INTO item_catalog (plugin_id, item_id, lang, name, rarity, item_type, \
+                 icon_url, data_ver) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) \
+                 ON CONFLICT(plugin_id, item_id, lang) DO UPDATE SET \
+                 name = excluded.name, rarity = excluded.rarity, item_type = excluded.item_type, \
+                 icon_url = excluded.icon_url, data_ver = excluded.data_ver",
+                params![
+                    new.plugin_id,
+                    new.item_id,
+                    new.lang,
+                    new.name,
+                    new.rarity,
+                    new.item_type,
+                    new.icon_url,
+                    new.data_ver
+                ],
+            )
+            .map_err(storage_err)?;
+        Ok(())
+    }
+
+    /// 按主键查询一条物品目录条目，供测试与未来的展示侧读取路径复用。
+    pub fn find_item_catalog_entry(
+        &self,
+        plugin_id: &str,
+        item_id: &str,
+        lang: &str,
+    ) -> Result<Option<ItemCatalogEntry>, GsError> {
+        self.conn
+            .query_row(
+                "SELECT plugin_id, item_id, lang, name, rarity, item_type, icon_url, data_ver \
+                 FROM item_catalog WHERE plugin_id = ?1 AND item_id = ?2 AND lang = ?3",
+                params![plugin_id, item_id, lang],
+                |row| {
+                    Ok(ItemCatalogEntry {
+                        plugin_id: row.get(0)?,
+                        item_id: row.get(1)?,
+                        lang: row.get(2)?,
+                        name: row.get(3)?,
+                        rarity: row.get(4)?,
+                        item_type: row.get(5)?,
+                        icon_url: row.get(6)?,
+                        data_ver: row.get(7)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(storage_err)
     }
 
     // ------------------------------------------------------------------
@@ -1314,6 +1604,38 @@ impl<'conn> Repository<'conn> {
         rows.collect::<rusqlite::Result<Vec<_>>>()
             .map_err(storage_err)
     }
+
+    // ------------------------------------------------------------------
+    // app_setting
+    // ------------------------------------------------------------------
+
+    /// 读取一个设置项的原始字符串值，未设置过时返回 `None`（不是错误）——
+    /// 调用方（`gs_host::settings`）据此决定回退到默认值还是别的语义，理由
+    /// 同 [`Self::find_account`] 对"不存在"的处理方式。
+    pub fn get_setting(&self, key: SettingKey) -> Result<Option<String>, GsError> {
+        self.conn
+            .query_row(
+                "SELECT value FROM app_setting WHERE key = ?1",
+                params![key.as_sql()],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(storage_err)
+    }
+
+    /// 写入（或覆盖）一个设置项。`INSERT ... ON CONFLICT DO UPDATE`——设置项
+    /// 语义上只有"当前值"，不是时间序列（与 `banner_snapshot` 故意追加成
+    /// 历史记录不同，见该表上的注释），覆盖是这里唯一正确的写入语义。
+    pub fn set_setting(&self, key: SettingKey, value: &str) -> Result<(), GsError> {
+        self.conn
+            .execute(
+                "INSERT INTO app_setting (key, value) VALUES (?1, ?2) \
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                params![key.as_sql(), value],
+            )
+            .map_err(storage_err)?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -1357,6 +1679,68 @@ mod tests {
     }
 
     #[test]
+    fn touch_account_collection_bounds_only_overwrites_columns_passed_as_some() {
+        let storage = Storage::open_in_memory().expect("应当能打开内存数据库");
+        let repo = storage.repository();
+        let account_id = repo
+            .create_account(&NewAccount {
+                plugin_id: "genshin".to_string(),
+                game_uid: "100000000".to_string(),
+                region: "official".to_string(),
+                display_name: None,
+                retention_days: None,
+                created_at: 1_754_800_000_000,
+            })
+            .expect("创建账号应当成功");
+
+        let fresh = repo
+            .find_account(account_id)
+            .expect("查询应当成功")
+            .expect("账号应当存在");
+        assert_eq!(
+            fresh.last_collected_at, None,
+            "自证前提：新账号三列均为 NULL"
+        );
+        assert_eq!(fresh.earliest_record_at, None);
+        assert_eq!(fresh.latest_record_at, None);
+
+        // 只写 earliest/latest，last_collected_at 传 None——对应导入路径的
+        // 真实调用形状：导入永远不写 last_collected_at，见方法文档。
+        repo.touch_account_collection_bounds(account_id, None, Some(100), Some(200))
+            .expect("写入应当成功");
+        let after_import = repo
+            .find_account(account_id)
+            .expect("查询应当成功")
+            .expect("账号应当存在");
+        assert_eq!(
+            after_import.last_collected_at, None,
+            "传 None 的列不应被覆盖"
+        );
+        assert_eq!(after_import.earliest_record_at, Some(100));
+        assert_eq!(after_import.latest_record_at, Some(200));
+
+        // 之后再模拟一次真正的采集：只写 last_collected_at，earliest/latest
+        // 传 None——已有的两列不应被冲掉。
+        repo.touch_account_collection_bounds(account_id, Some(300), None, None)
+            .expect("写入应当成功");
+        let after_collect = repo
+            .find_account(account_id)
+            .expect("查询应当成功")
+            .expect("账号应当存在");
+        assert_eq!(after_collect.last_collected_at, Some(300));
+        assert_eq!(
+            after_collect.earliest_record_at,
+            Some(100),
+            "上一步写入的 earliest_record_at 不应被这次传 None 冲掉"
+        );
+        assert_eq!(
+            after_collect.latest_record_at,
+            Some(200),
+            "上一步写入的 latest_record_at 不应被这次传 None 冲掉"
+        );
+    }
+
+    #[test]
     fn normalize_empty_turns_empty_string_into_none() {
         assert_eq!(normalize_empty(&Some(String::new())), None);
         assert_eq!(
@@ -1364,6 +1748,66 @@ mod tests {
             Some("5".to_string())
         );
         assert_eq!(normalize_empty(&None), None);
+    }
+
+    // ------------------------------------------------------------------
+    // app_setting
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn get_setting_returns_none_when_never_set() {
+        let storage = Storage::open_in_memory().expect("应当能打开内存数据库");
+        let repo = storage.repository();
+        assert_eq!(
+            repo.get_setting(SettingKey::ThemePreference)
+                .expect("查询应当成功"),
+            None,
+            "未设置过的 key 应当返回 None，不是错误"
+        );
+    }
+
+    #[test]
+    fn set_then_get_setting_round_trips() {
+        let storage = Storage::open_in_memory().expect("应当能打开内存数据库");
+        let repo = storage.repository();
+        repo.set_setting(SettingKey::ThemePreference, "dark")
+            .expect("写入应当成功");
+        assert_eq!(
+            repo.get_setting(SettingKey::ThemePreference)
+                .expect("查询应当成功"),
+            Some("dark".to_string())
+        );
+    }
+
+    #[test]
+    fn set_setting_overwrites_previous_value_without_duplicating_rows() {
+        let storage = Storage::open_in_memory().expect("应当能打开内存数据库");
+        let repo = storage.repository();
+        repo.set_setting(SettingKey::ThemePreference, "dark")
+            .expect("首次写入应当成功");
+        repo.set_setting(SettingKey::ThemePreference, "light")
+            .expect("覆盖写入应当成功");
+        assert_eq!(
+            repo.get_setting(SettingKey::ThemePreference)
+                .expect("查询应当成功"),
+            Some("light".to_string()),
+            "覆盖写入后应读到新值，而不是旧值或报唯一约束冲突"
+        );
+    }
+
+    #[test]
+    fn migrating_empty_database_creates_app_setting_table() {
+        // 迁移能在空库上跑通，且 app_setting 确实存在——这是本迁移最基础的
+        // 断言，migrations.rs 的 object_count 断言已经覆盖了数量，这里额外
+        // 直接按表名查一遍，定位更精确。
+        let storage = Storage::open_in_memory().expect("应当能在空库上成功应用全部迁移");
+        let repo = storage.repository();
+        // 表存在的证明：对一个刚建好、从未写过的 key 查询不报错。
+        assert_eq!(
+            repo.get_setting(SettingKey::ThemePreference)
+                .expect("app_setting 表应当已经建好，查询不应报错"),
+            None
+        );
     }
 
     #[test]
@@ -1382,5 +1826,266 @@ mod tests {
         assert_eq!(sql, "officialApi");
         let back: RecordSource = enum_from_sql(&sql).expect("应当反序列化成功");
         assert_eq!(back, RecordSource::OfficialApi);
+    }
+
+    // ------------------------------------------------------------------
+    // MetadataProvider 回填侧：find_pending_records_by_plugin /
+    // resolve_pending_record_item_id / upsert_item_catalog
+    // ------------------------------------------------------------------
+
+    /// 构造一条测试用记录，`item_id` 用调用方传入的值（回填测试里用它模拟
+    /// "本地化物品名"这个临时值），`meta_state`/`lang` 是本组测试真正关心的
+    /// 两个维度，其余字段填最简单的合法值。
+    fn pending_test_record(
+        account_id: i64,
+        record_key: &str,
+        meta_state: MetaState,
+        lang: Option<&str>,
+        item_id: &str,
+    ) -> GachaRecord {
+        GachaRecord {
+            id: 0,
+            account_id,
+            banner_key: "301".to_string(),
+            pity_group: "characterEventWish".to_string(),
+            record_key: RecordKey::new(record_key.to_string()).expect("record_key 应当合法"),
+            lang: lang.map(str::to_string),
+            occurred_at: 1_754_800_000_000,
+            occurred_raw: "2026-08-10 12:00:00".to_string(),
+            tz_origin: TzOrigin::Assumed,
+            tz_offset_min: None,
+            seq_in_batch: None,
+            item_id: item_id.to_string(),
+            item_type: Some("character".to_string()),
+            rarity: Some("5".to_string()),
+            qty: 1,
+            meta_state,
+            source: RecordSource::Import,
+            captured_at: 1_754_800_000_000,
+            raw_ref: None,
+            extra: None,
+            stable_id: None,
+            gacha_id: None,
+        }
+    }
+
+    fn test_account(repo: &Repository<'_>, plugin_id: &str, game_uid: &str) -> i64 {
+        repo.create_account(&NewAccount {
+            plugin_id: plugin_id.to_string(),
+            game_uid: game_uid.to_string(),
+            region: "official".to_string(),
+            display_name: None,
+            retention_days: None,
+            created_at: 1_754_800_000_000,
+        })
+        .expect("创建账号应当成功")
+    }
+
+    #[test]
+    fn find_pending_records_by_plugin_only_returns_pending_rows_for_that_plugin() {
+        let storage = Storage::open_in_memory().expect("应当能打开内存数据库");
+        let repo = storage.repository();
+        let genshin_account = test_account(&repo, "genshin", "100000001");
+        let wuwa_account = test_account(&repo, "wuwa", "200000001");
+
+        let pending_genshin = pending_test_record(
+            genshin_account,
+            "rk-1",
+            MetaState::Pending,
+            Some("zh-cn"),
+            "无锋剑",
+        );
+        let complete_genshin = pending_test_record(
+            genshin_account,
+            "rk-2",
+            MetaState::Complete,
+            Some("zh-cn"),
+            "11101",
+        );
+        let pending_wuwa = pending_test_record(
+            wuwa_account,
+            "rk-3",
+            MetaState::Pending,
+            Some("zh-cn"),
+            "resource-1",
+        );
+
+        repo.insert_records(&[pending_genshin, complete_genshin, pending_wuwa])
+            .expect("写入应当成功");
+
+        let found = repo
+            .find_pending_records_by_plugin("genshin")
+            .expect("查询应当成功");
+        assert_eq!(
+            found.len(),
+            1,
+            "只应返回 genshin 账号下 meta_state=pending 的那一条"
+        );
+        assert_eq!(found[0].record_key.as_str(), "rk-1");
+        assert_eq!(found[0].meta_state, MetaState::Pending);
+    }
+
+    #[test]
+    fn find_pending_records_by_plugin_returns_empty_when_none_pending() {
+        let storage = Storage::open_in_memory().expect("应当能打开内存数据库");
+        let repo = storage.repository();
+        assert_eq!(
+            repo.find_pending_records_by_plugin("genshin")
+                .expect("查询应当成功，即使没有任何账号"),
+            Vec::new()
+        );
+    }
+
+    #[test]
+    fn resolve_pending_record_item_id_updates_item_id_and_flips_meta_state_to_complete() {
+        let storage = Storage::open_in_memory().expect("应当能打开内存数据库");
+        let repo = storage.repository();
+        let account_id = test_account(&repo, "genshin", "100000001");
+        let pending = pending_test_record(
+            account_id,
+            "rk-1",
+            MetaState::Pending,
+            Some("zh-cn"),
+            "无锋剑",
+        );
+        repo.insert_records(&[pending]).expect("写入应当成功");
+        let record_id = repo
+            .find_pending_records_by_plugin("genshin")
+            .expect("查询应当成功")[0]
+            .id;
+
+        repo.resolve_pending_record_item_id(record_id, "11101")
+            .expect("回填写入应当成功");
+
+        let all = repo
+            .find_all_records_for_account(account_id)
+            .expect("查询应当成功");
+        let resolved = all
+            .into_iter()
+            .find(|r| r.id == record_id)
+            .expect("记录应当仍然存在");
+        assert_eq!(
+            resolved.item_id, "11101",
+            "item_id 应当被替换成真正的物品标识"
+        );
+        assert_eq!(
+            resolved.meta_state,
+            MetaState::Complete,
+            "回填成功后 meta_state 应当推进到 complete"
+        );
+    }
+
+    #[test]
+    fn resolve_pending_record_item_id_does_not_touch_records_that_are_already_complete() {
+        // 防御性 WHERE 守卫：只更新仍处于 pending 状态的行，即使调用方传入
+        // 一个已经是 complete 的 record_id，也不应当覆盖它已有的 item_id
+        // ——这条记录理论上不会出现在 find_pending_records_by_plugin 的结果
+        // 里，但方法本身的行为契约不应该依赖调用方"只会传对的 id"这个假设。
+        let storage = Storage::open_in_memory().expect("应当能打开内存数据库");
+        let repo = storage.repository();
+        let account_id = test_account(&repo, "genshin", "100000001");
+        let complete = pending_test_record(
+            account_id,
+            "rk-1",
+            MetaState::Complete,
+            Some("zh-cn"),
+            "11101",
+        );
+        repo.insert_records(&[complete]).expect("写入应当成功");
+        let record_id = repo
+            .find_all_records_for_account(account_id)
+            .expect("查询应当成功")[0]
+            .id;
+
+        repo.resolve_pending_record_item_id(record_id, "should-not-apply")
+            .expect("即使没有行被更新，方法本身也不应当报错");
+
+        let unchanged = repo
+            .find_all_records_for_account(account_id)
+            .expect("查询应当成功")
+            .into_iter()
+            .find(|r| r.id == record_id)
+            .expect("记录应当仍然存在");
+        assert_eq!(unchanged.item_id, "11101", "已经 complete 的记录不应被覆盖");
+    }
+
+    #[test]
+    fn upsert_item_catalog_inserts_then_updates_on_primary_key_conflict() {
+        let storage = Storage::open_in_memory().expect("应当能打开内存数据库");
+        let repo = storage.repository();
+
+        repo.upsert_item_catalog(&NewItemCatalogEntry {
+            plugin_id: "genshin".to_string(),
+            item_id: "11101".to_string(),
+            lang: "zh-cn".to_string(),
+            name: "无锋剑".to_string(),
+            rarity: Some("3".to_string()),
+            item_type: Some("weapon".to_string()),
+            icon_url: None,
+            data_ver: 1,
+        })
+        .expect("首次写入应当成功");
+
+        let inserted = repo
+            .find_item_catalog_entry("genshin", "11101", "zh-cn")
+            .expect("查询应当成功")
+            .expect("应当已经存在");
+        assert_eq!(inserted.name, "无锋剑");
+        assert_eq!(inserted.data_ver, 1);
+
+        // 同一个 (plugin_id, item_id, lang) 主键再写一次，字典更新场景。
+        repo.upsert_item_catalog(&NewItemCatalogEntry {
+            plugin_id: "genshin".to_string(),
+            item_id: "11101".to_string(),
+            lang: "zh-cn".to_string(),
+            name: "无锋剑改名".to_string(),
+            rarity: Some("4".to_string()),
+            item_type: Some("weapon".to_string()),
+            icon_url: None,
+            data_ver: 2,
+        })
+        .expect("冲突覆盖写入应当成功");
+
+        let updated = repo
+            .find_item_catalog_entry("genshin", "11101", "zh-cn")
+            .expect("查询应当成功")
+            .expect("应当仍然存在");
+        assert_eq!(
+            updated.name, "无锋剑改名",
+            "同主键再次写入应当覆盖旧值，不是报错或忽略"
+        );
+        assert_eq!(updated.rarity, Some("4".to_string()));
+        assert_eq!(updated.data_ver, 2);
+
+        // 不同 lang 是不同主键，两条应当共存，互不覆盖。
+        repo.upsert_item_catalog(&NewItemCatalogEntry {
+            plugin_id: "genshin".to_string(),
+            item_id: "11101".to_string(),
+            lang: "en-us".to_string(),
+            name: "Sharpshooter's Oath".to_string(),
+            rarity: Some("4".to_string()),
+            item_type: Some("weapon".to_string()),
+            icon_url: None,
+            data_ver: 1,
+        })
+        .expect("不同语言的写入应当成功");
+        assert_eq!(
+            repo.find_item_catalog_entry("genshin", "11101", "zh-cn")
+                .expect("查询应当成功")
+                .expect("zh-cn 那条不应被 en-us 的写入影响")
+                .name,
+            "无锋剑改名"
+        );
+    }
+
+    #[test]
+    fn find_item_catalog_entry_returns_none_when_not_found() {
+        let storage = Storage::open_in_memory().expect("应当能打开内存数据库");
+        let repo = storage.repository();
+        assert_eq!(
+            repo.find_item_catalog_entry("genshin", "does-not-exist", "zh-cn")
+                .expect("查询应当成功"),
+            None
+        );
     }
 }

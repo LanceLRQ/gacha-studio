@@ -452,7 +452,15 @@ export const manifest = {
     ];
   }),
 
-  rarity: { ladder: ["3", "4", "5"], pityTarget: "5" },
+  rarity: {
+    ladder: ["3", "4", "5"],
+    pityTarget: "5",
+    tierLabels: {
+      "3": { "zh-CN": "三星" },
+      "4": { "zh-CN": "四星" },
+      "5": { "zh-CN": "五星" },
+    },
+  },
 
   time: {
     // 与第一版完全一致，S2 未触及这一层。

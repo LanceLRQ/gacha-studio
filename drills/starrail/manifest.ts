@@ -175,7 +175,15 @@ export const manifest = {
   //    祈愿概率说明""同人社区口径"，性质与本次严格限定 research/03、04 的
   //    约束不同）。
 
-  rarity: { ladder: ["3", "4", "5"], pityTarget: "5" },
+  rarity: {
+    ladder: ["3", "4", "5"],
+    pityTarget: "5",
+    tierLabels: {
+      "3": { "zh-CN": "三星" },
+      "4": { "zh-CN": "四星" },
+      "5": { "zh-CN": "五星" },
+    },
+  },
 
   time: {
     // 直连官方 API，得到的是服务器本地时间字符串（research/03 §2.3：

@@ -147,12 +147,29 @@ pub enum HitOutcome {
 /// 调用方不需要（也不应该）自己重新决定 `NULL` 该映射成什么。
 pub fn hit_outcomes_from_rare_events(rows: &[RareEventRow]) -> Vec<HitOutcome> {
     rows.iter()
-        .map(|row| match row.is_rate_up {
-            Some(true) => HitOutcome::RateUp,
-            Some(false) => HitOutcome::Off,
-            None => HitOutcome::Unknown,
-        })
+        .map(|row| hit_outcome_from_is_rate_up(row.is_rate_up))
         .collect()
+}
+
+/// `is_rate_up` 三态到 [`HitOutcome`] 的映射本身——`Some(true)` → `RateUp`，
+/// `Some(false)` → `Off`，`None` → `Unknown`。
+///
+/// 从 [`hit_outcomes_from_rare_events`] 里拆出来，是因为它现在有第二个
+/// 调用方：`crate::rare_event::derive_rare_events` 产出的 `NewRareEvent`
+/// 同样带一个 `is_rate_up: Option<bool>` 字段，但类型是 `NewRareEvent`
+/// 不是 `RareEventRow`（前者是尚未落库的写入模型，后者是查询结果行）——
+/// `gs-host` 的 `account_analysis` 直接在内存里对 `derive_rare_events`
+/// 的输出跑这个映射，得到"顶级记录是否歪"这一列的数据，不依赖 `rare_event`
+/// 表已经落过盘（这张表当前确实还没有任何写入路径接上，见
+/// `crate::rare_event` 模块文档）。两个调用方共用同一份映射，不重复
+/// 实现同一个三行 `match`——那正是"不知道不能伪装成已知"这条契约唯一的
+/// 落点，见本函数原来所在位置（`hit_outcomes_from_rare_events`）的文档。
+pub fn hit_outcome_from_is_rate_up(is_rate_up: Option<bool>) -> HitOutcome {
+    match is_rate_up {
+        Some(true) => HitOutcome::RateUp,
+        Some(false) => HitOutcome::Off,
+        None => HitOutcome::Unknown,
+    }
 }
 
 /// 依次把 `rule` 应用到一串保底命中结果上，返回**每次命中发生时，
@@ -527,6 +544,8 @@ mod tests {
             captured_at: occurred_at,
             raw_ref: None,
             extra: None,
+            stable_id: None,
+            gacha_id: None,
         }
     }
 
@@ -636,6 +655,7 @@ mod tests {
         let spec = RaritySpec {
             ladder: vec!["2".to_string(), "3".to_string(), "4".to_string()],
             pity_target: "4".to_string(),
+            tier_labels: std::collections::BTreeMap::new(),
         };
         let records = vec![
             record("agent-event", "zzzAgentEvent", 1, "邦布A", Some("2")),
@@ -657,6 +677,7 @@ mod tests {
         let spec = RaritySpec {
             ladder: vec!["3".to_string(), "4".to_string(), "5".to_string()],
             pity_target: "5".to_string(),
+            tier_labels: std::collections::BTreeMap::new(),
         };
         let records = vec![
             record("standard", "wuwaStandard", 1, "武器A", Some("3")),
@@ -840,5 +861,18 @@ mod tests {
         let outcomes = hit_outcomes_from_rare_events(&rows);
         let guaranteed = apply_guarantee_rule(&GuaranteeRule::FiftyFifty {}, &outcomes);
         assert_eq!(guaranteed, vec![false, true, true]);
+    }
+
+    #[test]
+    fn hit_outcome_from_is_rate_up_maps_tri_state_directly() {
+        // hit_outcomes_from_rare_events 的映射本体现在委托给这个函数——
+        // 单独锁死映射关系，不依赖 RareEventRow 这个中间类型也能验证。
+        assert_eq!(hit_outcome_from_is_rate_up(Some(true)), HitOutcome::RateUp);
+        assert_eq!(hit_outcome_from_is_rate_up(Some(false)), HitOutcome::Off);
+        assert_eq!(
+            hit_outcome_from_is_rate_up(None),
+            HitOutcome::Unknown,
+            "None 必须映射成 Unknown，不能被当成 Off 或 RateUp——不知道不能伪装成已知"
+        );
     }
 }

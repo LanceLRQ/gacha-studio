@@ -261,6 +261,11 @@ impl ExchangeAdapter for WwgachaAdapter {
                 // GameUser.cs 没有时区字段——wwgacha 本地存档不携带任何形式
                 // 的时区信息，`None` 是诚实的表达，不是遗漏。
                 tz_offset_hours: None,
+                // 同理，GameUser.cs 也没有语言字段——wwgacha 本地存档不携带
+                // 语言信息，`None` 是诚实的表达。这一行是 `ImportAccount`
+                // 新增 `lang` 字段后的机械必需项，不是本文件范围内的设计
+                // 改动（wwgacha 采集/导入行为本身不变）。
+                lang: None,
             },
             banners,
         }])

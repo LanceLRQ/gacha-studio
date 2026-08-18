@@ -123,6 +123,8 @@ mod tests {
             captured_at: 0,
             raw_ref: None,
             extra: None,
+            stable_id: None,
+            gacha_id: None,
         }
     }
 
@@ -153,6 +155,7 @@ mod tests {
         let spec = RaritySpec {
             ladder: vec!["2".to_string(), "3".to_string(), "4".to_string()],
             pity_target: "4".to_string(),
+            tier_labels: std::collections::BTreeMap::new(),
         };
         let records = vec![
             record("邦布A", Some("2"), MetaState::Complete, 1),

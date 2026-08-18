@@ -258,19 +258,22 @@ fn import_batch_persists_uigf_genshin_archive_and_is_idempotent() {
             .all(|r| r.source == RecordSource::Import),
         "导入路径落库的记录 source 应当全部是 RecordSource::Import"
     );
-    // ⚠️ 这条锁定的是当前行为，不是理想行为——UIGF 存档的
-    // `UigfProject.lang` 字段实测就是 "zh-cn"（本 fixture 顶层可查），但
-    // `ImportAccount` 目前没有暴露这个字段，`import_batch` 对导入路径统一
-    // 传 `None`，见 `crates/gs-host/src/import.rs` 里那段 `lang` 注释。
-    // 这条断言存在的意义是：一旦有人以后把 UIGF 的 lang 接进来，这里必须
-    // 跟着改成 `Some("zh-cn")`，不能悄悄漏改。
+    // UIGF 存档的 `UigfProject.lang` 字段实测就是 "zh-cn"（本 fixture 顶层
+    // 可查）。`ImportAccount` 现在应当暴露这个字段，`import_batch` 把它
+    // 传给 `AuthkeyApiPipeline::build_records`，归一化后落库——见
+    // `crates/gs-host/src/import.rs` 里那段 `lang` 注释与
+    // `crates/paradigms/gs-p-authkey/src/locale.rs`。
+    let langs: Vec<Option<String>> = records_301
+        .iter()
+        .chain(records_400.iter())
+        .map(|r| r.lang.clone())
+        .collect();
     assert!(
         records_301
             .iter()
             .chain(records_400.iter())
-            .all(|r| r.lang.is_none()),
-        "UIGF 导入路径的 lang 目前恒为 None（ImportAccount 未暴露该字段），\
-         这条断言锁定的是这个已知缺口的当前状态"
+            .all(|r| r.lang.as_deref() == Some("zh-cn")),
+        "UIGF 导入路径应当把存档携带的 lang 接进记录，实际: {langs:?}"
     );
 
     // ★ occurred_at 精确到毫秒，字面量独立算出、不经过被测代码：
@@ -361,6 +364,14 @@ fn import_batch_persists_uigf_starrail_archive_with_correct_occurred_at() {
         .expect("查询应当成功");
     assert_eq!(records.len(), 9);
     assert!(records.iter().all(|r| r.source == RecordSource::Import));
+    // UIGF 星铁 fixture 顶层声明 "lang": "zh-cn"——`ImportAccount.lang` 现在
+    // 会被 `import_batch` 传给 `build_records`，归一化后落库，见
+    // `crates/gs-host/src/import.rs` 里那段 `lang` 注释。
+    assert!(
+        records.iter().all(|r| r.lang.as_deref() == Some("zh-cn")),
+        "星铁 UIGF 导入路径应当把存档携带的 lang 接进记录，实际: {:?}",
+        records.iter().map(|r| r.lang.clone()).collect::<Vec<_>>()
+    );
 
     // ★ occurred_at 精确到毫秒，字面量独立算出、不经过被测代码：
     // fixture 里 id "1500000000000000009" 那条记录 time = "2101-07-15
@@ -406,6 +417,12 @@ fn import_batch_persists_uigf_zzz_archive_with_correct_occurred_at() {
         .expect("查询应当成功");
     assert_eq!(records.len(), 6);
     assert!(records.iter().all(|r| r.source == RecordSource::Import));
+    // UIGF 绝区零 fixture 顶层声明 "lang": "zh-cn"，理由同星铁那条测试。
+    assert!(
+        records.iter().all(|r| r.lang.as_deref() == Some("zh-cn")),
+        "绝区零 UIGF 导入路径应当把存档携带的 lang 接进记录，实际: {:?}",
+        records.iter().map(|r| r.lang.clone()).collect::<Vec<_>>()
+    );
 
     // ★ occurred_at 精确到毫秒，字面量独立算出、不经过被测代码：
     // fixture 里 id "1900000000000000006" 那条记录 time = "2099-01-02
@@ -458,6 +475,101 @@ fn import_batch_fails_closed_for_uigf_archive_when_tz_offset_hours_is_missing() 
         .find_records_by_banner(account_id, "11")
         .expect("查询应当成功");
     assert!(records.is_empty(), "fail closed 应当在任何记录落库之前发生");
+}
+
+// ============================================================
+// 空/缺失 lang → 落库后必须是 NULL，不能悄悄变成 Some("")
+// ============================================================
+//
+// 这条链路有三段，任一段断了都会让一个空字符串语言标签悄悄落进库里：
+// UIGF 声明缺失/空字符串 → `UigfProject.lang` 反序列化成 `None`/
+// `Some(String::new())` → `hk4e_project_to_batch` 原样填进
+// `ImportAccount.lang`（不归一化）→ `import_batch` 传给
+// `AuthkeyApiPipeline::build_records` → `GachaRecord.lang` →
+// `Repository::insert_records` 内部 `normalize_empty` 落库前转 `NULL`。
+// 因此这里直接查库验证最终落地的值，不只看内存里的中间结构。用原神
+// （`timezoneSource: computed`）而不是星铁/绝区零：不需要为这条与 lang
+// 无关的检查额外满足 tz_offset_hours 的 fail-closed 前提。
+
+/// 构造一份最小原神 UIGF v4 JSON，`lang_field` 为 `None` 时整个不出现
+/// `"lang"` 键（走 `UigfProject.lang` 的 `#[serde(default)]` 分支）。
+fn minimal_genshin_uigf_json(lang_field: Option<&str>) -> String {
+    let lang_kv = match lang_field {
+        Some(lang) => format!(r#""lang": "{lang}","#),
+        None => String::new(),
+    };
+    format!(
+        r#"{{
+            "info": {{"export_timestamp":1,"export_app":"x","export_app_version":"1","version":"v4.0"}},
+            "hk4e": [{{
+                "uid": "100000000",
+                "timezone": 8,
+                {lang_kv}
+                "list": [
+                    {{"gacha_type":"301","count":"1","time":"2026-01-01 00:00:00","name":"a","item_type":"角色","rank_type":"5","id":"1400000000000000001"}}
+                ]
+            }}]
+        }}"#
+    )
+}
+
+#[test]
+fn import_batch_persists_null_lang_when_uigf_lang_field_is_missing() {
+    let json = minimal_genshin_uigf_json(None);
+    let batch = import_single_uigf_batch(json.as_bytes());
+    assert_eq!(
+        batch.account.lang, None,
+        "自证前提：UIGF 缺失 lang 键应当解析成 ImportAccount.lang == None"
+    );
+
+    let storage = Storage::open_in_memory().expect("应当能打开内存数据库");
+    let account_id = setup_account(&storage, "genshin");
+    let repo = storage.repository();
+    let runtime = PluginRuntime::new().expect("插件运行时应当能正常启动");
+    let pipeline = pipeline_for("genshin", &runtime);
+
+    import_batch(&batch, &pipeline, &repo, account_id, CAPTURED_AT).expect("导入应当成功");
+
+    let records = repo
+        .find_records_by_banner(account_id, "301")
+        .expect("查询应当成功");
+    assert_eq!(records.len(), 1);
+    assert!(
+        records[0].lang.is_none(),
+        "lang 缺失时落库后应当是 NULL（查回来是 None），不是 Some(\"\")，实际: {:?}",
+        records[0].lang
+    );
+}
+
+#[test]
+fn import_batch_persists_null_lang_when_uigf_lang_field_is_empty_string() {
+    let json = minimal_genshin_uigf_json(Some(""));
+    let batch = import_single_uigf_batch(json.as_bytes());
+    assert_eq!(
+        batch.account.lang.as_deref(),
+        Some(""),
+        "自证前提：UIGF 显式空字符串 lang 应当原样解析成 ImportAccount.lang == \
+         Some(\"\")，不在 gs_exchange 这一层提前折叠成 None（折叠留给下游 normalize_empty）"
+    );
+
+    let storage = Storage::open_in_memory().expect("应当能打开内存数据库");
+    let account_id = setup_account(&storage, "genshin");
+    let repo = storage.repository();
+    let runtime = PluginRuntime::new().expect("插件运行时应当能正常启动");
+    let pipeline = pipeline_for("genshin", &runtime);
+
+    import_batch(&batch, &pipeline, &repo, account_id, CAPTURED_AT).expect("导入应当成功");
+
+    let records = repo
+        .find_records_by_banner(account_id, "301")
+        .expect("查询应当成功");
+    assert_eq!(records.len(), 1);
+    assert!(
+        records[0].lang.is_none(),
+        "lang 为空字符串时落库后应当被 normalize_empty 规整成 NULL（查回来是 None），\
+         不是 Some(\"\")，实际: {:?}",
+        records[0].lang
+    );
 }
 
 // ============================================================

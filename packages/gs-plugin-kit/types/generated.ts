@@ -2,7 +2,7 @@
 
 export type LocalizedText = Record<string, string>;
 export type Platform = "windows" | "macos";
-export type RaritySpec = { ladder: Array<string>, pityTarget: string, };
+export type RaritySpec = { ladder: Array<string>, pityTarget: string, tierLabels: Record<string, LocalizedText>, };
 export type RetentionPolicy = { displayText: LocalizedText, conservativeDays: number, };
 export type DrawCountingConfig = { "kind": "perRecord", } | { "kind": "custom", };
 export type BannerSpec = { 
@@ -46,7 +46,29 @@ bannerId: string,
 /**
  * 本条获得的物品数量，语义是「数量」不是「抽数」；米哈游三游恒为 1。
  */
-count: number, name?: string, itemType?: string, rarity?: string, stableId?: string, };
+count: number, name?: string, itemType?: string, rarity?: string, stableId?: string, 
+/**
+ * 卡池实例 ID（如星铁的 `"2003"`），区别于 `banner_id`（卡池**类别**码，
+ * 如星铁 `gacha_type` 的 `"11"`）——同一类别下会随时间推出多个不同实例。
+ *
+ * **可选，依据 UIGF v4.2 权威 JSON Schema（原文已核）**：
+ * - `hkrpg`（星铁）段把 `gacha_id` 列为 **required**；
+ * - `nap`（绝区零）段把它列为**可选**，且实测恒为 `'0'`（真实存档全量记录
+ *   一致，见 `docs/_internal/research/03-真实导出数据格式实测.md` §1.2），
+ *   读了没有信息量；
+ * - `hk4e`（原神）段**根本不提**这个字段——原神 API 不返回它。
+ *
+ * 三款游戏对同一个字段的必要性判定完全不同，因此在宿主契约层只能定成
+ * 可选：把它设成必填会让原神/绝区零无值可填，设成"米哈游三游专属"又
+ * 会把跨游戏统一契约拆成游戏特例，两者都违反本项目的插件化设计。
+ *
+ * ⚠️ **不能用于可靠地区分卡池期次**：星铁虽然提供 49 种真实取值
+ * （能标识具体期数），但绝区零恒为 `'0'`、鸣潮不适用（不在 UIGF 范围、
+ * `CardPoolId` 全部池共用同一个 hash）。卡池期次归属目前仍是「时间窗口 +
+ * 卡池元数据表」的尽力而为推导，不是靠这个字段的事实断言，见
+ * `research/03` §1.2「设计影响」一节。
+ */
+gachaId?: string, };
 export type TzOrigin = "source" | "region" | "user" | "assumed";
 export type MetaState = "complete" | "pending" | "unresolvable";
 export type RecordSource = "packet" | "ocr" | "officialApi" | "import";
@@ -83,7 +105,23 @@ rawRef?: number,
 /**
  * 游戏专属附加字段的 JSON 文本，宿主不解析其结构。
  */
-extra?: string, };
+extra?: string, 
+/**
+ * 服务端返回的记录稳定 ID（米哈游三游的雪花 ID），来自
+ * [`UnifiedRecordFields::stable_id`]，采集管线原样透传落库。
+ *
+ * ⚠️ **不是去重键**——`record_key` 已经由插件在合成时纳入卡池维度
+ * （如 `${gachaType}:${id}`），本列只是留底，供界面展示/校验/未来的
+ * 导出功能使用。鸣潮/异环这类没有服务端稳定 ID 的游戏本列恒为
+ * `None`（对应 SQL `NULL`，不是空字符串，理由见 [`UnifiedRecordFields`]
+ * 的约束 1 与 `gs_storage` 存储层 `normalize_empty` 的文档）。
+ */
+stableId?: string, 
+/**
+ * 卡池实例 ID，来自 [`UnifiedRecordFields::gacha_id`]，采集管线原样
+ * 透传落库。可选性与「不能用于可靠区分卡池期次」的理由见该字段的文档。
+ */
+gachaId?: string, };
 export type ProbabilityCurve = { "kind": "flat", base: number, } | { "kind": "softPity", base: number, start: number, step: number, } | { "kind": "progressive", base: number, start: number, table: Array<number>, } | { "kind": "custom", id: string, };
 export type GuaranteeRule = { "kind": "fiftyFifty", } | { "kind": "alwaysRateUp", } | { "kind": "weighted", rateUpChance: number, } | { "kind": "none", };
 export type PityGroup = { key: string, members: Array<string>, hardPity: number, curve: ProbabilityCurve, guarantee: GuaranteeRule, 

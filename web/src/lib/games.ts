@@ -19,6 +19,13 @@ export interface GameMeta {
   /** 身份标识层游戏色对应的 CSS 变量名，形如 `--game-<id>`。 */
   colorVar: string;
   rarity: RaritySpec;
+  /**
+   * 稀有度码 → 本地化展示文案，已由 Rust 侧
+   * （`gs_analysis::tier_labels_for`）解析成单个字符串——不是裸的
+   * `RaritySpec.tierLabels`（那是 `Record<string, LocalizedText>`，需要
+   * 再挑一遍语言）。绝区零的 `"4"` 在这里取值是 `"S"`，不是"4星"。
+   */
+  tierLabels: Record<string, string>;
   banners: BannerSpec[];
 }
 
@@ -35,6 +42,7 @@ export function toGameMeta(view: GameView): GameMeta {
     displayName: view.displayName,
     colorVar: `--game-${view.pluginId}`,
     rarity: view.rarity,
+    tierLabels: view.tierLabels,
     banners: view.banners,
   };
 }
@@ -51,15 +59,17 @@ export function localizedText(text: LocalizedText, fallback: string): string {
 }
 
 /**
- * ⚠️ 已知数据缺口：`RaritySpec` 只透出稀有度码（`ladder`）与保底目标码
- * （`pityTarget`），不提供本地化档位文案——mock 阶段界面上的"五星/四星/三星"
- * "S级/A级/B级"这类文案是 `mock-data.ts` 里手工维护的一张表，真实 IPC 没有
- * 对应字段可以取代它（确认过 manifest 纯数据与 Rust 结构定义，均无此字段）。
- * 这里退化成"稀有度码 + 星"的通用文案，不再编造没有数据支撑的本地化名词——
- * 绝区零因此会显示"4星"而不是"S级"，如实反映当前 IPC 能提供什么。
+ * 按稀有度码取本地化展示档位文案（真正的"S/A/B"、"五星/四星/三星"这类
+ * 本地化名词，来自插件 manifest 各自声明的 `RaritySpec.tierLabels`，
+ * 经 Rust 侧 `gs_analysis::tier_labels_for` 解析后由 `GameView.tierLabels`
+ * 透出）——绝区零因此会显示"S"而不是"4星"。
+ *
+ * `tierLabels` 未覆盖这个码时才回落到"码 + 星"这个通用规则——四个已注册
+ * 插件当前都已经为自己 `ladder` 声明的每一档补齐了文案，这条回落路径是
+ * 防御性的，不是正常路径（理由同 Rust 侧 `tier_labels_for` 的兜底）。
  */
-export function tierLabel(code: string): string {
-  return `${code}星`;
+export function tierLabel(tierLabels: Record<string, string>, code: string): string {
+  return tierLabels[code] ?? `${code}星`;
 }
 
 export interface RarityTiers {

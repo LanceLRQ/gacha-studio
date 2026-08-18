@@ -100,7 +100,18 @@
         "4",
         "5"
       ],
-      "pityTarget": "5"
+      "pityTarget": "5",
+      "tierLabels": {
+        "3": {
+          "zh-CN": "三星"
+        },
+        "4": {
+          "zh-CN": "四星"
+        },
+        "5": {
+          "zh-CN": "五星"
+        }
+      }
     },
     "time": {
       "timezoneSource": {
@@ -129,7 +140,14 @@
       },
       "conservativeDays": 168
     },
-    "itemIdSource": "displayName"
+    "itemIdSource": "displayName",
+    "metadata": {
+      "kind": "online",
+      "direction": "nameToId",
+      "request": {
+        "url": "https://api.uigf.org/dict/genshin/{{lang}}.json"
+      }
+    }
   },
   "starrail": {
     "id": "starrail",
@@ -318,7 +336,18 @@
         "4",
         "5"
       ],
-      "pityTarget": "5"
+      "pityTarget": "5",
+      "tierLabels": {
+        "3": {
+          "zh-CN": "三星"
+        },
+        "4": {
+          "zh-CN": "四星"
+        },
+        "5": {
+          "zh-CN": "五星"
+        }
+      }
     },
     "time": {
       "rawTimeConvention": "serverLocal",
@@ -1117,7 +1146,18 @@
         "4",
         "5"
       ],
-      "pityTarget": "5"
+      "pityTarget": "5",
+      "tierLabels": {
+        "3": {
+          "zh-CN": "三星"
+        },
+        "4": {
+          "zh-CN": "四星"
+        },
+        "5": {
+          "zh-CN": "五星"
+        }
+      }
     },
     "time": {
       "rawTimeConvention": "serverLocal",
@@ -1326,7 +1366,18 @@
         "3",
         "4"
       ],
-      "pityTarget": "4"
+      "pityTarget": "4",
+      "tierLabels": {
+        "2": {
+          "zh-CN": "B"
+        },
+        "3": {
+          "zh-CN": "A"
+        },
+        "4": {
+          "zh-CN": "S"
+        }
+      }
     },
     "time": {
       "rawTimeConvention": "serverLocal",

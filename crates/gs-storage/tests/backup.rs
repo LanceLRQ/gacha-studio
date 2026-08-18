@@ -94,8 +94,9 @@ fn restore_reruns_migrations_when_backup_schema_is_older_than_current() {
 
     assert_eq!(
         storage.schema_version().expect("应当能读取版本"),
-        2,
-        "恢复后 schema 版本应当被迁移补齐到最新版本"
+        5,
+        "恢复后 schema 版本应当被迁移补齐到最新版本（0005_record_stable_and_gacha_id \
+         加入后，最新版本号从 4 变为 5）"
     );
 
     // `v_integrity` 的 page_count/page_size 两列是 0002 迁移才补上的

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import {
   Check,
@@ -7,6 +7,7 @@ import {
   FolderOpen,
   RefreshCw,
   Save,
+  Tags,
   Upload,
 } from "lucide-react";
 
@@ -20,8 +21,21 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useAppState } from "@/lib/app-state";
 import { formatCount, formatDate, maskUid } from "@/lib/format";
 import type { GameMeta } from "@/lib/games";
-import { importArchiveViaPicker, listAccounts } from "@/lib/ipc-client";
-import type { AccountView, ImportReport } from "@/lib/ipc/generated";
+import {
+  backfillPendingMetadata,
+  exportRecordsViaPicker,
+  getThemePreference,
+  importArchiveViaPicker,
+  listAccounts,
+  setThemePreference,
+} from "@/lib/ipc-client";
+import type {
+  AccountView,
+  ExportFormat,
+  ExportReport,
+  ImportReport,
+  MetadataBackfillReport,
+} from "@/lib/ipc/generated";
 import { useAsync } from "@/lib/use-async";
 import { type ThemePreference, useTheme } from "@/lib/theme-provider";
 import { cn } from "@/lib/utils";
@@ -74,6 +88,23 @@ export function Settings() {
     }
   }
 
+  type MetadataBackfillState =
+    | { status: "idle" }
+    | { status: "running" }
+    | { status: "success"; reports: MetadataBackfillReport[] }
+    | { status: "error"; message: string };
+  const [backfillState, setBackfillState] = useState<MetadataBackfillState>({ status: "idle" });
+
+  async function handleBackfillMetadata() {
+    setBackfillState({ status: "running" });
+    try {
+      const reports = await backfillPendingMetadata();
+      setBackfillState({ status: "success", reports });
+    } catch (err) {
+      setBackfillState({ status: "error", message: err instanceof Error ? err.message : String(err) });
+    }
+  }
+
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <header className="flex shrink-0 flex-col px-7 pt-4.5 pb-3.5">
@@ -104,6 +135,30 @@ export function Settings() {
               {importState.status === "success" && <ImportSuccessSummary report={importState.report} />}
               {importState.status === "error" && (
                 <p className="mt-2.5 border-t border-border pt-2.5 text-[11.5px] text-destructive">{importState.message}</p>
+              )}
+            </Card>
+
+            <SectionLabel>物品名补齐</SectionLabel>
+            <Card className="mb-3">
+              <div className="flex items-center justify-between gap-3">
+                <span className="text-[12.5px] text-muted-foreground">
+                  部分游戏（如原神）的官方接口不直接返回物品标识，记录会暂时停留在"待补全"状态。点击此按钮联网反查一次，仅对已声明该能力的游戏生效。
+                </span>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => void handleBackfillMetadata()}
+                  disabled={backfillState.status === "running"}
+                >
+                  <Tags className={cn(backfillState.status === "running" && "animate-spin")} />
+                  {backfillState.status === "running" ? "回填中…" : "补齐物品名"}
+                </Button>
+              </div>
+              {backfillState.status === "success" && <MetadataBackfillSummary reports={backfillState.reports} />}
+              {backfillState.status === "error" && (
+                <p className="mt-2.5 border-t border-border pt-2.5 text-[11.5px] text-destructive">
+                  {backfillState.message}
+                </p>
               )}
             </Card>
 
@@ -157,6 +212,72 @@ function ImportSuccessSummary({ report }: { report: ImportReport }) {
           </li>
         ))}
       </ul>
+    </div>
+  );
+}
+
+/**
+ * `backfillPendingMetadata` 的结果展示——按插件拆开，四个互斥桶都摆出来，
+ * 不只报"成功了多少"：`stillPending`/`skippedNoLang`/`skippedNoDictionary`
+ * 都是"这次没能处理"的记录，用户需要知道还剩多少、大致是什么原因，而不是
+ * 被一个笼统的"完成"糊弄过去——这正是任务要求"不得静默吞掉失败"的界面落点。
+ *
+ * 空数组（没有任何插件声明在线元数据 Provider，或没有任何记录待处理）
+ * 单独给一句提示，不是留白让用户猜"是不是没点中"。
+ */
+function MetadataBackfillSummary({ reports }: { reports: MetadataBackfillReport[] }) {
+  if (reports.length === 0) {
+    return (
+      <p className="mt-2.5 border-t border-border pt-2.5 text-[11.5px] text-muted-foreground">
+        没有待补齐的记录——要么所有记录都已经有物品标识，要么当前启用的游戏都不需要这项能力。
+      </p>
+    );
+  }
+  return (
+    <div className="mt-2.5 border-t border-border pt-2.5 text-[11.5px]">
+      <ul className="flex flex-col gap-1">
+        {reports.map((report) => (
+          <li key={report.pluginId} className="text-muted-foreground">
+            {report.pluginId}：新补齐{" "}
+            <span className="font-semibold text-foreground">{formatCount(report.resolved)}</span> 条
+            {(report.stillPending > 0 || report.skippedNoLang > 0 || report.skippedNoDictionary > 0) && (
+              <>
+                ，仍待处理 {formatCount(report.stillPending + report.skippedNoLang + report.skippedNoDictionary)} 条
+                {report.skippedNoDictionary > 0 && "（含字典暂不可用，下次再试）"}
+              </>
+            )}
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+/**
+ * `exportRecordsViaPicker` 的结果展示——**必须**把 `excluded` 逐条列出来，
+ * 不能只显示成功条数：一个「导出成功」却悄悄少了几个卡池的功能，与本项目
+ * 反复栽跟头的「功能不产出结论」是同一类失败，见
+ * `crates/gs-host/src/export.rs` 模块文档。CSV 格式恒不产出排除项，这里
+ * 依然统一走同一个组件——`excluded` 为空数组时下方列表天然不渲染。
+ */
+function ExportResultSummary({ report }: { report: ExportReport }) {
+  return (
+    <div className="mt-2.5 border-t border-border pt-2.5 text-[11.5px]">
+      <p className="text-primary">
+        已按 <span className="font-semibold">{report.format === "csv" ? "CSV" : "UIGF v4"}</span> 格式导出
+        {" "}
+        <span className="font-semibold text-foreground">{formatCount(report.recordsExported)}</span> 条记录
+        {report.accountsExported > 0 && `（覆盖 ${formatCount(report.accountsExported)} 个账号）`}
+      </p>
+      {report.excluded.length > 0 && (
+        <ul className="mt-1.5 flex flex-col gap-1.5">
+          {report.excluded.map((bucket) => (
+            <li key={bucket.reason} className="text-muted-foreground">
+              <span className="font-semibold text-foreground">{formatCount(bucket.count)}</span> 条未导出：{bucket.message}
+            </li>
+          ))}
+        </ul>
+      )}
     </div>
   );
 }
@@ -217,8 +338,113 @@ const THEME_OPTIONS: { value: ThemePreference; label: string }[] = [
   { value: "system", label: "跟随系统" },
 ];
 
+type ExportState =
+  | { status: "idle" }
+  | { status: "exporting"; format: ExportFormat }
+  | { status: "success"; report: ExportReport }
+  | { status: "error"; message: string };
+
 function GeneralTab() {
   const { preference, setPreference } = useTheme();
+  const [syncError, setSyncError] = useState<string | null>(null);
+  const [exportState, setExportState] = useState<ExportState>({ status: "idle" });
+
+  async function handleExport(format: ExportFormat) {
+    setExportState({ status: "exporting", format });
+    try {
+      const report = await exportRecordsViaPicker(format);
+      if (report === null) {
+        // 用户按了取消——不是失败，回到 idle，不弹红色提示，与
+        // handleImport 同一条纪律。
+        setExportState({ status: "idle" });
+        return;
+      }
+      setExportState({ status: "success", report });
+    } catch (err) {
+      setExportState({ status: "error", message: err instanceof Error ? err.message : String(err) });
+    }
+  }
+
+  // 主题偏好现在有两处落点，真值来源与两者的关系必须说清楚，避免"两处都在
+  // 写、谁赢不确定"：
+  //
+  // - `localStorage`（读写逻辑在 `lib/theme-provider.tsx`，本次改动未触碰）
+  //   是应用启动那一帧唯一来得及同步读到的缓存——`ThemeProvider` 在整棵组件
+  //   树挂载前用它决定要不要加 `dark` class，避免"先渲染浅色、IPC 回来才
+  //   跳深色"的闪烁。这层缓存必须继续存在，不能被宿主持久化整体取代。
+  // - 宿主 SQLite（`app_setting` 表，本次新增）才是**真值来源**：跨设备/
+  //   跨 profile 的持久化、以及未来"设置导出/迁移"这类需求都只能靠它，
+  //   `localStorage` 清空或换一个 webview profile 都不影响它。
+  //
+  // 两者的同步规则：
+  //   写入：用户点击 → 先同步写 `localStorage`（经 `setPreference`，界面立即
+  //         生效，不等 IPC 往返）→ 再异步写宿主。**写宿主失败必须把界面与
+  //         localStorage 一并回滚到改动前的值**，理由见下。
+  //   读取：本页挂载时向宿主对账一次——宿主有值且与本地缓存不同就以宿主为
+  //         准（顺带把 localStorage 刷新一致，覆盖"换了个清空过 localStorage
+  //         的 profile"这种情况）；宿主从未记录过（`null`）就用当前生效值
+  //         反向回填，让下次启动就能从宿主读到。
+  //
+  // ⚠️ **为什么写失败必须回滚，而不是"只提示、保留已生效的界面"**（2026-08-18
+  // 复核时修正，初版就是不回滚的）：`stored !== preference` 这个对账条件
+  // **只可能**由两种情形触发，而代码没有任何办法区分它们——
+  //   ① `localStorage` 被清空/换了 webview profile：本地退回默认值，
+  //      宿主保留着用户真正的选择 → **该宿主赢**；
+  //   ② 上一次写宿主失败：本地是用户刚选的新值，宿主还是旧值 → **该本地赢**。
+  // 既然分不清就只能选一种，而"宿主赢"在情形 ② 下会把用户的选择**静默改回去**：
+  // 用户选了深色 → 写宿主失败（只弹了个提示）→ 离开设置页再回来 → 对账把它
+  // 改回浅色，而那条错误提示早已随组件卸载消失，用户只会觉得设置莫名其妙没保存。
+  // 让写失败时立刻回滚，情形 ② 就根本不会产生分歧，"宿主赢"随之变成无歧义的
+  // 正确规则。代价是主题会闪回原值一次——但那恰恰是诚实的：这次设置**确实**
+  // 没有持久化成功，让用户当场看见，好过五分钟后自己发现。
+  // 对账只发生在设置页这次挂载，不会在应用启动的第一帧触发——第一帧的主题
+  // 只由 `localStorage` 同步决定，本次改动没有、也不能改这一点（那部分逻辑
+  // 在 `theme-provider.tsx`/`main.tsx`，不在本次改动范围内），因此不会引入
+  // "先浅色再跳深色"的新闪烁。
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const stored = await getThemePreference();
+        if (cancelled) return;
+        if (stored === null) {
+          await setThemePreference(preference);
+        } else if (stored !== preference) {
+          setPreference(stored);
+        }
+      } catch (err) {
+        if (!cancelled) setSyncError(err instanceof Error ? err.message : String(err));
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // 只在设置页挂载时对账一次。`preference`/`setPreference` 之后的变化
+    // （无论是用户点击 handleThemeChange，还是本 effect 自己触发的
+    // setPreference(stored)）都不应该重新跑一遍对账——那会变成"对账 →
+    // 状态变化 → 再次对账"的循环。空依赖数组是刻意的，不是漏写。
+    // （本仓库没有 eslint，因此不写 eslint-disable 注释——那会让读者以为
+    // 有一条 lint 规则正在被抑制，而实际上没有任何东西在检查这里。）
+  }, []);
+
+  async function handleThemeChange(next: typeof preference) {
+    // 改动前的值，写宿主失败时用它回滚——理由见上方 useEffect 的说明。
+    const previous = preference;
+    setPreference(next); // 同步：localStorage + 界面状态立即生效，不等待 IPC 往返
+    try {
+      await setThemePreference(next);
+      setSyncError(null);
+    } catch (err) {
+      // 回滚到改动前的值，让 localStorage 与宿主不产生分歧。`setPreference`
+      // 同时写 localStorage 与界面状态，两者一起退回，不留半应用状态。
+      setPreference(previous);
+      setSyncError(
+        `主题偏好未能保存到本地数据库，已恢复为改动前的设置：${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+  }
 
   return (
     <>
@@ -231,7 +457,7 @@ function GeneralTab() {
                 <button
                   key={option.value}
                   type="button"
-                  onClick={() => setPreference(option.value)}
+                  onClick={() => void handleThemeChange(option.value)}
                   className={cn(
                     "px-3.5 py-1.5 text-[12.5px] text-muted-foreground",
                     idx > 0 && "border-l border-border-strong",
@@ -256,8 +482,12 @@ function GeneralTab() {
             </Select>
           </SettingsRow>
         </Card>
-        {/* TODO：主题偏好目前只落 localStorage，没有走宿主持久化——设置项持久化
-            需要新的 kv 表 + Rust 迁移，本轮 IPC 面未提供，超出本次改动范围。 */}
+        {syncError && (
+          <p className="mt-2.5 text-[11.5px] text-destructive">
+            主题偏好未能同步到本地数据库：{syncError}
+            （不影响当前显示，仅表示这次选择可能不会被下次启动记住）
+          </p>
+        )}
       </section>
 
       <section>
@@ -279,11 +509,31 @@ function GeneralTab() {
             </Button>
           </SettingsRow>
           <SettingsRow label="导出">
-            <Button variant="outline" size="sm" disabled title={NOT_WIRED_HINT}>
-              <Download />
-              导出
-            </Button>
+            <div className="flex items-center gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => void handleExport("csv")}
+                disabled={exportState.status === "exporting"}
+              >
+                <Download className={cn(exportState.status === "exporting" && exportState.format === "csv" && "animate-spin")} />
+                {exportState.status === "exporting" && exportState.format === "csv" ? "导出中…" : "导出 CSV（全量）"}
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => void handleExport("uigfV4")}
+                disabled={exportState.status === "exporting"}
+              >
+                <Download className={cn(exportState.status === "exporting" && exportState.format === "uigfV4" && "animate-spin")} />
+                {exportState.status === "exporting" && exportState.format === "uigfV4" ? "导出中…" : "导出 UIGF v4"}
+              </Button>
+            </div>
           </SettingsRow>
+          {exportState.status === "success" && <ExportResultSummary report={exportState.report} />}
+          {exportState.status === "error" && (
+            <p className="mt-2.5 border-t border-border pt-2.5 text-[11.5px] text-destructive">{exportState.message}</p>
+          )}
         </Card>
       </section>
     </>

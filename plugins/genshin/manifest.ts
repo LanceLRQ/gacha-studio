@@ -55,6 +55,39 @@ function toCount(value: unknown): number {
   return 1;
 }
 
+/**
+ * 解析 `api.uigf.org` 字典接口的响应体：一份 `{ name: id }` 的全量映射
+ * （如 `{"无锋剑": 11101, ...}`），产出 name → itemId（字符串）的字典。
+ *
+ * 纯函数，不做 IO——真正的网络请求、重试、本地缓存全部在宿主侧
+ * （`gs_host::metadata_backfill` 模块），这里只负责"信任宿主已经取回的这份
+ * JSON，形状对不对我说了算"。
+ *
+ * 已用真实实现核实（`docs/example-projects/genshin-wish-export/src/main/
+ * UIGFJson.js` 的 `fetchItemIdDict`）：字典值是 JSON number，不是字符串——
+ * `gacha_record.item_id` 落库后是字符串列，这里显式 `String()` 转换一次，
+ * 不把"数字转字符串"这件事丢给调用方假设。
+ *
+ * 防御式解析：整份响应形状不对（非对象/是数组）返回 `undefined`，让宿主
+ * 按"这个语言暂时没有可用字典"处理；单个条目的值形状不对（既不是数字也不是
+ * 非空字符串）直接跳过那一条，不让一条脏数据拖垮整份字典——与
+ * `extractGachaLogList` 的防御式解析同一态度。
+ */
+function parseUigfDictResponse(response: unknown): Record<string, string> | undefined {
+  if (typeof response !== "object" || response === null || Array.isArray(response)) {
+    return undefined;
+  }
+  const dict: Record<string, string> = {};
+  for (const [name, id] of Object.entries(response as Record<string, unknown>)) {
+    if (typeof id === "number" && Number.isFinite(id)) {
+      dict[name] = String(id);
+    } else if (typeof id === "string" && id.trim().length > 0) {
+      dict[name] = id;
+    }
+  }
+  return dict;
+}
+
 export const manifest = {
   id: "genshin",
   displayName: { "zh-CN": "原神" },
@@ -174,7 +207,15 @@ export const manifest = {
     },
   ],
 
-  rarity: { ladder: ["3", "4", "5"], pityTarget: "5" },
+  rarity: {
+    ladder: ["3", "4", "5"],
+    pityTarget: "5",
+    tierLabels: {
+      "3": { "zh-CN": "三星" },
+      "4": { "zh-CN": "四星" },
+      "5": { "zh-CN": "五星" },
+    },
+  },
 
   time: { timezoneSource: { kind: "computed" } },
 
@@ -208,5 +249,19 @@ export const manifest = {
   // name/rarity 都有值就误判成 complete——错的 item_id 不该被标记为完整。
   itemIdSource: "displayName",
 
-  // metadata 字段本 Stage 刻意不声明，理由见文件末尾「偏差与发现」。
+  // 回填侧：反查 itemIdSource: "displayName" 标成 pending 的记录，把
+  // extractRecord 填进 itemId 里的本地化物品名换成真正的物品标识。
+  // 已用真实实现校准（见 parseUigfDictResponse 与 MetadataProviderConfig
+  // 的文档），不是未校准的猜测。
+  metadata: {
+    kind: "online",
+    direction: "nameToId",
+    request: {
+      // `{{lang}}` 由宿主按待回填记录的 gacha_record.lang 转换成 api.uigf.org
+      // 自己的语言短码后替换（转换表见 gs_host::metadata_backfill 模块，是
+      // "这个具体接口"的知识，不是游戏知识，不在这里声明）。
+      url: "https://api.uigf.org/dict/genshin/{{lang}}.json",
+    },
+    parseResponse: parseUigfDictResponse,
+  },
 } satisfies PluginManifest;

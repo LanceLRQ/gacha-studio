@@ -13,7 +13,11 @@
 //! 公共函数保留不动（`pity.rs`/`rarity.rs`/`rare_event.rs` 的测试与集成测试
 //! 都在用），内部实现改为调用本模块，避免两份反序列化逻辑漂移。
 
-use gs_core::{BannerSpec, LocalizedText, PityGroup, Platform, RaritySpec, RetentionPolicy};
+use std::collections::BTreeMap;
+
+use gs_core::{
+    BannerSpec, LocalizedText, PityGroup, Platform, RaritySpec, RequestTemplate, RetentionPolicy,
+};
 
 /// 取某个插件 manifest 的纯数据根节点，找不到就 panic——manifest 纯数据
 /// 缺失意味着没跑过 `node scripts/gs-bundle-plugins.mjs`，属于开发期配置
@@ -57,6 +61,40 @@ pub fn pity_groups_for(plugin_id: &str) -> Vec<PityGroup> {
 pub fn rarity_spec_for(plugin_id: &str) -> RaritySpec {
     let root = manifest_root(plugin_id);
     deserialize_or_panic(plugin_id, "rarity", &root["rarity"])
+}
+
+/// `plugin_id` 的稀有度阶梯文案，解析成"稀有度码 → 展示字符串"，供界面
+/// 直接按码取值展示——真正的本地化档位名（绝区零 `S`/`A`/`B`，米哈游三游
+/// 与鸣潮"五星"/"四星"/"三星"），不是拿稀有度码硬拼"N 星"这个通用规则。
+///
+/// 解析优先级与 [`display_name_for`] 完全一致：`"zh-CN"` → 该码下第一个
+/// 已有值 → 兜底 `"{code}星"`。兜底只在 `RaritySpec.tier_labels` 没有覆盖
+/// `ladder` 里的某个码时触发——四个已注册插件当前均已为自己 `ladder`
+/// 声明的每一档补齐文案，这条回落路径是防御性的，不是正常路径（理由同
+/// `display_name_for` 对空 `LocalizedText` 的兜底：一旦真的缺失，界面
+/// 不该因为一条数据缺口就整个报错，退回通用文案好过白屏）。
+///
+/// 覆盖范围只到 `spec.ladder` 列出的码——`tier_labels` 理论上可能声明了
+/// `ladder` 之外的码（manifest 允许，但没有意义），这里不把它们也吐出来，
+/// 保持"这个函数只回答『ladder 里每一档叫什么』"这一件事。
+pub fn tier_labels_for(plugin_id: &str) -> BTreeMap<String, String> {
+    let spec = rarity_spec_for(plugin_id);
+    spec.ladder
+        .iter()
+        .map(|code| {
+            let label = spec
+                .tier_labels
+                .get(code)
+                .and_then(|text| {
+                    text.0
+                        .get("zh-CN")
+                        .cloned()
+                        .or_else(|| text.0.values().next().cloned())
+                })
+                .unwrap_or_else(|| format!("{code}星"));
+            (code.clone(), label)
+        })
+        .collect()
 }
 
 /// `plugin_id` 声明的全部卡池，直接来自 manifest `banners` 字段。
@@ -153,6 +191,44 @@ pub fn retention_policy_for(plugin_id: &str) -> Option<RetentionPolicy> {
     Some(deserialize_or_panic(plugin_id, "retention", value))
 }
 
+/// `metadata` 字段里 `request` 子节点的最小反序列化形态——只声明本函数真正
+/// 要读的字段（`kind`/`direction`/`request`），不是 `MetadataProviderConfig`
+/// 判别联合的完整镜像。`kind: "builtin"` 分支没有 `request` 字段（它是
+/// `dictionary` 静态字典），因此这里不建那个分支，`kind` 不是 `"online"`
+/// 时直接返回 `None`——`builtin` 本轮只做查表机制，不消费这个读取函数。
+#[derive(Debug, Clone, serde::Deserialize)]
+struct OnlineMetadataProviderJson {
+    kind: String,
+    #[serde(default)]
+    request: Option<RequestTemplate>,
+}
+
+/// `plugin_id` 声明的在线元数据 Provider 的请求模板，直接来自 manifest
+/// `metadata` 字段——`MetadataProviderConfig` 只有一种已验证的在线方向
+/// （`kind: "online"`，`direction: "nameToId"`，见 `packages/gs-plugin-kit/
+/// manifest.ts` 该类型的文档），因此这里不返回 `direction` 本身，调用方
+/// （`gs_host::metadata_backfill`）不需要再分支判断。
+///
+/// 与 [`retention_policy_for`] 同样的可选字段处理方式：`metadata` 是
+/// `PluginManifest` 的可选字段，缺失（`.get` 返回 `None`）或显式
+/// `null`（`JSON.stringify` 丢弃 `undefined` 值的可选键，理论上不会产生
+/// 字面 `null`，但仍防御一次）都返回 `None`，不 panic——多数插件
+/// （M1 阶段的 starrail/wuwa/zzz）本来就没有声明它，这是合法的正常状态。
+/// `kind: "builtin"` 同样返回 `None`：本轮只有 genshin 声明 `online`，
+/// `builtin` 没有 `request` 字段可读。
+pub fn online_metadata_request_for(plugin_id: &str) -> Option<RequestTemplate> {
+    let root = manifest_root(plugin_id);
+    let value = root.get("metadata")?;
+    if value.is_null() {
+        return None;
+    }
+    let parsed: OnlineMetadataProviderJson = deserialize_or_panic(plugin_id, "metadata", value);
+    if parsed.kind != "online" {
+        return None;
+    }
+    parsed.request
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -225,6 +301,24 @@ mod tests {
     }
 
     #[test]
+    fn tier_labels_for_resolves_zzzs_top_tier_to_s_not_four_star() {
+        // 本项任务的验收样本：绝区零最高档 "4" 必须解析成 "S"，不是"4星"——
+        // 这是 tier_labels_for 存在的全部理由。
+        let labels = tier_labels_for("zzz");
+        assert_eq!(labels.get("4").map(String::as_str), Some("S"));
+        assert_eq!(labels.get("3").map(String::as_str), Some("A"));
+        assert_eq!(labels.get("2").map(String::as_str), Some("B"));
+    }
+
+    #[test]
+    fn tier_labels_for_resolves_genshin_standard_n_star_wording() {
+        let labels = tier_labels_for("genshin");
+        assert_eq!(labels.get("5").map(String::as_str), Some("五星"));
+        assert_eq!(labels.get("4").map(String::as_str), Some("四星"));
+        assert_eq!(labels.get("3").map(String::as_str), Some("三星"));
+    }
+
+    #[test]
     fn rarity_spec_for_reads_genshin_standard_ladder() {
         let spec = rarity_spec_for("genshin");
         assert_eq!(spec.ladder, vec!["3", "4", "5"]);
@@ -274,5 +368,32 @@ mod tests {
         // 开发期配置错误应当在这里就暴露，不是让调用方拿到一堆空数据后
         // 才在别处困惑——理由同 banner_meta_seed::genshin_manifest。
         let _ = pity_groups_for("does-not-exist");
+    }
+
+    #[test]
+    fn online_metadata_request_for_reads_genshin_declared_request_template() {
+        // genshin 是当前唯一声明 metadata Provider 的插件（kind: "online"，
+        // direction: "nameToId"）——真实反序列化路径，不是靠构造假 JSON 自证。
+        let request = online_metadata_request_for("genshin")
+            .expect("genshin 应当声明 online metadata Provider");
+        assert_eq!(
+            request.url,
+            "https://api.uigf.org/dict/genshin/{{lang}}.json"
+        );
+        assert_eq!(request.method, None);
+    }
+
+    #[test]
+    fn online_metadata_request_for_returns_none_for_plugins_without_metadata_declaration() {
+        // starrail/wuwa/zzz 当前都没有声明 metadata 字段（builtin 形态本轮只做
+        // 机制、不填字典数据，因此不在任何插件 manifest 里声明），必须返回
+        // None，不能 panic——metadata 是可选字段，缺失是合法状态。
+        for plugin_id in ["starrail", "wuwa", "zzz"] {
+            assert_eq!(
+                online_metadata_request_for(plugin_id),
+                None,
+                "{plugin_id} 不应声明 metadata"
+            );
+        }
     }
 }

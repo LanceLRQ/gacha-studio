@@ -39,6 +39,18 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
         name: "0002_v_integrity_page_columns",
         sql: include_str!("../migrations/0002_v_integrity_page_columns.sql"),
     },
+    Migration {
+        name: "0003_app_setting",
+        sql: include_str!("../migrations/0003_app_setting.sql"),
+    },
+    Migration {
+        name: "0004_account_latest_record_at",
+        sql: include_str!("../migrations/0004_account_latest_record_at.sql"),
+    },
+    Migration {
+        name: "0005_record_stable_and_gacha_id",
+        sql: include_str!("../migrations/0005_record_stable_and_gacha_id.sql"),
+    },
 ];
 
 /// 把连接从当前 `user_version` 推进到 [`MIGRATIONS`] 的最新版本。
@@ -90,7 +102,8 @@ mod tests {
             .expect("应当能读取版本");
         assert_eq!(version, MIGRATIONS.len() as i64);
 
-        // 建表确实生效：8 张表 + 2 个视图应当都能在 sqlite_master 里查到。
+        // 建表确实生效：9 张表（含 0003 新增的 app_setting）+ 2 个视图应当
+        // 都能在 sqlite_master 里查到。
         let object_count: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type IN ('table', 'view')",
@@ -98,7 +111,7 @@ mod tests {
                 |row| row.get(0),
             )
             .expect("应当能查询 sqlite_master");
-        assert_eq!(object_count, 10, "应有 8 张表 + 2 个视图");
+        assert_eq!(object_count, 11, "应有 9 张表 + 2 个视图");
     }
 
     #[test]

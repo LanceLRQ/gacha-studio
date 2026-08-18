@@ -60,10 +60,84 @@ fn empty_string_rarity_is_normalized_to_null_on_write() {
 }
 
 #[test]
+fn stable_id_and_gacha_id_round_trip_through_storage_when_provided() {
+    let storage = Storage::open_in_memory().expect("应当成功打开内存数据库");
+    let repo = storage.repository();
+    let account_id = create_test_account(&repo, "starrail");
+
+    let mut record = sample_record(account_id, "starrail:character-event", "11:snowflake_789");
+    record.stable_id = Some("1500000000000000001".to_string());
+    record.gacha_id = Some("2003".to_string());
+
+    repo.insert_records(&[record]).expect("插入应当成功");
+
+    let stored = repo
+        .find_records_by_banner(account_id, "starrail:character-event")
+        .expect("查询应当成功");
+    assert_eq!(stored.len(), 1);
+    assert_eq!(
+        stored[0].stable_id.as_deref(),
+        Some("1500000000000000001"),
+        "stable_id 落库后读回应当与写入值一致"
+    );
+    assert_eq!(
+        stored[0].gacha_id.as_deref(),
+        Some("2003"),
+        "gacha_id 落库后读回应当与写入值一致"
+    );
+}
+
+#[test]
+fn stable_id_and_gacha_id_default_to_none_when_not_provided() {
+    let storage = Storage::open_in_memory().expect("应当成功打开内存数据库");
+    let repo = storage.repository();
+    let account_id = create_test_account(&repo, "genshin");
+
+    // sample_record 本身就不填 stable_id/gacha_id（两者默认 None）——
+    // 鸣潮/异环这类没有服务端稳定 ID、也没有卡池实例 ID 的游戏，落库后
+    // 这两列应当是 NULL，不是被某个隐式默认值顶替。
+    let record = sample_record(account_id, "genshin:character-event", "301:no-stable-id");
+    repo.insert_records(&[record]).expect("插入应当成功");
+
+    let stored = repo
+        .find_records_by_banner(account_id, "genshin:character-event")
+        .expect("查询应当成功");
+    assert_eq!(stored.len(), 1);
+    assert_eq!(stored[0].stable_id, None);
+    assert_eq!(stored[0].gacha_id, None);
+}
+
+#[test]
+fn empty_string_stable_id_and_gacha_id_are_normalized_to_null_on_write() {
+    let storage = Storage::open_in_memory().expect("应当成功打开内存数据库");
+    let repo = storage.repository();
+    let account_id = create_test_account(&repo, "starrail");
+
+    let mut record = sample_record(account_id, "starrail:character-event", "11:snowflake_empty");
+    record.stable_id = Some(String::new());
+    record.gacha_id = Some(String::new());
+
+    repo.insert_records(&[record]).expect("插入应当成功");
+
+    let stored = repo
+        .find_records_by_banner(account_id, "starrail:character-event")
+        .expect("查询应当成功");
+    assert_eq!(stored.len(), 1);
+    assert_eq!(
+        stored[0].stable_id, None,
+        "空串必须在写入前转换为 NULL，不是 Some(\"\")"
+    );
+    assert_eq!(
+        stored[0].gacha_id, None,
+        "空串必须在写入前转换为 NULL，不是 Some(\"\")"
+    );
+}
+
+#[test]
 fn inserting_a_full_archive_sized_batch_does_not_exceed_sqlite_variable_limit() {
     // 5372 是星铁真实存档的实测条数（research/03）。导入路径（UIGF / 伙伴工具同步）
-    // 会一次性交进来这个量级，而多值 INSERT 的占位符个数是 条数 × 19，
-    // 5372 条就是 102068 个变量，远超 SQLite 的 SQLITE_MAX_VARIABLE_NUMBER。
+    // 会一次性交进来这个量级，而多值 INSERT 的占位符个数是 条数 × 21，
+    // 5372 条就是 112812 个变量，远超 SQLite 的 SQLITE_MAX_VARIABLE_NUMBER。
     // 分页采集每页 20 条撞不到这个上限，所以它只会在导入时才炸——
     // 正是那种"测试全绿、真实数据一跑就挂"的坑。
     let storage = Storage::open_in_memory().expect("应当成功打开内存数据库");

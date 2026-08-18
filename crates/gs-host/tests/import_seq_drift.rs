@@ -142,6 +142,7 @@ fn synthetic_wuwa_batch(records: Vec<Value>) -> ImportBatch {
             region: None,
             server_id: None,
             tz_offset_hours: None,
+            lang: None,
         },
         banners: vec![ImportBanner {
             banner_id: WUWA_BANNER_ID.to_string(),

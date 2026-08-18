@@ -29,11 +29,13 @@ use gs_core::{
     RequestTemplate, RetentionPolicy, RetryConfig, StopCondition, TimeConfig, TimezoneSource,
     TzOrigin, UnifiedRecordFields,
 };
+use gs_host::export::{ExportExclusionBucket, ExportExclusionReason, ExportFormat, ExportReport};
+use gs_host::settings::ThemePreference;
 use gs_host::views::{
-    AccountAnalysisView, AccountView, CurveEvaluationView, GameView, ImportReport,
-    ImportedAccountReport, OverviewStatsView, PityGroupProgressView, PityPullView,
-    PluginRarityDistributionView, RarityDistributionView, RecordPage, RetentionRiskLevel,
-    RetentionRiskView,
+    AccountAnalysisView, AccountView, CurveEvaluationView, GameView, HitOutcomeView, ImportReport,
+    ImportedAccountReport, MetadataBackfillReport, MonthlyActivityView, OverviewStatsView,
+    PityGroupProgressView, PityPullView, PluginRarityDistributionView, RarityDistributionView,
+    RecordPage, RetentionRiskLevel, RetentionRiskView,
 };
 use std::fs;
 use std::path::PathBuf;
@@ -55,7 +57,7 @@ const IPC_OUTPUT_RELATIVE_PATH: &str = "web/src/lib/ipc/generated.ts";
 /// 产物。两份产物之间用真实的 TS import 连接，不复制一份声明过来——
 /// 复制会得到两个同名但可能悄悄漂移的类型。
 const IPC_HEADER: &str = "// 本文件由 gs-codegen 生成，禁止手改。修改请改 crates/gs-host/src/views.rs 后重跑 `cargo run -p gs-host --bin gs-codegen`。\n\
-import type { GachaRecord, RaritySpec, BannerSpec } from \"gs-plugin-kit/types\";";
+import type { GachaRecord, RaritySpec, BannerSpec, GuaranteeRule } from \"gs-plugin-kit/types\";";
 
 fn main() {
     // ts-rs 对 i64/u64/i128/u128 的默认映射是 `bigint`，不是 `number`。这在
@@ -138,6 +140,7 @@ fn main() {
         ("GameView", GameView::decl(&cfg)),
         // --- 分析结果（account_analysis / overview_stats） ---
         ("CurveEvaluationView", CurveEvaluationView::decl(&cfg)),
+        ("HitOutcomeView", HitOutcomeView::decl(&cfg)),
         ("PityPullView", PityPullView::decl(&cfg)),
         ("PityGroupProgressView", PityGroupProgressView::decl(&cfg)),
         ("RarityDistributionView", RarityDistributionView::decl(&cfg)),
@@ -147,6 +150,17 @@ fn main() {
             PluginRarityDistributionView::decl(&cfg),
         ),
         ("OverviewStatsView", OverviewStatsView::decl(&cfg)),
+        // --- 月度活动聚合（monthly_activity） ---
+        ("MonthlyActivityView", MonthlyActivityView::decl(&cfg)),
+        // --- 设置持久化（get_theme_preference / set_theme_preference） ---
+        ("ThemePreference", ThemePreference::decl(&cfg)),
+        // --- 元数据回填（backfill_pending_metadata） ---
+        ("MetadataBackfillReport", MetadataBackfillReport::decl(&cfg)),
+        // --- 导出（export_records_via_picker），排除原因先于引用它的 bucket ---
+        ("ExportFormat", ExportFormat::decl(&cfg)),
+        ("ExportExclusionReason", ExportExclusionReason::decl(&cfg)),
+        ("ExportExclusionBucket", ExportExclusionBucket::decl(&cfg)),
+        ("ExportReport", ExportReport::decl(&cfg)),
     ];
     write_generated(IPC_OUTPUT_RELATIVE_PATH, IPC_HEADER, &ipc_decls);
 }

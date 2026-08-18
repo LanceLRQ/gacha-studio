@@ -47,7 +47,10 @@ pub struct AccountView {
     /// 填 0 冒充"很久以前"，界面需要区分"没采过"和"很久没采了"，前者该
     /// 引导用户去采集，后者该告警保留期。
     pub last_collected_at: Option<i64>,
-    /// 库中该账号最早一条记录的时间，供保留期告警计算用。
+    /// 库中该账号最早一条记录的时间。**只有展示价值**（"你的记录覆盖 X
+    /// 至今"），**不驱动**保留期风险等级——驱动字段是
+    /// `max(last_collected_at, latest_record_at)`，理由见
+    /// `gs_host::retention` 模块文档。
     pub earliest_record_at: Option<i64>,
     /// 该账号名下的记录总数。
     pub record_count: i64,
@@ -60,39 +63,54 @@ pub struct AccountView {
     pub retention_risk: Option<RetentionRiskView>,
 }
 
-/// 保留期风险等级。三档对应"还有充裕缓冲 / 该去采集了 / 保守估计已超期"。
+/// 保留期风险等级。四档，与前端设计稿（原 `web/src/lib/risk.ts`
+/// `computeAccountRisk`，判定逻辑现已下沉到这里）对齐。
 ///
-/// 只有三档、没有第四档"未知"——"无法评估"这件事由外层 `Option` 表达
-/// （见 [`AccountView::retention_risk`]），不塞进这个枚举里：等级本身要回答
-/// 的是"风险有多急"，与"有没有能力回答这个问题"是两个维度，混在一起会让
-/// 消费方每次 match 这个枚举时都要顺带处理一个语义完全不同的"哨兵值"。
+/// "无法评估"不是第五档——它由外层 `Option` 表达（见
+/// [`AccountView::retention_risk`]），不塞进这个枚举里：等级本身要回答的是
+/// "风险有多急"，与"有没有能力回答这个问题"是两个维度，混在一起会让消费方
+/// 每次 match 这个枚举时都要顺带处理一个语义完全不同的"哨兵值"。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(rename_all = "camelCase")]
 pub enum RetentionRiskLevel {
-    /// 距保守估计的过期时刻还有 30 天以上缓冲。
+    /// 距保守估计的过期时刻还有 3 个月（84 天，按 28 天/月折算，理由见
+    /// `gs_host::retention` 模块文档 `DAYS_PER_MONTH`）以上缓冲。
     Safe,
-    /// 缓冲已经进入 30 天以内（含 0 天）——该提醒用户尽快采集了。
+    /// 缓冲已经进入 1~3 个月（28~84 天）——该提醒用户尽快采集了。
     Watch,
-    /// 已经超出保守估计的保留期。**不是"数据已丢失"的断言**——保留期本身
-    /// 是保守估计，服务端实际策略可能比这个估计更宽松；措辞与
-    /// [`AccountView::retention_risk`] 一致，一律说"可能已丢失"。
-    Alert,
+    /// 缓冲已不足 1 个月（< 28 天），或已经超出保守估计的保留期（此时
+    /// `remaining_days` 为负）——超期是最需要行动的状态，与"快到期但还没到"
+    /// 合并为同一档，不单独分出旧三态模型里的 `Alert`。**不是"数据已丢失"
+    /// 的断言**——保留期本身是保守估计，服务端实际策略可能比这个估计更
+    /// 宽松；措辞与 [`AccountView::retention_risk`] 一致，一律说"可能已丢失"。
+    Urgent,
+    /// 采集链路本身坏了（游戏目录失效 / 连续采集失败）。
+    ///
+    /// ⚠️ **`gs_host::retention::evaluate_account_retention_risk` 当前永远
+    /// 不会返回这个变体**——判定它需要 `gameDirValid`/`consecutiveFailureCount`
+    /// 两个信号，本仓库目前没有任何命令校验游戏目录、也没有连续失败计数
+    /// （两者都要等 S3 采集链路接线后才存在）。这里只留结构入口，不编造
+    /// 数据——没有真实数据支撑就不渲染，编出一个假的"阻塞"状态比不显示
+    /// 更坏。前端 `RiskBadge` 已经备好这一档的展示样式，一旦上述两个信号
+    /// 就位即可直接解冻，不需要改类型。
+    Blocked,
 }
 
-/// 单个账号的保留期风险评估结果，[`RetentionRiskLevel`] 的三档判据与
+/// 单个账号的保留期风险评估结果，[`RetentionRiskLevel`] 的判据与
 /// `possible_loss_from`/`possible_loss_to` 的取值来源见
 /// `gs_host::retention::evaluate_account_retention_risk` 的文档。
 #[derive(Debug, Clone, PartialEq, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct RetentionRiskView {
     pub level: RetentionRiskLevel,
-    /// 距"最早本地记录理论过期时刻"还剩的天数，可能为负——为负表示已经
-    /// 超出保守估计的保留期（对应 [`RetentionRiskLevel::Alert`]）。
+    /// 距保留期保守估计的过期时刻还剩的天数，可能为负——为负表示已经超出
+    /// 保守估计的保留期（落在 [`RetentionRiskLevel::Urgent`] 档内，但
+    /// `Urgent` 不止负数这一种情况，还覆盖"剩余 0~27 天、尚未超期"）。
     pub remaining_days: i64,
-    /// 仅 [`RetentionRiskLevel::Alert`] 时有值：这段时间区间内发生的记录，
-    /// 按保留期保守估计**可能**已经无法再从官方接口取回（UTC 毫秒，闭区间）。
-    /// 措辞刻意用"可能"——不断言"已丢失"，见字段所在结构体的文档。
+    /// 仅 `remaining_days` 为负（已超期）时有值：这段时间区间内发生的
+    /// 记录，按保留期保守估计**可能**已经无法再从官方接口取回（UTC 毫秒，
+    /// 闭区间）。措辞刻意用"可能"——不断言"已丢失"，见字段所在结构体的文档。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub possible_loss_from: Option<i64>,
@@ -170,6 +188,13 @@ pub struct GameView {
     pub display_name: String,
     #[ts(type = "RaritySpec")]
     pub rarity: gs_core::RaritySpec,
+    /// `rarity.tier_labels` 解析成"稀有度码 → 展示字符串"后的投影，取值
+    /// 优先级见 `gs_analysis::tier_labels_for` 的文档（`"zh-CN"` 优先，
+    /// 未声明的码兜底成"N 星"）——与 `display_name` 是同一条理由：界面
+    /// 不需要自己再挑一遍语言，也不再靠"稀有度码 + 星"这个通用规则硬拼，
+    /// 绝区零因此能显示"S"而不是"4星"。
+    #[ts(type = "Record<string, string>")]
+    pub tier_labels: std::collections::BTreeMap<String, String>,
     #[ts(type = "BannerSpec[]")]
     pub banners: Vec<gs_core::BannerSpec>,
     /// 当前运行的操作系统是否在该插件声明的 `platforms` 列表内，取值来自
@@ -228,6 +253,33 @@ pub struct PityPullView {
     /// 自上一次命中（不含本次）以来，被跳过的稀有度未知记录数——星铁真实
     /// 存档里确有 `rank_type` 为空串的记录，这个数字提醒"抽数可能被低估"。
     pub unknown_rarity_since_last_hit: u32,
+    /// 这次命中是"歪了"还是中了 UP，`None` 表示这条 pull 根本不是一次
+    /// 顶级保底命中（`is_pity_hit == false`）——"是否歪"这个问题对非命中
+    /// 的 pull 没有意义，用 `None` 而不是塞一个 `Unknown` 占位，让"不适用"
+    /// 与"命中了但不知道歪没歪"（`Some(HitOutcomeView::Unknown)`）保持
+    /// 可区分的两种状态。
+    ///
+    /// 取值来自 [`gs_analysis::derive_rare_events`] 产出的 `is_rate_up`
+    /// 三态经 [`gs_analysis::hit_outcome_from_is_rate_up`] 映射——当前
+    /// 没有任何数据源能提供当期 UP 物品列表，因此命中的 pull 实际取值恒为
+    /// `Some(HitOutcomeView::Unknown)`，如实反映"不知道"，不编造。
+    ///
+    /// ⚠️ **只有 [`PityGroupProgressView::guarantee`] 是 `fiftyFifty` 时，
+    /// 这个字段才有"歪"的语义**——`alwaysRateUp`/`none`/`weighted` 三种
+    /// 担保规则下，即使这里有值，界面也不应该渲染成"是/否"，理由见
+    /// `PityGroupProgressView::guarantee` 的文档。
+    pub hit_outcome: Option<HitOutcomeView>,
+}
+
+/// [`gs_analysis::HitOutcome`] 的可序列化投影，语义与取值完全照抄原类型
+/// 的文档，这里不重复。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename_all = "camelCase")]
+pub enum HitOutcomeView {
+    RateUp,
+    Off,
+    Unknown,
 }
 
 /// 一个保底组（[`gs_core::PityGroup`]）在某个账号下的完整分析结果，
@@ -237,6 +289,19 @@ pub struct PityPullView {
 pub struct PityGroupProgressView {
     pub pity_group_key: String,
     pub hard_pity: u32,
+    /// 这个保底组的担保规则，直接复用 [`gs_core::GuaranteeRule`]——manifest
+    /// 纯数据 JSON 反序列化出来的就是这个领域类型本身，理由与 `GameView`
+    /// 复用 `RaritySpec`/`BannerSpec` 一致，不再造一份形状相同的投影。
+    ///
+    /// 存在的理由：界面需要用它判断 `pulls[].hit_outcome` 这一列该不该
+    /// 渲染成"是否歪"——**只有 `fiftyFifty` 才有"歪"这个概念**，`none`
+    /// 没有担保机制，`alwaysRateUp` 结构上不存在"歪"的可能，`weighted`
+    /// 虽然理论上也有"未中 UP"的结果，但 `gs_analysis::apply_guarantee_rule`
+    /// 本 Stage 未展开成具体的加权状态机（恒返回 `false`，见该函数文档），
+    /// 三者都不该在"是否歪"这一列显示"是/否"，否则会显示成一片假的"没歪"
+    /// ——那是噪音，不是数据。
+    #[ts(type = "GuaranteeRule")]
+    pub guarantee: gs_core::GuaranteeRule,
     /// 距上一次命中累计抽数，即"当前保底进度"。
     pub current_pity: u32,
     pub next_pull_probability: CurveEvaluationView,
@@ -308,4 +373,40 @@ pub struct OverviewStatsView {
     /// 总次数——不是字面量"五星"，绝区零的 `pity_target` 是 `"4"`。
     pub total_pity_target_hits: i64,
     pub rarity_by_plugin: Vec<PluginRarityDistributionView>,
+}
+
+/// 单个插件一次元数据回填（`backfill_pending_metadata` 命令）的结果统计。
+///
+/// 镜像 [`gs_host::metadata_backfill::BackfillOutcome`] 的四个互斥桶，字段
+/// 类型从 `u32` 改成 `i64`——与本文件其余计数字段（`OverviewStatsView` 等）
+/// 保持一致，ts-rs 对 `u32` 默认也会映射成 `number`，改成 `i64` 只是让本文件
+/// 内部风格统一，不是修正类型错误。
+#[derive(Debug, Clone, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct MetadataBackfillReport {
+    pub plugin_id: String,
+    /// 成功反查、`item_id` 已替换、`meta_state` 已推进到 `complete`。
+    pub resolved: i64,
+    /// 有可用字典，但记录的 name 在字典里查不到——保持 `pending`。
+    pub still_pending: i64,
+    /// `gacha_record.lang` 是 `NULL`，不知道用哪个语言的字典——保持 `pending`。
+    pub skipped_no_lang: i64,
+    /// 这个记录的语言完全没有可用字典（远端下载与本地缓存都失败，或语言
+    /// 本身不在已知的字典 API 短码表里）——保持 `pending`。
+    pub skipped_no_dictionary: i64,
+}
+
+/// [`gs_storage::MonthlyActivityRow`] 的可序列化投影，`monthly_activity`
+/// 命令的返回值元素类型——游戏详情页"抽卡时间线（按月）"的数据来源。
+///
+/// 按自然月（`occurred_at`，UTC）分桶，聚合下沉到 SQL 完成，理由见
+/// `gs_storage::Repository::monthly_activity` 的文档；本类型只是把查询
+/// 结果原样投影成可跨 IPC 传输的形状，不做任何二次计算。
+#[derive(Debug, Clone, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct MonthlyActivityView {
+    /// 自然月，格式 `YYYY-MM`。
+    pub month: String,
+    pub draws: i64,
+    pub top_tier_hits: i64,
 }

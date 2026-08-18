@@ -452,6 +452,12 @@ fn nap_item_to_api_shape(item: &UigfNapItem, uid: &str, lang: &str) -> Value {
 
 fn hk4e_project_to_batch(project: UigfProject<UigfHk4eItem>) -> ImportBatch {
     let uid = project.uid.to_string();
+    // 先克隆一份交给 `ImportAccount::lang`（原样传出，不归一化，见该字段
+    // 文档），再消费 `project.lang` 广播进每条记录的 API 形状（`unwrap_or_
+    // default` 是 API 形状那条独立通路的既有行为，与 `ImportAccount.lang`
+    // 无关——两条通路各自的取值来源虽然相同，但语义不同，不能合并成一次
+    // 读取）。
+    let account_lang = project.lang.clone();
     let lang = project.lang.unwrap_or_default();
     let tz_offset_hours = Some(i32::from(project.timezone));
     let items = project
@@ -472,6 +478,7 @@ fn hk4e_project_to_batch(project: UigfProject<UigfHk4eItem>) -> ImportBatch {
             region: None,
             server_id: None,
             tz_offset_hours,
+            lang: account_lang,
         },
         banners: group_by_banner_and_restore_api_order(items),
     }
@@ -479,6 +486,8 @@ fn hk4e_project_to_batch(project: UigfProject<UigfHk4eItem>) -> ImportBatch {
 
 fn hkrpg_project_to_batch(project: UigfProject<UigfHkrpgItem>) -> ImportBatch {
     let uid = project.uid.to_string();
+    // 理由同 `hk4e_project_to_batch` 里同名局部变量的注释。
+    let account_lang = project.lang.clone();
     let lang = project.lang.unwrap_or_default();
     let tz_offset_hours = Some(i32::from(project.timezone));
     let items = project
@@ -499,6 +508,7 @@ fn hkrpg_project_to_batch(project: UigfProject<UigfHkrpgItem>) -> ImportBatch {
             region: None,
             server_id: None,
             tz_offset_hours,
+            lang: account_lang,
         },
         banners: group_by_banner_and_restore_api_order(items),
     }
@@ -506,6 +516,8 @@ fn hkrpg_project_to_batch(project: UigfProject<UigfHkrpgItem>) -> ImportBatch {
 
 fn nap_project_to_batch(project: UigfProject<UigfNapItem>) -> ImportBatch {
     let uid = project.uid.to_string();
+    // 理由同 `hk4e_project_to_batch` 里同名局部变量的注释。
+    let account_lang = project.lang.clone();
     let lang = project.lang.unwrap_or_default();
     let tz_offset_hours = Some(i32::from(project.timezone));
     let items = project
@@ -526,6 +538,7 @@ fn nap_project_to_batch(project: UigfProject<UigfNapItem>) -> ImportBatch {
             region: None,
             server_id: None,
             tz_offset_hours,
+            lang: account_lang,
         },
         banners: group_by_banner_and_restore_api_order(items),
     }
@@ -611,6 +624,240 @@ impl ExchangeAdapter for UigfAdapter {
 
         Ok(batches)
     }
+}
+
+// ================================================================
+// 导出：GachaRecord → UIGF v4 单条 item
+// ================================================================
+//
+// 与上面 import 方向对称：import 侧把 UIGF item"还原"成 API 原始响应形状
+// （`*_item_to_api_shape`），export 侧把落库后的 [`GachaRecord`]"组装"成
+// UIGF item（`*_export_item`）。两个方向都需要三款米哈游游戏各自的字段
+// 形状知识（`gacha_id` 在 hk4e 不存在/hkrpg 必填/nap 可选，`uigf_gacha_type`
+// 只在 hk4e 段存在等），因此对称地落在同一个文件里——这是本 crate 顶部
+// 文档"职责只有两步：识别 + 导入"之外新增的第三个职责，crate 顶部文档已经
+// 同步补写，理由是这些函数需要的 UIGF 每游戏字段形状知识与已有的 import
+// 侧代码是同一份知识，不应该为了保住"crate 只做两步"这句话，把同一份知识
+// 拆到两个 crate 里维护两份。
+//
+// 编排层（跨账号遍历、CSV、构造最终 IPC 报告）不在这里——那需要
+// `gs_storage::Repository`/`Account`，本 crate 不依赖 `gs-storage`（见
+// `Cargo.toml` 的依赖注释），因此落在 `gs_host::export`，与 `gs_host::
+// archive` 是"内核在 gs-exchange，编排在 gs-host"的同一种分工。
+
+use gs_core::{GachaRecord, MetaState};
+
+/// 单条记录判定为"无法表示成合规 UIGF v4.2 item"时的原因。
+///
+/// 只放三个 `*_export_item` 函数会真实产出的变体，不为"将来可能"预留占位
+/// 分支——与 [`ImportError`] 的写法惯例一致。调用方（`gs_host::export`）
+/// 负责把这些游戏无关的原因翻译成面向用户的、带游戏名的措辞（如
+/// "星铁缺少 gacha_id"），本类型不内置任何游戏名字符串。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum UigfExclusionReason {
+    /// `stable_id` 缺失，或不满足 UIGF `id` 字段的格式约束
+    /// （`^[0-9]+$`，长度 1..=19）——三段 `required` 都含 `id`，这是
+    /// 唯一一条三个游戏共用的判定。
+    MissingOrInvalidStableId,
+    /// `occurred_raw` 不匹配 UIGF `time` 字段的规范正则
+    /// （`^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$`）——三个游戏共用。
+    InvalidOccurredRaw,
+    /// `gacha_id` 缺失——只有 `hkrpg`（星铁）会产出这个变体，`nap` 的
+    /// `gacha_id` 是可选字段，缺失时直接省略该键，不算排除。
+    MissingGachaId,
+    /// `hk4e`（原神）记录的 `meta_state` 不是 `Complete`——`itemIdSource:
+    /// "displayName"` 的记录在字典回填完成前，`item_id` 是本地化物品名，
+    /// 填不出 UIGF `hk4e.item_id`（required）这个字段。
+    ItemIdUnresolved,
+    /// `nap`（绝区零）记录的 `gacha_type` 不在 UIGF v4.2 `nap.gacha_type`
+    /// 枚举（`1`/`2`/`3`/`5`）内——枚举没有 `102`/`103`，这是规范尚未覆盖
+    /// 千星以外新卡池类型的缺口，不是本项目的实现缺陷，完整论证见
+    /// `docs/_internal/reference/UIGF-v4速查.md` §三 nap 小节。
+    GachaTypeNotInUigfEnum,
+}
+
+/// UIGF `lang` 字段的枚举（速查文档 §一），导出侧用它判断账号语言是否可以
+/// 填进这个可选字段——不在枚举内就省略该字段，不输出规范不接受的取值
+/// （`CLAUDE.local.md` 硬约束："lang 是可选字段……省略该字段，不要输出
+/// 非法值"）。
+pub const UIGF_LANG_ENUM: &[&str] = &[
+    "de-de", "en-us", "es-es", "fr-fr", "id-id", "it-it", "ja-jp", "ko-kr", "pt-pt", "ru-ru",
+    "th-th", "tr-tr", "vi-vn", "zh-cn", "zh-tw",
+];
+
+/// 原神 `gacha_type` → `uigf_gacha_type` 的归一化映射：`400`（角色活动祈愿
+/// 的合并子类型，随 301 一并返回）折叠进 `301`，其余取值原样透传。
+///
+/// **`uigf_gacha_type` 枚举没有 `400`**（速查文档 §三 hk4e 小节，已逐字核对
+/// Schema 原文），但 `gacha_type` 枚举有——`400` 仍然写进 `gacha_type`
+/// 字段（保留真实卡池归属），只有 `uigf_gacha_type` 这个"跨工具归一化码"
+/// 需要折叠。这与本项目插件 `pityGroups` 把 301/400 合并保底只是**碰巧
+/// 一致**——前者是 UIGF 交换格式自己的归一化规则，后者是原神游戏机制，
+/// 两件事的权威来源不同，不能合并成一处实现（模块头部"已证伪的二手结论"
+/// 一节强调过同一条纪律，那里的落点是导入侧，这里是导出侧）。
+pub fn uigf_gacha_type_for_hk4e(gacha_type: &str) -> String {
+    if gacha_type == "400" {
+        "301".to_string()
+    } else {
+        gacha_type.to_string()
+    }
+}
+
+/// `nap.gacha_type` 是否落在 UIGF v4.2 枚举（`1`/`2`/`3`/`5`）内。
+pub fn nap_gacha_type_in_uigf_enum(gacha_type: &str) -> bool {
+    matches!(gacha_type, "1" | "2" | "3" | "5")
+}
+
+/// `occurred_raw` 是否匹配 UIGF `time` 字段的规范正则
+/// `^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$`。
+///
+/// 手写逐字节匹配，不引入 `regex` crate——格式固定死、长度固定（19 字节），
+/// 逐字符校验比为了一条正则拉一个新依赖进 `Cargo.lock`（还要过 `deny.toml`
+/// 许可扫描）更省，本 crate 现有的 `parse_uigf_version` 也是同样的手写风格。
+pub fn occurred_raw_matches_uigf_time_format(value: &str) -> bool {
+    let b = value.as_bytes();
+    let digit = |i: usize| b.get(i).is_some_and(u8::is_ascii_digit);
+    b.len() == 19
+        && digit(0)
+        && digit(1)
+        && digit(2)
+        && digit(3)
+        && b[4] == b'-'
+        && digit(5)
+        && digit(6)
+        && b[7] == b'-'
+        && digit(8)
+        && digit(9)
+        && b[10] == b' '
+        && digit(11)
+        && digit(12)
+        && b[13] == b':'
+        && digit(14)
+        && digit(15)
+        && b[16] == b':'
+        && digit(17)
+        && digit(18)
+}
+
+/// `stable_id` 是否满足 UIGF `id` 字段的格式约束：`^[0-9]+$`，长度 1..=19。
+pub fn stable_id_is_valid_uigf_id(value: &str) -> bool {
+    !value.is_empty() && value.len() <= 19 && value.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// 三个 `*_export_item` 共用的通用校验：`stable_id` 与 `occurred_raw`。
+/// 校验通过时返回 `stable_id` 的借用，供调用方直接填进 `id` 字段，不需要
+/// 再借用/克隆一次 `record.stable_id`。
+fn validate_common(record: &GachaRecord) -> Result<&str, UigfExclusionReason> {
+    let stable_id = record
+        .stable_id
+        .as_deref()
+        .filter(|s| stable_id_is_valid_uigf_id(s))
+        .ok_or(UigfExclusionReason::MissingOrInvalidStableId)?;
+    if !occurred_raw_matches_uigf_time_format(&record.occurred_raw) {
+        return Err(UigfExclusionReason::InvalidOccurredRaw);
+    }
+    Ok(stable_id)
+}
+
+/// 三段共同的可选字段（`count`/`item_type`/`rank_type`）写入 `obj`——
+/// `count` **恒有值**（`GachaRecord.qty` 不是 `Option`，业务默认值 1 已经
+/// 由构造方填充，见该字段文档），`item_type`/`rank_type` 有值才写入，
+/// 缺失时整个键不出现（不是空字符串，理由同 `UnifiedRecordFields` 的
+/// 约束 1：空串会冒充"有值"）。
+///
+/// **`count`/`rank_type` 写成 JSON string，不是 number**——速查文档 §二
+/// 明确这是 Schema 原文的 `"type": "string"`，米哈游 API 本身也返回字符串，
+/// 这条是"字段名填对了、文件仍然不合规"最容易踩的一条，因此专门集中在
+/// 这一个函数里做，三个 `*_export_item` 都调用它，不会有一处漏写成数字。
+fn insert_common_optional_fields(obj: &mut serde_json::Map<String, Value>, record: &GachaRecord) {
+    obj.insert("count".to_string(), Value::String(record.qty.to_string()));
+    if let Some(item_type) = &record.item_type {
+        obj.insert("item_type".to_string(), Value::String(item_type.clone()));
+    }
+    if let Some(rarity) = &record.rarity {
+        obj.insert("rank_type".to_string(), Value::String(rarity.clone()));
+    }
+}
+
+/// 把一条原神记录组装成 `hk4e` 段的 UIGF item。
+///
+/// `required`：`uigf_gacha_type`、`gacha_type`、`item_id`、`time`、`id`
+/// （速查文档 §一）。
+pub fn hk4e_export_item(record: &GachaRecord) -> Result<Value, UigfExclusionReason> {
+    if record.meta_state != MetaState::Complete {
+        return Err(UigfExclusionReason::ItemIdUnresolved);
+    }
+    let stable_id = validate_common(record)?;
+    let mut obj = serde_json::Map::new();
+    obj.insert(
+        "uigf_gacha_type".to_string(),
+        Value::String(uigf_gacha_type_for_hk4e(&record.banner_key)),
+    );
+    obj.insert(
+        "gacha_type".to_string(),
+        Value::String(record.banner_key.clone()),
+    );
+    obj.insert("item_id".to_string(), Value::String(record.item_id.clone()));
+    obj.insert(
+        "time".to_string(),
+        Value::String(record.occurred_raw.clone()),
+    );
+    obj.insert("id".to_string(), Value::String(stable_id.to_string()));
+    insert_common_optional_fields(&mut obj, record);
+    Ok(Value::Object(obj))
+}
+
+/// 把一条星铁记录组装成 `hkrpg` 段的 UIGF item。
+///
+/// `required`：`gacha_type`、`gacha_id`、`time`、`item_id`、`id`（速查文档
+/// §一——**`gacha_id` 在这一段必填**，与 `hk4e`/`nap` 都不同）。
+pub fn hkrpg_export_item(record: &GachaRecord) -> Result<Value, UigfExclusionReason> {
+    let Some(gacha_id) = record.gacha_id.as_deref() else {
+        return Err(UigfExclusionReason::MissingGachaId);
+    };
+    let stable_id = validate_common(record)?;
+    let mut obj = serde_json::Map::new();
+    obj.insert(
+        "gacha_type".to_string(),
+        Value::String(record.banner_key.clone()),
+    );
+    obj.insert("gacha_id".to_string(), Value::String(gacha_id.to_string()));
+    obj.insert("item_id".to_string(), Value::String(record.item_id.clone()));
+    obj.insert(
+        "time".to_string(),
+        Value::String(record.occurred_raw.clone()),
+    );
+    obj.insert("id".to_string(), Value::String(stable_id.to_string()));
+    insert_common_optional_fields(&mut obj, record);
+    Ok(Value::Object(obj))
+}
+
+/// 把一条绝区零记录组装成 `nap` 段的 UIGF item。
+///
+/// `required`：`gacha_type`、`item_id`、`time`、`id`（速查文档 §一——
+/// `gacha_id` 在这一段可选，有值才写入，见 [`insert_common_optional_fields`]
+/// 同款"缺失就不出现"处理）。
+pub fn nap_export_item(record: &GachaRecord) -> Result<Value, UigfExclusionReason> {
+    if !nap_gacha_type_in_uigf_enum(&record.banner_key) {
+        return Err(UigfExclusionReason::GachaTypeNotInUigfEnum);
+    }
+    let stable_id = validate_common(record)?;
+    let mut obj = serde_json::Map::new();
+    obj.insert(
+        "gacha_type".to_string(),
+        Value::String(record.banner_key.clone()),
+    );
+    if let Some(gacha_id) = &record.gacha_id {
+        obj.insert("gacha_id".to_string(), Value::String(gacha_id.clone()));
+    }
+    obj.insert("item_id".to_string(), Value::String(record.item_id.clone()));
+    obj.insert(
+        "time".to_string(),
+        Value::String(record.occurred_raw.clone()),
+    );
+    obj.insert("id".to_string(), Value::String(stable_id.to_string()));
+    insert_common_optional_fields(&mut obj, record);
+    Ok(Value::Object(obj))
 }
 
 #[cfg(test)]
@@ -904,6 +1151,72 @@ mod tests {
         assert_eq!(nap.account.tz_offset_hours, Some(1));
     }
 
+    // ---------- import：lang → ImportAccount.lang ----------
+
+    /// 三个子格式各自独立的 `*_project_to_batch` 都要覆盖——只测原神一条，
+    /// 星铁/绝区零两条各自的赋值语句改错或漏改都不会被发现。同一份 JSON
+    /// 里三个游戏键各给一个不同的 `lang`，交叉验证不会串位。
+    #[test]
+    fn import_carries_declared_lang_into_import_account_lang_for_hk4e_hkrpg_and_nap() {
+        let adapter = UigfAdapter;
+        let json = r#"{
+            "info": {"export_timestamp":1,"export_app":"x","export_app_version":"1","version":"v4.0"},
+            "hk4e": [{
+                "uid": "100000001", "timezone": 8, "lang": "zh-cn",
+                "list": [{"gacha_type":"301","count":"1","time":"2026-01-01 00:00:00","name":"a","item_type":"角色","rank_type":"5","id":"1400000000000000001"}]
+            }],
+            "hkrpg": [{
+                "uid": "100000002", "timezone": -5, "lang": "en-us",
+                "list": [{"gacha_id":"1","gacha_type":"11","item_id":"1","count":"1","time":"2026-01-01 00:00:00","name":"b","item_type":"光锥","rank_type":"3","id":"1500000000000000001"}]
+            }],
+            "nap": [{
+                "uid": "100000003", "timezone": 1, "lang": "ja-jp",
+                "list": [{"gacha_type":"2","item_id":"1","count":"1","time":"2026-01-01 00:00:00","name":"c","item_type":"代理人","rank_type":"3","id":"1900000000000000001"}]
+            }]
+        }"#;
+        let batches = adapter.import(json.as_bytes()).expect("应当能成功导入");
+        assert_eq!(batches.len(), 3);
+
+        let hk4e = batches.iter().find(|b| b.game_id == "genshin").unwrap();
+        let hkrpg = batches.iter().find(|b| b.game_id == "starrail").unwrap();
+        let nap = batches.iter().find(|b| b.game_id == "zzz").unwrap();
+        assert_eq!(hk4e.account.lang.as_deref(), Some("zh-cn"));
+        assert_eq!(hkrpg.account.lang.as_deref(), Some("en-us"));
+        assert_eq!(nap.account.lang.as_deref(), Some("ja-jp"));
+    }
+
+    /// `lang` 字段缺失（`UigfProject.lang` 是 `#[serde(default)]`）时，
+    /// `ImportAccount.lang` 应当是 `None`，不是编造出来的空字符串——三个
+    /// 子格式各测一次，理由同上一条测试。
+    #[test]
+    fn import_account_lang_is_none_when_uigf_lang_field_is_missing_for_hk4e_hkrpg_and_nap() {
+        let adapter = UigfAdapter;
+        let json = r#"{
+            "info": {"export_timestamp":1,"export_app":"x","export_app_version":"1","version":"v4.0"},
+            "hk4e": [{
+                "uid": "100000001", "timezone": 8,
+                "list": [{"gacha_type":"301","count":"1","time":"2026-01-01 00:00:00","name":"a","item_type":"角色","rank_type":"5","id":"1400000000000000001"}]
+            }],
+            "hkrpg": [{
+                "uid": "100000002", "timezone": -5,
+                "list": [{"gacha_id":"1","gacha_type":"11","item_id":"1","count":"1","time":"2026-01-01 00:00:00","name":"b","item_type":"光锥","rank_type":"3","id":"1500000000000000001"}]
+            }],
+            "nap": [{
+                "uid": "100000003", "timezone": 1,
+                "list": [{"gacha_type":"2","item_id":"1","count":"1","time":"2026-01-01 00:00:00","name":"c","item_type":"代理人","rank_type":"3","id":"1900000000000000001"}]
+            }]
+        }"#;
+        let batches = adapter.import(json.as_bytes()).expect("应当能成功导入");
+        assert_eq!(batches.len(), 3);
+
+        let hk4e = batches.iter().find(|b| b.game_id == "genshin").unwrap();
+        let hkrpg = batches.iter().find(|b| b.game_id == "starrail").unwrap();
+        let nap = batches.iter().find(|b| b.game_id == "zzz").unwrap();
+        assert_eq!(hk4e.account.lang, None);
+        assert_eq!(hkrpg.account.lang, None);
+        assert_eq!(nap.account.lang, None);
+    }
+
     #[test]
     fn import_restores_starrail_record_with_item_id_and_gacha_id() {
         let adapter = UigfAdapter;
@@ -1019,5 +1332,241 @@ mod tests {
         let corrupted = br#"{"info": {"version": "v4.0""#;
         let result = adapter.import(corrupted);
         assert!(result.is_err());
+    }
+
+    // ================================================================
+    // 导出侧：uigf_gacha_type_for_hk4e / 校验函数 / *_export_item
+    // ================================================================
+
+    #[test]
+    fn uigf_gacha_type_for_hk4e_folds_400_into_301_and_passes_others_through() {
+        assert_eq!(uigf_gacha_type_for_hk4e("400"), "301");
+        assert_eq!(uigf_gacha_type_for_hk4e("301"), "301");
+        assert_eq!(uigf_gacha_type_for_hk4e("200"), "200");
+        assert_eq!(uigf_gacha_type_for_hk4e("500"), "500");
+        assert_eq!(uigf_gacha_type_for_hk4e("100"), "100");
+        assert_eq!(uigf_gacha_type_for_hk4e("302"), "302");
+    }
+
+    #[test]
+    fn nap_gacha_type_in_uigf_enum_accepts_only_the_four_canonical_values() {
+        for ok in ["1", "2", "3", "5"] {
+            assert!(nap_gacha_type_in_uigf_enum(ok), "{ok} 应当在枚举内");
+        }
+        for bad in ["102", "103", "0", "4", ""] {
+            assert!(!nap_gacha_type_in_uigf_enum(bad), "{bad} 不应当在枚举内");
+        }
+    }
+
+    #[test]
+    fn occurred_raw_time_format_accepts_well_formed_and_rejects_variants() {
+        assert!(occurred_raw_matches_uigf_time_format("2026-08-10 12:00:00"));
+        // T 分隔（ISO 8601 常见写法）不是 UIGF 要的格式。
+        assert!(!occurred_raw_matches_uigf_time_format(
+            "2026-08-10T12:00:00"
+        ));
+        // 缺前导零。
+        assert!(!occurred_raw_matches_uigf_time_format("2026-8-10 12:00:00"));
+        // 带时区后缀。
+        assert!(!occurred_raw_matches_uigf_time_format(
+            "2026-08-10 12:00:00+08:00"
+        ));
+        assert!(!occurred_raw_matches_uigf_time_format(""));
+        assert!(!occurred_raw_matches_uigf_time_format("not a time at all"));
+    }
+
+    #[test]
+    fn stable_id_validity_matches_pattern_and_length_bounds() {
+        assert!(stable_id_is_valid_uigf_id("1400000000000000001"));
+        assert!(stable_id_is_valid_uigf_id("1"));
+        assert!(!stable_id_is_valid_uigf_id(""), "空串不合法");
+        assert!(
+            !stable_id_is_valid_uigf_id("12345678901234567890"),
+            "20 位数字超出 maxLength 19"
+        );
+        assert!(!stable_id_is_valid_uigf_id("abc"), "非纯数字不合法");
+        assert!(!stable_id_is_valid_uigf_id("1.0"), "含小数点不合法");
+        assert!(!stable_id_is_valid_uigf_id("-1"), "含负号不合法");
+    }
+
+    fn sample_hk4e_record() -> GachaRecord {
+        GachaRecord {
+            id: 1,
+            account_id: 1,
+            banner_key: "301".to_string(),
+            pity_group: "character-event".to_string(),
+            record_key: gs_core::RecordKey::new("301:1400000000000000001").unwrap(),
+            lang: Some("zh-cn".to_string()),
+            occurred_at: 1_754_812_800_000,
+            occurred_raw: "2026-08-10 12:00:00".to_string(),
+            tz_origin: gs_core::TzOrigin::Region,
+            tz_offset_min: Some(480),
+            seq_in_batch: None,
+            item_id: "10001".to_string(),
+            item_type: Some("角色".to_string()),
+            rarity: Some("5".to_string()),
+            qty: 1,
+            meta_state: MetaState::Complete,
+            source: gs_core::RecordSource::OfficialApi,
+            captured_at: 1_754_812_801_000,
+            raw_ref: None,
+            extra: None,
+            stable_id: Some("1400000000000000001".to_string()),
+            gacha_id: None,
+        }
+    }
+
+    #[test]
+    fn hk4e_export_item_produces_required_fields_with_count_and_rank_type_as_strings() {
+        let record = sample_hk4e_record();
+        let item = hk4e_export_item(&record).expect("应当能组装成功");
+        assert_eq!(item["uigf_gacha_type"], serde_json::json!("301"));
+        assert_eq!(item["gacha_type"], serde_json::json!("301"));
+        assert_eq!(item["item_id"], serde_json::json!("10001"));
+        assert_eq!(item["time"], serde_json::json!("2026-08-10 12:00:00"));
+        assert_eq!(item["id"], serde_json::json!("1400000000000000001"));
+        // count/rank_type 必须是字符串，不是数字——规范要求，也是最容易
+        // 写错的一条（速查文档 §二）。
+        assert!(item["count"].is_string());
+        assert_eq!(item["count"], serde_json::json!("1"));
+        assert!(item["rank_type"].is_string());
+        assert_eq!(item["rank_type"], serde_json::json!("5"));
+        assert_eq!(item["item_type"], serde_json::json!("角色"));
+    }
+
+    #[test]
+    fn hk4e_export_item_maps_400_to_301_only_in_uigf_gacha_type_not_gacha_type() {
+        let mut record = sample_hk4e_record();
+        record.banner_key = "400".to_string();
+        let item = hk4e_export_item(&record).expect("应当能组装成功");
+        assert_eq!(
+            item["uigf_gacha_type"],
+            serde_json::json!("301"),
+            "uigf_gacha_type 枚举没有 400，必须折叠成 301"
+        );
+        assert_eq!(
+            item["gacha_type"],
+            serde_json::json!("400"),
+            "gacha_type 枚举本身含 400，真实卡池归属不应被覆盖"
+        );
+    }
+
+    #[test]
+    fn hk4e_export_item_rejects_when_meta_state_is_not_complete() {
+        let mut record = sample_hk4e_record();
+        record.meta_state = MetaState::Pending;
+        assert_eq!(
+            hk4e_export_item(&record),
+            Err(UigfExclusionReason::ItemIdUnresolved)
+        );
+    }
+
+    #[test]
+    fn hk4e_export_item_rejects_missing_stable_id() {
+        let mut record = sample_hk4e_record();
+        record.stable_id = None;
+        assert_eq!(
+            hk4e_export_item(&record),
+            Err(UigfExclusionReason::MissingOrInvalidStableId)
+        );
+    }
+
+    #[test]
+    fn hk4e_export_item_rejects_invalid_occurred_raw() {
+        let mut record = sample_hk4e_record();
+        record.occurred_raw = "2026/08/10 12:00:00".to_string();
+        assert_eq!(
+            hk4e_export_item(&record),
+            Err(UigfExclusionReason::InvalidOccurredRaw)
+        );
+    }
+
+    fn sample_hkrpg_record() -> GachaRecord {
+        let mut record = sample_hk4e_record();
+        record.banner_key = "11".to_string();
+        record.item_id = "20008".to_string();
+        record.gacha_id = Some("2128".to_string());
+        record
+    }
+
+    #[test]
+    fn hkrpg_export_item_includes_gacha_id_as_required_field() {
+        let record = sample_hkrpg_record();
+        let item = hkrpg_export_item(&record).expect("应当能组装成功");
+        assert_eq!(item["gacha_id"], serde_json::json!("2128"));
+        assert_eq!(item["item_id"], serde_json::json!("20008"));
+        assert!(item["count"].is_string());
+    }
+
+    #[test]
+    fn hkrpg_export_item_rejects_missing_gacha_id() {
+        let mut record = sample_hkrpg_record();
+        record.gacha_id = None;
+        assert_eq!(
+            hkrpg_export_item(&record),
+            Err(UigfExclusionReason::MissingGachaId)
+        );
+    }
+
+    #[test]
+    fn hkrpg_export_item_does_not_require_complete_meta_state() {
+        // meta_state 只是 hk4e 的排除条件——星铁 item_id 本来就来自 API
+        // 响应，不存在"本地化物品名占位"的问题，Pending 状态下的星铁记录
+        // 依然应当能正常导出（Pending 在星铁语境下的成因是 name/item_type/
+        // rank_type 缺失，与 item_id 是否可信无关）。
+        let mut record = sample_hkrpg_record();
+        record.meta_state = MetaState::Pending;
+        assert!(hkrpg_export_item(&record).is_ok());
+    }
+
+    fn sample_nap_record() -> GachaRecord {
+        let mut record = sample_hk4e_record();
+        record.banner_key = "2".to_string();
+        record.item_id = "1281".to_string();
+        record.gacha_id = Some("0".to_string());
+        record
+    }
+
+    #[test]
+    fn nap_export_item_includes_optional_gacha_id_when_present() {
+        let record = sample_nap_record();
+        let item = nap_export_item(&record).expect("应当能组装成功");
+        assert_eq!(item["gacha_id"], serde_json::json!("0"));
+    }
+
+    #[test]
+    fn nap_export_item_omits_gacha_id_when_absent_not_error() {
+        let mut record = sample_nap_record();
+        record.gacha_id = None;
+        let item = nap_export_item(&record).expect("gacha_id 可选，缺失不应报错");
+        assert!(
+            item.get("gacha_id").is_none(),
+            "缺失时应当整个键不出现，不是补一个默认值"
+        );
+    }
+
+    #[test]
+    fn nap_export_item_rejects_102_and_103_as_regulatory_gap_not_bug() {
+        for banner in ["102", "103"] {
+            let mut record = sample_nap_record();
+            record.banner_key = banner.to_string();
+            assert_eq!(
+                nap_export_item(&record),
+                Err(UigfExclusionReason::GachaTypeNotInUigfEnum),
+                "banner {banner} 应当被判定为规范枚举缺口"
+            );
+        }
+    }
+
+    #[test]
+    fn nap_export_item_accepts_canonical_banners() {
+        for banner in ["1", "2", "3", "5"] {
+            let mut record = sample_nap_record();
+            record.banner_key = banner.to_string();
+            assert!(
+                nap_export_item(&record).is_ok(),
+                "banner {banner} 应当能导出"
+            );
+        }
     }
 }

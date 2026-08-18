@@ -4,9 +4,14 @@ import { Badge } from "@/components/ui/badge";
 import { RISK_LABEL, type RiskLevel } from "@/lib/risk";
 
 /**
- * ⚠️ **本组件当前无人引用（2026-08-17 起），是刻意保留的孤儿，不是漏删。**
- * 原因与解冻条件见 `@/lib/risk` 头部注释——它依赖的三个字段 Rust 侧还没有，
- * 硬渲染只能靠编造。
+ * 账号保留期风险徽章——数据来自 `AccountView.retentionRisk`
+ * （`gs_host::retention::evaluate_account_retention_risk` 的计算结果），
+ * 由 `Overview.tsx` 的账号行渲染。
+ *
+ * `blocked` 档目前不会被真实数据触发——它依赖 `gameDirValid`/
+ * `consecutiveFailureCount` 两个信号，Rust 侧还没有（见
+ * `RetentionRiskLevel::Blocked` 的文档）。这里预先备好它的展示样式，
+ * 不是因为现在会用到，而是一旦上述两个信号接线，不需要再改这个组件。
  *
  * 风险等级 → badge variant 的映射写死在组件内部，不作为 prop 开放给调用方
  * 覆盖——这是界面设计方向 §5.2 那条硬约束的落点：「正常」必须永远是最弱的
@@ -14,7 +19,7 @@ import { RISK_LABEL, type RiskLevel } from "@/lib/risk";
  * 三个游戏都健康却全部着色的地步。
  */
 const VARIANT_BY_LEVEL: Record<RiskLevel, "neutral" | "warning" | "destructive"> = {
-  normal: "neutral",
+  safe: "neutral",
   watch: "warning",
   urgent: "destructive",
   blocked: "destructive",

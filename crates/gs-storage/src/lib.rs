@@ -1,10 +1,12 @@
 //! `gs-storage`：SQLite 存储引擎。
 //!
-//! 8 张表 + 2 个视图落地存储数据模型设计文档 §3、§4.4、§5.2 的完整契约：
+//! 9 张表 + 2 个视图落地存储数据模型设计文档 §3、§4.4、§5.2 的完整契约：
 //! `account`、`gacha_record`、`rare_event`、`banner_snapshot`、`item_catalog`、
-//! `banner_meta`、`collect_session`、`raw_payload`，以及 `v_integrity` /
-//! `v_unknown_banner` 两个视图。建表 SQL 见 `migrations/0001_initial.sql`，
-//! `v_integrity` 补 `page_size`/`page_count` 两列见 `migrations/0002_v_integrity_page_columns.sql`。
+//! `banner_meta`、`collect_session`、`raw_payload`、`app_setting`，以及
+//! `v_integrity` / `v_unknown_banner` 两个视图。建表 SQL 见
+//! `migrations/0001_initial.sql`，`v_integrity` 补 `page_size`/`page_count`
+//! 两列见 `migrations/0002_v_integrity_page_columns.sql`，`app_setting`
+//! kv 表（宿主侧设置持久化）见 `migrations/0003_app_setting.sql`。
 //! 版本管理见 [`migrations`] 模块（`PRAGMA user_version` + 编译期内嵌 SQL）；
 //! 读写接口见 [`repository`] 模块。
 
@@ -18,9 +20,9 @@ use rusqlite::Connection;
 
 pub use backup::BackupKind;
 pub use repository::{
-    Account, IntegrityRow, NewAccount, NewBannerMeta, NewBannerSnapshot, NewCollectSession,
-    NewRareEvent, NewRawPayload, RareEventRow, RecordFilter, Repository, SnapshotOrigin,
-    UnknownBannerRow,
+    Account, IntegrityRow, ItemCatalogEntry, MonthlyActivityRow, NewAccount, NewBannerMeta,
+    NewBannerSnapshot, NewCollectSession, NewItemCatalogEntry, NewRareEvent, NewRawPayload,
+    RareEventRow, RecordFilter, Repository, SettingKey, SnapshotOrigin, UnknownBannerRow,
 };
 
 /// SQLite 连接的封装：负责开启连接、设置宿主要求的 pragma、把 schema

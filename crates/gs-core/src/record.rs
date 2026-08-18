@@ -82,11 +82,24 @@ impl Platform {
 /// `ladder` 不假设长度或具体取值——绝区零是 `["2","3","4"]`，米哈游三游是
 /// `["3","4","5"]`，鸣潮同米哈游三游。`pity_target` 指向 `ladder` 中触发保底的
 /// 那一档，同样不假设是最高档的字面值 `"5"`。
+///
+/// `tier_labels`：稀有度码到本地化展示文案的映射（如绝区零
+/// `{"4": {"zh-CN": "S"}, "3": {"zh-CN": "A"}, "2": {"zh-CN": "B"}}`）——
+/// 这是**面向用户的档位名**，与 `ladder` 里纯粹用来做机器判等/排序的码
+/// 是两件事：绝区零的阶梯是 `2`/`3`/`4`，对应的档位名是 `B`/`A`/`S`，不是
+/// "2星"/"3星"/"4星"，`ladder` 本身的取值不足以推出正确文案。要求
+/// **每个插件各自声明**（不提供跨插件共享的兜底表）——"N 星"这种通用规则
+/// 在米哈游三游/鸣潮上凑巧读得通，套在绝区零上就是错的。消费方是
+/// `gs_analysis::manifest_lookup::tier_labels_for`（`gs-analysis` crate，
+/// 不在本 crate 内，故不写成 intra-doc link）：未覆盖的码才回落到
+/// "N 星"，不是本字段自己兜底。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct RaritySpec {
     pub ladder: Vec<String>,
     pub pity_target: String,
+    #[ts(type = "Record<string, LocalizedText>")]
+    pub tier_labels: BTreeMap<String, LocalizedText>,
 }
 
 /// 账号/卡池数据的保留策略说明，面向界面展示。
@@ -239,6 +252,28 @@ pub struct UnifiedRecordFields {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub stable_id: Option<String>,
+    /// 卡池实例 ID（如星铁的 `"2003"`），区别于 `banner_id`（卡池**类别**码，
+    /// 如星铁 `gacha_type` 的 `"11"`）——同一类别下会随时间推出多个不同实例。
+    ///
+    /// **可选，依据 UIGF v4.2 权威 JSON Schema（原文已核）**：
+    /// - `hkrpg`（星铁）段把 `gacha_id` 列为 **required**；
+    /// - `nap`（绝区零）段把它列为**可选**，且实测恒为 `'0'`（真实存档全量记录
+    ///   一致，见 `docs/_internal/research/03-真实导出数据格式实测.md` §1.2），
+    ///   读了没有信息量；
+    /// - `hk4e`（原神）段**根本不提**这个字段——原神 API 不返回它。
+    ///
+    /// 三款游戏对同一个字段的必要性判定完全不同，因此在宿主契约层只能定成
+    /// 可选：把它设成必填会让原神/绝区零无值可填，设成"米哈游三游专属"又
+    /// 会把跨游戏统一契约拆成游戏特例，两者都违反本项目的插件化设计。
+    ///
+    /// ⚠️ **不能用于可靠地区分卡池期次**：星铁虽然提供 49 种真实取值
+    /// （能标识具体期数），但绝区零恒为 `'0'`、鸣潮不适用（不在 UIGF 范围、
+    /// `CardPoolId` 全部池共用同一个 hash）。卡池期次归属目前仍是「时间窗口 +
+    /// 卡池元数据表」的尽力而为推导，不是靠这个字段的事实断言，见
+    /// `research/03` §1.2「设计影响」一节。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub gacha_id: Option<String>,
 }
 
 /// 时区来源的可信度分级，供归一化时区换算是否可靠时参考。
@@ -370,6 +405,22 @@ pub struct GachaRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub extra: Option<String>,
+    /// 服务端返回的记录稳定 ID（米哈游三游的雪花 ID），来自
+    /// [`UnifiedRecordFields::stable_id`]，采集管线原样透传落库。
+    ///
+    /// ⚠️ **不是去重键**——`record_key` 已经由插件在合成时纳入卡池维度
+    /// （如 `${gachaType}:${id}`），本列只是留底，供界面展示/校验/未来的
+    /// 导出功能使用。鸣潮/异环这类没有服务端稳定 ID 的游戏本列恒为
+    /// `None`（对应 SQL `NULL`，不是空字符串，理由见 [`UnifiedRecordFields`]
+    /// 的约束 1 与 `gs_storage` 存储层 `normalize_empty` 的文档）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub stable_id: Option<String>,
+    /// 卡池实例 ID，来自 [`UnifiedRecordFields::gacha_id`]，采集管线原样
+    /// 透传落库。可选性与「不能用于可靠区分卡池期次」的理由见该字段的文档。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub gacha_id: Option<String>,
 }
 
 #[cfg(test)]
@@ -386,6 +437,7 @@ mod tests {
             item_type: None,
             rarity: None,
             stable_id: None,
+            gacha_id: None,
         }
     }
 
@@ -428,10 +480,37 @@ mod tests {
         let spec = RaritySpec {
             ladder: vec!["2".to_string(), "3".to_string(), "4".to_string()],
             pity_target: "4".to_string(),
+            tier_labels: BTreeMap::new(),
         };
         let json = serde_json::to_value(&spec).unwrap();
         assert_eq!(json["ladder"], serde_json::json!(["2", "3", "4"]));
         assert_eq!(json["pityTarget"], serde_json::json!("4"));
+
+        let round_tripped: RaritySpec = serde_json::from_value(json).unwrap();
+        assert_eq!(round_tripped, spec);
+    }
+
+    #[test]
+    fn rarity_spec_tier_labels_serializes_as_camel_case_field_with_localized_text_values() {
+        // 绝区零最高档 "4" 应当能声明文案 "S"——与通用的"N 星"规则完全
+        // 无关，是这个字段存在的全部理由。
+        let spec = RaritySpec {
+            ladder: vec!["2".to_string(), "3".to_string(), "4".to_string()],
+            pity_target: "4".to_string(),
+            tier_labels: BTreeMap::from([
+                (
+                    "4".to_string(),
+                    LocalizedText(BTreeMap::from([("zh-CN".to_string(), "S".to_string())])),
+                ),
+                (
+                    "3".to_string(),
+                    LocalizedText(BTreeMap::from([("zh-CN".to_string(), "A".to_string())])),
+                ),
+            ]),
+        };
+        let json = serde_json::to_value(&spec).unwrap();
+        assert_eq!(json["tierLabels"]["4"], serde_json::json!({ "zh-CN": "S" }));
+        assert_eq!(json["tierLabels"]["3"], serde_json::json!({ "zh-CN": "A" }));
 
         let round_tripped: RaritySpec = serde_json::from_value(json).unwrap();
         assert_eq!(round_tripped, spec);
@@ -575,6 +654,8 @@ mod tests {
             captured_at: 1_754_812_801_000,
             raw_ref: Some(7),
             extra: None,
+            stable_id: Some("snowflake_123".to_string()),
+            gacha_id: Some("2003".to_string()),
         };
 
         let json = serde_json::to_value(&record).unwrap();
@@ -593,6 +674,10 @@ mod tests {
             json["recordKey"],
             serde_json::json!("gacha_type=301:snowflake_123")
         );
+        // stableId/gachaId 序列化为 camelCase，且是本条记录 stable_id/gacha_id
+        // 有值时的独立字段，不是靠拆 record_key 拿回来的——见两个字段的文档。
+        assert_eq!(json["stableId"], serde_json::json!("snowflake_123"));
+        assert_eq!(json["gachaId"], serde_json::json!("2003"));
 
         let round_tripped: GachaRecord = serde_json::from_value(json).unwrap();
         assert_eq!(round_tripped, record);

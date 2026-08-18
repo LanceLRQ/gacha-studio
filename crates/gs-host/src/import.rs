@@ -248,6 +248,12 @@ impl From<gs_core::GsError> for ImportError {
 /// 变量数上限时会分块并包一层 SAVEPOINT，行为不变，也不受这里改动影响）。
 /// 落库这一步因此要么整批发生要么整批不发生，效果上不弱于"整个循环外包
 /// 一层 SAVEPOINT"——中途构建失败时数据库甚至连一次写入尝试都没有发生过。
+///
+/// `insert_records` 成功之后还有一次派生写入：[`persist_collection_bounds`]
+/// 把本批 `occurred_at` 的极值并入账号的采集边界。这次写入不参与上面的
+/// "整批发生/不发生"讨论——它读的是已经落库成功的 `all_records`，失败只会
+/// 让账号的采集边界这一次没跟上（下次导入/采集会重新尝试合并），不会让已经
+/// 成功写入的记录本身出现不一致。
 pub fn import_batch(
     batch: &ImportBatch,
     pipeline: &AuthkeyApiPipeline<'_>,
@@ -275,27 +281,22 @@ pub fn import_batch(
     for banner in &batch.banners {
         records_seen += banner.records.len() as u64;
 
-        // lang：导入路径没有采集会话那样的凭据 URL 可以现取 &lang= 参数，
-        // 这里固定传 `None`——留空，是诚实地表达"确实没有"，不编造一个
-        // 默认语言。
+        // lang：从 `batch.account.lang` 读取，不再固定传 `None`。
         //
-        // ⚠️ 这句话对两种存档格式并不同样成立。wwgacha 存档确实不携带
-        // 语言信息（`GameUser.cs` 没有这个字段），`None` 就是唯一诚实的
-        // 表达；但 UIGF v4 存档的 `UigfProject.lang` 字段本身携带了这个
-        // 信息（`gs_exchange::uigf` 已经在 `hk4e_item_to_api_shape` 等
-        // 函数里把它广播回每条记录的 API 形状，只是那份广播值目前只用于
-        // 还原信封形状，没有被读出来传回这里）——`ImportAccount` 没有暴露
-        // `lang` 字段，本函数因此对两种格式一律传 `None`，不是刻意的设计
-        // 选择，是"存档带 lang 却没接进 GachaRecord"这个尚未补上的缺口。
-        // 把它接上需要给 `ImportAccount` 加字段、改 hk4e/hkrpg/nap 三个
-        // `*_project_to_batch`，规模超出"给已经流过来的 lang 值做别名
-        // 归一化"这一件事，留给专门的任务处理，这里不顺带做。
+        // 两种存档格式在这里的取值不同，都是各自诚实的表达：wwgacha 存档
+        // 确实不携带语言信息（`GameUser.cs` 没有这个字段），`ImportAccount.
+        // lang` 恒为 `None`；UIGF v4 存档的 `UigfProject.lang` 字段本身
+        // 携带这个信息，`gs_exchange::uigf` 的三个 `*_project_to_batch`
+        // 把它原样填进 `ImportAccount.lang`（不在那里归一化，见该字段
+        // 文档），这里直接透传。
         //
-        // 归一化保证：不管这个参数将来从 `None` 换成什么取值，都会经过
+        // 归一化保证：不管这个参数是 `None` 还是 `Some(_)`，都会经过
         // `AuthkeyApiPipeline::build_records` 里唯一的赋值点做语言代码别名
         // 归一化（`gs_p_authkey` crate 内部的 `locale` 模块，见
         // `build_records` 那一行旁的注释）——本函数不需要、也不应该在这里
-        // 重复归一化一遍。
+        // 重复归一化一遍。空字符串（UIGF 声明了空 `lang` 时）同样原样
+        // 传下去，最终由 `Repository::insert_records` 内部的
+        // `normalize_empty` 在落库前统一规整成 `NULL`，这里不用提前处理。
         //
         // page_tz_offset_hours：改传 `batch.account.tz_offset_hours`，不再
         // 硬编码 `None`——存档自带时区偏移的情况下（如 UIGF），这就是那个
@@ -310,7 +311,7 @@ pub fn import_batch(
             account_id,
             uid,
             region,
-            None,
+            batch.account.lang.as_deref(),
             captured_at,
             batch.account.tz_offset_hours,
             RecordSource::Import,
@@ -332,11 +333,83 @@ pub fn import_batch(
     // "原子性"一节。
     let records_inserted = repo.insert_records(&all_records)?;
 
+    // 写入账号的采集边界（earliest_record_at / latest_record_at）——这是
+    // `gs_host::retention::evaluate_account_retention_risk` 的驱动字段之一
+    // 得以有真实数据可用的唯一生产写入点，完整背景见该模块文档。
+    persist_collection_bounds(repo, account_id, &all_records)?;
+
     Ok(ImportSummary {
         records_seen,
         records_inserted,
         records_skipped: records_seen - records_inserted,
     })
+}
+
+/// 把 `records` 的 `occurred_at` 极值并入账号已有的采集边界并落库。
+///
+/// # 为什么用 `all_records`（构建结果）而不是"只统计本次新插入的行"
+///
+/// 撞 `UNIQUE(account_id, record_key)` 被 `INSERT OR IGNORE` 跳过的记录，
+/// 说明"我们已经见过这条记录"这件事本身并没有因为这次是重复导入而失真——
+/// 它的 `occurred_at` 依然是我们对官方数据认知范围的有效证据。按"只统计
+/// 新插入的行"来算边界，会让重复导入同一份存档时边界完全不更新，这与
+/// "这次导入让我们对已知范围的认知更牢固"这件事实不符。
+///
+/// # 为什么不写 `last_collected_at`
+///
+/// 见 [`Repository::touch_account_collection_bounds`] 的文档与
+/// `gs_host::retention` 模块文档的反例②：导入只能证明"我们见过这些记录"，
+/// 证明不了"官方现在没有更晚的数据"——今天导入一份半年前导出的存档，不等于
+/// 今天对官方接口采集过一次。这一列留给尚未接线的 S3 采集路径。
+///
+/// # 为什么在这里取 min/max，而不是让 `touch_account_collection_bounds`
+/// 自己比较
+///
+/// 该方法的 `COALESCE` 语义是"传 `Some` 就无条件覆盖"，不做大小比较——见
+/// 该方法文档"调用方必须自己算好『是否应当覆盖』"一节。本函数因此要先
+/// `find_account` 读一次账号当前的边界，与本批记录的极值取 min/max 后，
+/// 再把算好的结果传下去。
+fn persist_collection_bounds(
+    repo: &Repository<'_>,
+    account_id: i64,
+    records: &[GachaRecord],
+) -> Result<(), ImportError> {
+    let Some((batch_earliest, batch_latest)) = occurred_at_bounds(records) else {
+        // 本批没有任何记录（如某个 batch.banners 为空）：没有新的边界信息，
+        // 不产生任何写入，也不需要 fail——空批次不是错误。
+        return Ok(());
+    };
+
+    let existing = repo.find_account(account_id)?;
+    let (existing_earliest, existing_latest) = existing
+        .map(|account| (account.earliest_record_at, account.latest_record_at))
+        .unwrap_or((None, None));
+
+    let merged_earliest = match existing_earliest {
+        Some(current) => current.min(batch_earliest),
+        None => batch_earliest,
+    };
+    let merged_latest = match existing_latest {
+        Some(current) => current.max(batch_latest),
+        None => batch_latest,
+    };
+
+    repo.touch_account_collection_bounds(
+        account_id,
+        None, // 导入路径不写 last_collected_at，见本函数文档。
+        Some(merged_earliest),
+        Some(merged_latest),
+    )?;
+    Ok(())
+}
+
+/// 一批记录里 `occurred_at` 的 `(最小值, 最大值)`；空切片返回 `None`。
+fn occurred_at_bounds(records: &[GachaRecord]) -> Option<(i64, i64)> {
+    let mut iter = records.iter().map(|r| r.occurred_at);
+    let first = iter.next()?;
+    Some(iter.fold((first, first), |(min, max), value| {
+        (min.min(value), max.max(value))
+    }))
 }
 
 /// [`import_batch`] 循环体内、每个卡池构建完成后调用一次的检查：本批时间

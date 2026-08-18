@@ -5,6 +5,7 @@ import { Link } from "react-router-dom";
 import { EmptyState, ErrorState, LoadingState } from "@/components/async-view";
 import { GameIconAuto } from "@/components/game-icon-auto";
 import { RarityBar } from "@/components/rarity-bar";
+import { RiskBadge } from "@/components/risk-badge";
 import { StatsStrip } from "@/components/stats-strip";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -16,21 +17,25 @@ import { listAccounts, overviewStats } from "@/lib/ipc-client";
 import type { AccountView } from "@/lib/ipc/generated";
 import { useAsync } from "@/lib/use-async";
 
-const ACCOUNT_COLUMNS = "grid-cols-[110px_150px_120px_110px]";
+const ACCOUNT_COLUMNS = "grid-cols-[70px_110px_150px_120px_110px]";
 
 /**
  * 总览页——对应 ui-demo/index.html。
  *
- * ⚠️ 与原始设计稿（§1.2「风险优先于数据」三层信息架构：风险状态 → 聚合
- * 数据 → 操作入口）的偏差：原始「风险与状态」一节依赖三个字段——目录是否
- * 有效（`gameDirValid`）、连续更新失败次数、官方接口保留期估算天数
- * （`RetentionPolicy.conservativeDays`）——真实 IPC 面（`AccountView`/
- * `GameView`）都不提供这三者：没有「选择/校验游戏目录」类命令，
- * `GameView` 也不含 `RetentionPolicy`。继续按原设计渲染四级风险徽章等于
- * 编造未经采集验证的"阻塞/紧急"状态，因此这里退化成只展示确有数据支撑的
- * 事实——上次采集时间（`lastCollectedAt`）与记录条数，不再计算"距数据丢失
- * 还剩几天"。采集/更新链路（"更新全部"按钮）本身也没有对应 IPC 命令，
- * 保留按钮但禁用，指向真正可用的入口（设置页 · 导入存档）。
+ * 风险徽章（§1.2「风险优先于数据」）现在渲染真实数据：判定逻辑已下沉到
+ * `gs_host::retention::evaluate_account_retention_risk`，经
+ * `AccountView.retentionRisk` 送到这里，不再是前端自己编的四级状态机。
+ * `Blocked` 档暂时不会出现（依赖的 `gameDirValid`/连续失败计数 Rust 侧
+ * 还没有，见 `RetentionRiskLevel::Blocked` 文档），但类型与展示样式已经
+ * 备好，接线时不需要再改这个页面。
+ *
+ * ⚠️ `retentionRisk` 为 `null`（插件未声明保留期策略，或账号还没有任何
+ * 记录）时**不渲染 `RiskBadge`**——那会把"无法评估"谎报成某个具体等级。
+ * 改为渲染一段视觉上明显不是徽章的灰色文案，与任何风险等级（包括视觉上
+ * 最弱的 `safe`）都区分得开。
+ *
+ * 采集/更新链路（"更新全部"按钮）本身没有对应 IPC 命令，保留按钮但禁用，
+ * 指向真正可用的入口（设置页 · 导入存档）。
  *
  * ⚠️ min-height:0 落点：本页根节点是 AppShell `.main` 容器的直接子级
  * （经由 <Outlet/>），因此这里必须自己再声明一层 `min-h-0`。
@@ -115,7 +120,11 @@ export function Overview() {
                       return (
                         <div key={entry.pluginId}>
                           <p className="mb-1.5 text-[11.5px] text-muted-foreground">{game.displayName}</p>
-                          <RarityBar distribution={entry.distribution} rarity={game.rarity} />
+                          <RarityBar
+                            distribution={entry.distribution}
+                            rarity={game.rarity}
+                            tierLabels={game.tierLabels}
+                          />
                         </div>
                       );
                     })}
@@ -156,6 +165,7 @@ function GameAccountsCard({ game, accounts }: { game: GameMeta; accounts: Accoun
       ) : (
         <div className="flex flex-col">
           <div className={`grid gap-x-3.5 border-b border-border pb-1.25 ${ACCOUNT_COLUMNS}`}>
+            <ColumnHead>风险</ColumnHead>
             <ColumnHead>UID</ColumnHead>
             <ColumnHead>服务器</ColumnHead>
             <ColumnHead>上次采集</ColumnHead>
@@ -166,6 +176,16 @@ function GameAccountsCard({ game, accounts }: { game: GameMeta; accounts: Accoun
               key={account.id}
               className={`grid items-center gap-x-3.5 border-b border-border py-1.25 text-[12.5px] last:border-b-0 ${ACCOUNT_COLUMNS}`}
             >
+              {account.retentionRisk === null ? (
+                <span
+                  className="text-[11.5px] text-faint-foreground"
+                  title="无法评估保留期风险：该游戏未声明保留期策略，或该账号还没有任何记录"
+                >
+                  未知
+                </span>
+              ) : (
+                <RiskBadge level={account.retentionRisk.level} className="w-fit" />
+              )}
               <span className="font-mono whitespace-nowrap tabular-nums">{maskUid(account.gameUid)}</span>
               <span className="whitespace-nowrap">{account.region}</span>
               {account.lastCollectedAt === null ? (

@@ -23,6 +23,7 @@ pub fn list_games() -> Vec<GameView> {
             plugin_id: plugin_id.to_string(),
             display_name: gs_analysis::display_name_for(plugin_id),
             rarity: gs_analysis::rarity_spec_for(plugin_id),
+            tier_labels: gs_analysis::tier_labels_for(plugin_id),
             banners: gs_analysis::banners_for(plugin_id),
             supports_current_platform: gs_analysis::supports_current_platform(plugin_id),
         })
@@ -71,6 +72,10 @@ mod tests {
         assert_eq!(genshin.display_name, "原神");
         assert_eq!(genshin.rarity.ladder, vec!["3", "4", "5"]);
         assert_eq!(genshin.rarity.pity_target, "5");
+        assert_eq!(
+            genshin.tier_labels.get("5").map(String::as_str),
+            Some("五星")
+        );
         assert!(genshin.banners.iter().any(|b| b.id == "301"
             && b.display_name.0.get("zh-CN").map(String::as_str) == Some("角色活动祈愿")));
     }
@@ -105,6 +110,12 @@ mod tests {
         assert_eq!(zzz.rarity.ladder, vec!["2", "3", "4"]);
         assert_eq!(zzz.rarity.pity_target, "4");
         assert_eq!(zzz.display_name, "绝区零");
+        // 验收样本：绝区零最高档必须显示成 "S"，不是"4星"——tierLabels 存在
+        // 的全部理由，见 GameView.tier_labels 与 gs_analysis::tier_labels_for
+        // 的文档。
+        assert_eq!(zzz.tier_labels.get("4").map(String::as_str), Some("S"));
+        assert_eq!(zzz.tier_labels.get("3").map(String::as_str), Some("A"));
+        assert_eq!(zzz.tier_labels.get("2").map(String::as_str), Some("B"));
         // 绝区零声明了 6 个卡池，用它验证 banners 没有被截断成"只取第一个"。
         assert_eq!(zzz.banners.len(), 6);
     }

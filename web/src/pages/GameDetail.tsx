@@ -16,10 +16,17 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useAppState } from "@/lib/app-state";
 import { formatCount, formatDate, maskUid } from "@/lib/format";
 import { localizedText, rarityTiers, tierLabel, type GameMeta } from "@/lib/games";
-import { accountAnalysis, listAccounts, listRecords } from "@/lib/ipc-client";
-import type { AccountAnalysisView, AccountView, CurveEvaluationView, PityPullView } from "@/lib/ipc/generated";
+import { accountAnalysis, listAccounts, listRecords, monthlyActivity } from "@/lib/ipc-client";
+import type {
+  AccountAnalysisView,
+  AccountView,
+  CurveEvaluationView,
+  HitOutcomeView,
+  MonthlyActivityView,
+  PityPullView,
+} from "@/lib/ipc/generated";
 import { useAsync } from "@/lib/use-async";
-import type { BannerSpec, RaritySpec } from "gs-plugin-kit/types";
+import type { BannerSpec, GuaranteeRule, RaritySpec } from "gs-plugin-kit/types";
 
 /**
  * 单个卡池的统计口径——由两条独立数据源拼出来，两者覆盖范围不同，务必分清楚：
@@ -45,6 +52,8 @@ interface BannerStats {
     currentPity: number;
     nextPullProbability: CurveEvaluationView;
     unknownRarityCount: number;
+    /** 担保规则——决定"是否歪"这一列该不该渲染成是/否，见 {@link hitOutcomeLabel}。 */
+    guarantee: GuaranteeRule;
     /** 命中该卡池顶级保底目标的抽取，按时间倒序。 */
     topTierPulls: PityPullView[];
     /** 与本卡池共享同一保底池的其它卡池展示名（不含本卡池自己）。 */
@@ -90,6 +99,7 @@ async function loadBannerStats(
           currentPity: group.currentPity,
           nextPullProbability: group.nextPullProbability,
           unknownRarityCount: group.unknownRarityCount,
+          guarantee: group.guarantee,
           topTierPulls,
           sharedWith,
           avgGap: gaps.length > 0 ? Math.round((gaps.reduce((a, b) => a + b, 0) / gaps.length) * 10) / 10 : undefined,
@@ -104,17 +114,109 @@ async function loadBannerStats(
 }
 
 /**
+ * "是否歪"这一列该显示什么，取决于这个保底组的 [`GuaranteeRule`]：
+ *
+ * - **只有 `fiftyFifty` 才有"歪"这个概念**——`alwaysRateUp` 结构上不存在
+ *   "歪"的可能，`none` 没有担保机制，`weighted` 虽然理论上也有"未中 UP"
+ *   的结果，但 `gs_analysis::apply_guarantee_rule` 本 Stage 未把它展开成
+ *   具体的加权状态机（恒返回 `false`，见该函数文档）——这三种规则下都
+ *   不渲染"是/否"，回落"不适用"，不显示一片假的"没歪"（那是噪音，不是
+ *   数据，尤其是 `alwaysRateUp` 的卡池——它结构上就不可能歪）。
+ * - `fiftyFifty` 规则下，`hitOutcome` 是三态：`"off"` → 歪了（"是"）、
+ *   `"rateUp"` → 没歪（"否"）、`"unknown"`/`null` → **不知道**——`null`
+ *   只出现在非命中的 pull 上（这里不会拿到，调用方只传 topTierPulls），
+ *   `"unknown"` 是当前没有任何数据源能提供当期 UP 物品列表的真实状态，
+ *   不能显示成"否"（那是把"不知道"伪装成"没歪"）。
+ */
+function hitOutcomeLabel(guarantee: GuaranteeRule, hitOutcome: HitOutcomeView | null): string {
+  if (guarantee.kind !== "fiftyFifty") return "不适用";
+  if (hitOutcome === "off") return "是";
+  if (hitOutcome === "rateUp") return "否";
+  return "不知道";
+}
+
+/**
+ * 「不知道」这一格的悬停说明。
+ *
+ * ⚠️ **当前这一列在 `fiftyFifty` 卡池下会 100% 显示「不知道」**，因为
+ * `is_rate_up` 全仓唯一的生产写入点是 `gs_analysis::derive_rare_events`
+ * 里硬写的 `None`（该函数文档解释了为什么不能退而写 `Some(false)`：
+ * 那会把「不知道」伪装成「没歪」，污染 `GuaranteeRule::FiftyFifty`
+ * 状态机）。真正缺的是**当期 UP 物品列表**这个数据源，属看板上
+ * 「卡池元数据（版本 UP 表）的数据源方案」这个未决问题。
+ *
+ * 那为什么还渲染这一列？——因为「不知道」是**诚实且可解释**的状态，
+ * 与被摘掉的风险徽章不同：那个若硬渲染会输出**编造的**风险等级。
+ * 但一整列没有任何解释的「不知道」同样是噪音，用户会以为是自己的数据
+ * 有问题。所以照 `Overview` 对 `retentionRisk === null` 的同一套做法
+ * ——显示未知值，但把「为什么未知」讲清楚。
+ */
+function hitOutcomeHint(guarantee: GuaranteeRule, hitOutcome: HitOutcomeView | null): string | undefined {
+  if (guarantee.kind !== "fiftyFifty") {
+    return "该卡池的担保规则不是「50/50」，结构上不存在「歪」这个概念";
+  }
+  if (hitOutcome === "off" || hitOutcome === "rateUp") return undefined;
+  return "判断是否歪需要当期 UP 物品列表，本地暂无该数据源——这里不猜，也不会把「不知道」显示成「没歪」";
+}
+
+/**
+ * "抽卡时间线（按月）"——对应 ui-demo/game-genshin.html 的柱状图形态：
+ * 柱高按当月抽数与该账号全部月份里的最大抽数比例缩放，柱顶的圆点数量
+ * （封顶 5 个，避免出货特别多的月份把柱子挤变形）标出当月命中顶级保底
+ * 目标的次数。数据来自 `monthly_activity` 命令——聚合在 SQL 里完成，
+ * 不是前端把全量记录拉过来自己 group by，见该命令的文档。
+ */
+function MonthlyTimeline({ months }: { months: MonthlyActivityView[] }) {
+  if (months.length === 0) {
+    return (
+      <p className="text-[11.5px] text-muted-foreground">
+        暂无抽卡记录，导入存档或采集后这里会展示按月的抽数与顶级保底命中趋势。
+      </p>
+    );
+  }
+
+  const maxDraws = Math.max(...months.map((m) => m.draws), 1);
+
+  return (
+    <div className="flex items-end gap-2 overflow-x-auto pb-1">
+      {months.map((m) => (
+        <div
+          key={m.month}
+          className="flex w-9 shrink-0 flex-col items-center gap-1"
+          title={`${m.month} · ${formatCount(m.draws)} 抽${m.topTierHits > 0 ? ` · 顶级 ${formatCount(m.topTierHits)} 个` : ""}`}
+        >
+          <div className="flex h-2.5 items-end gap-0.5">
+            {Array.from({ length: Math.min(m.topTierHits, 5) }).map((_, i) => (
+              <span key={i} className="size-1 shrink-0 rounded-full bg-rarity-5" />
+            ))}
+          </div>
+          <div className="flex h-20 w-full items-end overflow-hidden rounded-t-sm bg-border/40">
+            <div
+              className="w-full rounded-t-sm bg-rarity-4/70"
+              style={{ height: `${Math.round((m.draws / maxDraws) * 100)}%` }}
+            />
+          </div>
+          <span className="font-mono text-[9.5px] whitespace-nowrap text-faint-foreground">
+            {m.month.slice(2).replace("-", "")}
+          </span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/**
  * 游戏详情页——对应 ui-demo/game-genshin.html。总视图 tab + 每卡池一个 tab。
  *
  * ⚠️ 与原始设计稿的偏差（均因真实 IPC 面没有对应数据，不编造）：
  * 1. 账号头部不再展示"保留期风险倒计时"——原始实现依赖
  *    `RetentionPolicy.conservativeDays`，`GameView` 未透出该字段。
- * 2. "抽卡时间线（按月）"整节移除——需要对账号全部记录做月度聚合，现有
- *    `list_records` 是分页窄口（`MAX_PAGE_SIZE=200`），拉全量记录来客户端
- *    聚合违反这个窄口存在的理由（见 `src-tauri/src/commands.rs` 顶部注释）。
- *    改为一行说明文字，不假装图表存在。
- * 3. 每卡池"五星记录"表去掉了"是否歪"列——`GuaranteeRule`（50/50 命中与否）
- *    不在 `PityPullView` 里，没有数据支撑。
+ *
+ * 下面两条此前也在这份偏差清单里，本轮已补齐对应的 Rust 侧字段/命令，
+ * 恢复成设计稿原始形态，不再是偏差：
+ * - "抽卡时间线（按月）"——`monthly_activity` 命令新增，聚合下沉到 SQL。
+ * - 每卡池"五星记录"表的"是否歪"列——`PityPullView.hitOutcome` +
+ *   `PityGroupProgressView.guarantee` 新增，见 {@link hitOutcomeLabel}。
  *
  * ⚠️ min-height:0 落点同旧版注释：本页根节点、Tabs 根节点、scroll-area
  * 容器均需要显式声明。
@@ -139,12 +241,12 @@ export function GameDetail() {
 
   const detailState = useAsync(async () => {
     if (!account || !game) return undefined;
-    const analysis = await accountAnalysis(account.id);
+    const [analysis, months] = await Promise.all([accountAnalysis(account.id), monthlyActivity(account.id)]);
     const bannerStats = await loadBannerStats(account.id, game.banners, game.rarity.ladder, analysis, (id) => {
       const banner = game.banners.find((b) => b.id === id);
       return banner ? localizedText(banner.displayName, id) : id;
     });
-    return { analysis, bannerStats };
+    return { analysis, bannerStats, months };
   }, [account?.id, game?.id]);
 
   if (!game || !enabledGameIds.has(game.id)) {
@@ -220,6 +322,7 @@ export function GameDetail() {
               onTabChange={setActiveTab}
               analysis={detailState.data.analysis}
               bannerStats={detailState.data.bannerStats}
+              months={detailState.data.months}
             />
           )}
         </>
@@ -234,14 +337,17 @@ function GameDetailTabs({
   onTabChange,
   analysis,
   bannerStats,
+  months,
 }: {
   game: GameMeta;
   activeTab: string;
   onTabChange: (value: string) => void;
   analysis: AccountAnalysisView;
   bannerStats: BannerStats[];
+  months: MonthlyActivityView[];
 }) {
   const tiers = rarityTiers(game.rarity);
+  const topTierLabel = tierLabel(game.tierLabels, tiers.top);
   const recentTopTier = bannerStats
     .flatMap((s) => (s.pity ? s.pity.topTierPulls.map((p) => ({ pull: p, bannerName: localizedText(s.banner.displayName, s.banner.id) })) : []))
     .sort((a, b) => b.pull.occurredAt - a.pull.occurredAt)
@@ -264,16 +370,16 @@ function GameDetailTabs({
             <SectionLabel>卡池保底概览</SectionLabel>
             <div className="grid grid-cols-[repeat(auto-fit,minmax(180px,1fr))] gap-3">
               {bannerStats.map((s) => (
-                <PoolOverviewCard key={s.banner.id} stats={s} topCode={tiers.top} topTierLabel={tierLabel(tiers.top)} />
+                <PoolOverviewCard key={s.banner.id} stats={s} topCode={tiers.top} topTierLabel={topTierLabel} />
               ))}
             </div>
           </section>
 
           <section>
-            <SectionLabel>最近{tierLabel(tiers.top)}记录</SectionLabel>
+            <SectionLabel>最近{topTierLabel}记录</SectionLabel>
             {recentTopTier.length === 0 ? (
               <p className="text-[11.5px] text-muted-foreground">
-                暂无{tierLabel(tiers.top)}记录，或该账号所有卡池均未声明共享保底（无法计算命中记录）。
+                暂无{topTierLabel}记录，或该账号所有卡池均未声明共享保底（无法计算命中记录）。
               </p>
             ) : (
               <div className="flex flex-wrap gap-2.5">
@@ -301,21 +407,18 @@ function GameDetailTabs({
 
           <section>
             <SectionLabel>抽卡时间线（按月）</SectionLabel>
-            <p className="text-[11.5px] text-muted-foreground">
-              该图表需要对账号全部记录做月度聚合统计，现有 `list_records` 是带上限的分页窄口
-              （单页 ≤200 条），为画一张图拉取全量记录违反这个窄口存在的理由，本轮未实现，需要后端新增聚合接口后再补上。
-            </p>
+            <MonthlyTimeline months={months} />
           </section>
 
           <section>
             <SectionLabel>稀有度分布</SectionLabel>
-            <RarityBar distribution={analysis.rarityDistribution} rarity={game.rarity} />
+            <RarityBar distribution={analysis.rarityDistribution} rarity={game.rarity} tierLabels={game.tierLabels} />
           </section>
         </TabsContent>
 
         {bannerStats.map((s) => (
           <TabsContent key={s.banner.id} value={s.banner.id} className="flex flex-col gap-6 px-7 pt-5 pb-7">
-            <BannerPanel stats={s} rarity={game.rarity} />
+            <BannerPanel stats={s} rarity={game.rarity} tierLabels={game.tierLabels} />
           </TabsContent>
         ))}
       </div>
@@ -348,8 +451,17 @@ function PoolOverviewCard({ stats, topCode, topTierLabel }: { stats: BannerStats
   );
 }
 
-function BannerPanel({ stats, rarity }: { stats: BannerStats; rarity: RaritySpec }) {
+function BannerPanel({
+  stats,
+  rarity,
+  tierLabels,
+}: {
+  stats: BannerStats;
+  rarity: RaritySpec;
+  tierLabels: Record<string, string>;
+}) {
   const tiers = rarityTiers(rarity);
+  const topTierLabel = tierLabel(tierLabels, tiers.top);
   const distribution = {
     counts: stats.rarityCounts,
     unknownCount: stats.otherCount,
@@ -363,7 +475,7 @@ function BannerPanel({ stats, rarity }: { stats: BannerStats; rarity: RaritySpec
         <Card>
           {stats.pity ? (
             <>
-              <PityBar label={`${tierLabel(tiers.top)}保底`} current={stats.pity.currentPity} cap={stats.pity.hardPity} tone="r5" />
+              <PityBar label={`${topTierLabel}保底`} current={stats.pity.currentPity} cap={stats.pity.hardPity} tone="r5" />
               {stats.pity.nextPullProbability.kind === "value" ? (
                 <p className="mt-2.5 border-t border-border pt-2.5 text-xs text-muted-foreground">
                   下一抽命中概率约{" "}
@@ -400,8 +512,13 @@ function BannerPanel({ stats, rarity }: { stats: BannerStats; rarity: RaritySpec
         <SectionLabel>关键指标</SectionLabel>
         <div className="flex overflow-hidden rounded-md border border-border bg-card">
           <StatCell value={formatCount(stats.totalDraws)} label="总抽数" />
-          <StatCell value={formatCount(stats.rarityCounts[tiers.top] ?? 0)} label={`${tierLabel(tiers.top)}数`} />
-          {tiers.second && <StatCell value={formatCount(stats.rarityCounts[tiers.second] ?? 0)} label={`${tierLabel(tiers.second)}数`} />}
+          <StatCell value={formatCount(stats.rarityCounts[tiers.top] ?? 0)} label={`${topTierLabel}数`} />
+          {tiers.second && (
+            <StatCell
+              value={formatCount(stats.rarityCounts[tiers.second] ?? 0)}
+              label={`${tierLabel(tierLabels, tiers.second)}数`}
+            />
+          )}
           {stats.pity?.avgGap !== undefined && <StatCell value={stats.pity.avgGap} label="平均出货抽数" />}
           {stats.pity?.worstGap !== undefined && <StatCell value={stats.pity.worstGap} label="最非欧一次" />}
           {stats.pity?.bestGap !== undefined && <StatCell value={stats.pity.bestGap} label="最欧一次" />}
@@ -409,40 +526,65 @@ function BannerPanel({ stats, rarity }: { stats: BannerStats; rarity: RaritySpec
       </section>
 
       {stats.pity && stats.pity.topTierPulls.length > 0 && (
-        <section>
-          <SectionLabel>{tierLabel(tiers.top)}记录</SectionLabel>
-          <Card className="p-0">
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>物品</TableHead>
-                  <TableHead>稀有度</TableHead>
-                  <TableHead>抽数间隔</TableHead>
-                  <TableHead>时间</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {stats.pity.topTierPulls.map((pull) => (
-                  <TableRow key={pull.recordId}>
-                    <TableCell>{pull.itemId}</TableCell>
-                    <TableCell>
-                      <Badge variant="r5">{tierLabel(tiers.top)}</Badge>
-                    </TableCell>
-                    <TableCell className="font-mono tabular-nums">{pull.pullsSinceLastHit}</TableCell>
-                    <TableCell className="font-mono tabular-nums">{formatDate(pull.occurredAt)}</TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          </Card>
-        </section>
+        <TopTierRecordsTable pity={stats.pity} topTierLabel={topTierLabel} />
       )}
 
       <section>
         <SectionLabel>稀有度分布</SectionLabel>
-        <RarityBar distribution={distribution} rarity={rarity} />
+        <RarityBar distribution={distribution} rarity={rarity} tierLabels={tierLabels} />
       </section>
     </>
+  );
+}
+
+/**
+ * 拆成独立组件（而不是内联在 `BannerPanel` 的 JSX 里）纯粹是为了让
+ * `pity` 参数的类型收窄在整个组件体内保持非 `undefined`——`BannerPanel`
+ * 里 `stats.pity` 是可选属性，TS 不会跨闭包边界（`.map` 的回调）保留对
+ * 属性访问表达式的非空 narrowing，拆成参数是标准处理方式，不需要非空断言。
+ */
+function TopTierRecordsTable({
+  pity,
+  topTierLabel,
+}: {
+  pity: NonNullable<BannerStats["pity"]>;
+  topTierLabel: string;
+}) {
+  return (
+    <section>
+      <SectionLabel>{topTierLabel}记录</SectionLabel>
+      <Card className="p-0">
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead>物品</TableHead>
+              <TableHead>稀有度</TableHead>
+              <TableHead>抽数间隔</TableHead>
+              <TableHead>是否歪</TableHead>
+              <TableHead>时间</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {pity.topTierPulls.map((pull) => (
+              <TableRow key={pull.recordId}>
+                <TableCell>{pull.itemId}</TableCell>
+                <TableCell>
+                  <Badge variant="r5">{topTierLabel}</Badge>
+                </TableCell>
+                <TableCell className="font-mono tabular-nums">{pull.pullsSinceLastHit}</TableCell>
+                <TableCell
+                  className="text-muted-foreground"
+                  title={hitOutcomeHint(pity.guarantee, pull.hitOutcome)}
+                >
+                  {hitOutcomeLabel(pity.guarantee, pull.hitOutcome)}
+                </TableCell>
+                <TableCell className="font-mono tabular-nums">{formatDate(pull.occurredAt)}</TableCell>
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
+      </Card>
+    </section>
   );
 }
 

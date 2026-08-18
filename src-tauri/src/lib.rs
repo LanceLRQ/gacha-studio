@@ -54,10 +54,15 @@ pub fn run() {
             commands::list_accounts,
             commands::list_records,
             commands::import_archive_via_picker,
+            commands::export_records_via_picker,
             commands::list_games,
             commands::account_analysis,
+            commands::monthly_activity,
             commands::overview_stats,
             commands::ensure_game_icon,
+            commands::get_theme_preference,
+            commands::set_theme_preference,
+            commands::backfill_pending_metadata,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

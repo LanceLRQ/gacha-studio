@@ -28,10 +28,15 @@ import { invoke } from "@tauri-apps/api/core";
 import type {
   AccountAnalysisView,
   AccountView,
+  ExportFormat,
+  ExportReport,
   GameView,
   ImportReport,
+  MetadataBackfillReport,
+  MonthlyActivityView,
   OverviewStatsView,
   RecordPage,
+  ThemePreference,
 } from "./ipc/generated";
 
 async function call<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
@@ -98,6 +103,15 @@ export function accountAnalysis(accountId: number): Promise<AccountAnalysisView>
   return call<AccountAnalysisView>("account_analysis", { accountId });
 }
 
+/**
+ * 按账号统计月度抽卡活动（自然月 → 抽数 + 顶级保底命中数），游戏详情页
+ * "抽卡时间线（按月）"的数据来源。聚合下沉到 SQL，不是拉全量记录再在
+ * 前端手动分组——见 `commands.rs::monthly_activity` 的文档。
+ */
+export function monthlyActivity(accountId: number): Promise<MonthlyActivityView[]> {
+  return call<MonthlyActivityView[]>("monthly_activity", { accountId });
+}
+
 /** 跨账号概览统计。 */
 export function overviewStats(): Promise<OverviewStatsView> {
   return call<OverviewStatsView>("overview_stats");
@@ -114,6 +128,22 @@ export function importArchiveViaPicker(): Promise<ImportReport | null> {
 }
 
 /**
+ * 弹出保存对话框，把本地库的抽卡记录导出成 CSV 或 UIGF v4 文件。
+ *
+ * `accountId` 省略或传 `undefined` 表示导出全部账号；传具体账号 id 只导出
+ * 该账号。返回 `null` 表示用户取消了保存——**不是错误**，与
+ * `importArchiveViaPicker` 同一条区分"取消"与"失败"的纪律，调用方不应该把
+ * 它当成失败展示红色提示。
+ *
+ * 返回的 `ExportReport.excluded` 是 UIGF 格式下"这些记录为什么没能导出"的
+ * 逐类计数（CSV 格式恒为空数组）——调用方应当把它渲染出来，不要只显示
+ * "导出成功"而丢掉这部分信息，见 `crates/gs-host/src/export.rs` 模块文档。
+ */
+export function exportRecordsViaPicker(format: ExportFormat, accountId?: number): Promise<ExportReport | null> {
+  return call<ExportReport | null>("export_records_via_picker", { format, accountId });
+}
+
+/**
  * 确保某个游戏的图标已下载并缓存到本地，返回可直接塞给 `<img src>` 的
  * base64 data URL（形如 `"data:image/png;base64,..."`）。下载、校验
  * （content-type + magic bytes）、落盘缓存全部是宿主职责，前端只传一个
@@ -126,4 +156,34 @@ export function importArchiveViaPicker(): Promise<ImportReport | null> {
  */
 export function ensureGameIcon(gameId: string): Promise<string | null> {
   return call<string | null>("ensure_game_icon", { gameId });
+}
+
+/**
+ * 读取宿主持久化的主题偏好。返回 `null` 表示宿主从未记录过（新装应用，或
+ * 本次是这项持久化上线后第一次打开设置页）——**不是错误**，调用方
+ * （`pages/Settings.tsx`）据此决定用当前本地值反向回填一次，而不是当成
+ * 请求失败处理。
+ */
+export function getThemePreference(): Promise<ThemePreference | null> {
+  return call<ThemePreference | null>("get_theme_preference");
+}
+
+/** 把主题偏好写入宿主持久化存储（`app_setting` 表）。 */
+export function setThemePreference(preference: ThemePreference): Promise<void> {
+  return call<void>("set_theme_preference", { preference });
+}
+
+/**
+ * 对已注册插件里声明了在线元数据 Provider 的记录做一次回填——反查
+ * `itemIdSource: "displayName"` 场景下停在 `pending` 的记录，把本地化物品名
+ * 换成真正的物品标识。无参数：由宿主自己判断哪些插件、哪些语言需要处理，
+ * 前端不传任何路径/URL/凭据类参数。
+ *
+ * 返回值是按插件维度拆开的报告列表——没有任何插件存在待回填记录，或没有
+ * 任何插件声明了在线元数据 Provider（当前只有原神），都会得到空数组，
+ * **不是错误**。单个语言下载/解析失败不会让整个调用失败，会体现在对应
+ * 报告的 `skippedNoDictionary` 计数里。
+ */
+export function backfillPendingMetadata(): Promise<MetadataBackfillReport[]> {
+  return call<MetadataBackfillReport[]>("backfill_pending_metadata");
 }
