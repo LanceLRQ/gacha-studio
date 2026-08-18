@@ -112,3 +112,18 @@ export function overviewStats(): Promise<OverviewStatsView> {
 export function importArchiveViaPicker(): Promise<ImportReport | null> {
   return call<ImportReport | null>("import_archive_via_picker");
 }
+
+/**
+ * 确保某个游戏的图标已下载并缓存到本地，返回可直接塞给 `<img src>` 的
+ * base64 data URL（形如 `"data:image/png;base64,..."`）。下载、校验
+ * （content-type + magic bytes）、落盘缓存全部是宿主职责，前端只传一个
+ * `gameId`——`PluginManifest.iconUrl` 从不经 IPC 出现在前端，避免插件
+ * 图标地址被当成一个可以从前端发起任意请求的窄口。
+ *
+ * 返回 `null` 表示这个游戏没有可用图标（manifest 未声明 iconUrl、下载失败、
+ * 或校验未通过）——**不是错误**，调用方应当把它当成正常的"没有图标"状态，
+ * 交给 `GameIcon` 走 fallback，不重试、不报错。
+ */
+export function ensureGameIcon(gameId: string): Promise<string | null> {
+  return call<string | null>("ensure_game_icon", { gameId });
+}

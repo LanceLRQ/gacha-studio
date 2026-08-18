@@ -57,6 +57,7 @@ pub fn run() {
             commands::list_games,
             commands::account_analysis,
             commands::overview_stats,
+            commands::ensure_game_icon,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

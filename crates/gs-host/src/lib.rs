@@ -16,6 +16,7 @@ use std::path::Path;
 pub mod analysis;
 pub mod archive;
 pub mod catalog;
+pub mod icon_cache;
 pub mod import;
 pub mod retention;
 pub mod views;

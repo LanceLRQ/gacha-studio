@@ -19,9 +19,19 @@ gs-exchange.workspace = true
 gs-p-authkey.workspace = true
 # 构造 AuthkeyApiPipeline 需要一个已加载插件 bundle 的运行时实例。
 gs-plugin-runtime.workspace = true
+# catalog::icon_url_for 直接读 manifest 纯数据 JSON 取 iconUrl 字段——不经
+# gs-analysis 那层（iconUrl 是纯展示字段，不参与保底/稀有度分析计算，不需要
+# 为它专门加一个反序列化函数），见该函数文档。
+gs-manifest-data.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 ts-rs.workspace = true
+# 图标下载缓存（icon_cache.rs）用 sha256 派生缓存文件名，已经是 Cargo.lock
+# 里 reqwest TLS 栈的传递依赖（锁定 0.10.9），这里升级为直接依赖。
+sha2 = "0.10"
+# 图标下载的生产环境实现：与 crates/paradigms/gs-p-authkey 的 GameApiTransport
+# 用同一个 reqwest 版本与 feature 组合，避免同一依赖在工作区里出现两份配置。
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "default-tls"] }
 
 [dev-dependencies]
 # 端到端测试需要构造声明了 gs-p-authkey 真实插件都未声明过的分支

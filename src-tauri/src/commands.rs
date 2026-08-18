@@ -29,14 +29,16 @@
 
 use std::sync::Mutex;
 
+use base64::Engine;
 use gs_host::HostRuntime;
 use gs_host::archive::import_archive_bytes;
+use gs_host::icon_cache::ReqwestIconFetcher;
 use gs_host::views::{
     AccountAnalysisView, AccountView, GameView, ImportReport, OverviewStatsView, RecordPage,
 };
 use gs_plugin_runtime::PluginRuntime;
 use gs_storage::RecordFilter;
-use tauri::State;
+use tauri::{Manager, State};
 use tauri_plugin_dialog::DialogExt;
 
 /// 单页记录数的硬上限。
@@ -266,6 +268,114 @@ pub fn overview_stats(state: RuntimeState<'_>) -> Result<OverviewStatsView, Stri
     gs_host::analysis::overview_stats(&repo).map_err(to_message)
 }
 
+/// 按 `game_id` 下载（或读取本地缓存的）游戏图标，返回可直接塞进
+/// `<img src>` 的 base64 data URL。
+///
+/// **HC-2**：参数只有 `game_id`，不接受 URL。真正要下载的地址由宿主自己
+/// 按 `game_id` 去已注册插件的 manifest 里查
+/// （[`gs_host::catalog::icon_url_for`]），前端永远看不到、也无法指定这个
+/// URL——`ensure_game_icon(url: String)` 那种形状等价于把 `fetch(anyUrl)`
+/// 交给前端，是标准 SSRF 原语（`CLAUDE.local.md`"窄口参数只能是
+/// gameId/paradigmId 这类标识符，绝不能是裸路径"一节）。
+///
+/// 找不到该 `game_id`、该插件没声明 `iconUrl`、下载失败、或内容校验不
+/// 通过，统一返回 `None`——图标缺席是设计好的正常路径（界面走"游戏名首字 +
+/// 游戏色圆底" fallback，见 `web/src/lib/game-icon.ts`），不冒泡成错误打断
+/// 渲染；只有"应用数据目录建不出来/图标缓存目录写不进去"这类真正的本地
+/// 故障才返回 `Err`。
+///
+/// **最坏情况能做什么**：让宿主向"某个已注册插件在编译期声明好的固定
+/// https 地址"发起一次 GET 请求，下载不超过 2MB 的字节，校验 magic bytes +
+/// content-type 后写进应用数据目录下的图标缓存子目录。`game_id` 本身只是
+/// 一个字符串标识符——不在已注册插件集合里的 id 一律返回 `None`；不携带
+/// 任何 cookie/凭据/referer。
+///
+/// 本命令必须是 `async fn`：同步命令在 Tauri 2 里默认走
+/// `ExecutionContext::Blocking`，`tauri-macros` 生成的 `body_blocking` 把
+/// 函数体**内联执行**在调用方线程上——对文件对话框这类命令没问题，但网络
+/// 请求内联执行会直接卡住界面，等同于把 UI 冻结到下载完成为止，不可接受。
+///
+/// 但 `async fn` 本身不够——**这里曾经有一个必现的运行时 panic**：`async fn`
+/// 会被 Tauri 派发到它自己的 Tokio 运行时上执行，而
+/// [`gs_host::icon_cache::ReqwestIconFetcher`] 内部用的
+/// `reqwest::blocking::Client` 会在**构造/销毁时自建一个 Tokio 运行时**；
+/// 在已经身处一个 Tokio 运行时（Tauri 派发 async 命令的那个）的线程上再
+/// 构造并丢弃这样一个客户端，会触发
+/// `Cannot drop a runtime in a context where blocking is not allowed`
+/// panic——**每一次调用都会炸**，而前端 `ipc-client.ts` 对这个命令的调用
+/// 点用 `.catch(() => null)` 把异常吞掉当成"这个游戏没有图标"，于是表现
+/// 为"图标永远不出现，界面上只看到静默的兜底头像"，没有任何报错浮出来。
+///
+/// 修复：把真正会触碰 `reqwest::blocking` 的部分（[`download_icon_data_url`]）
+/// 整体丢进 [`tauri::async_runtime::spawn_blocking`]——它调度到 Tokio
+/// 专门给"允许阻塞"的操作准备的独立线程池，不是当前这个不允许阻塞的
+/// async 工作线程，在那里构造/销毁 `reqwest::blocking::Client` 不会撞上
+/// 这条限制。`cache_root` 必须在进入 `spawn_blocking` 之前、在 async 上下文
+/// 里用 `&AppHandle` 解析好，再把解析出来的 `PathBuf`（拥有所有权的值）
+/// move 进闭包——`AppHandle` 的路径解析依赖 Tauri 内部状态，不能被直接
+/// 带进这个独立线程池执行。
+///
+/// 这不是"与 [`import_archive_via_picker`] 同一惯例"（早前的注释这么写过，
+/// 是错的，已经改正）——那条命令做的是文件对话框和 `std::fs::read`，从不
+/// 创建嵌套的 Tokio 运行时，所以从来不会撞上这个坑；网络客户端是完全
+/// 不同的情况，两者不能类比。
+///
+/// 回归测试 `ensure_game_icon_survives_download_failure_inside_tauri_async_runtime`
+/// （本文件测试模块）复现的就是这个 panic：在 `tauri::async_runtime::block_on`
+/// 驱动的异步上下文里调用 [`download_icon_data_url`]，若有人把
+/// `spawn_blocking` 那层去掉，这条测试会直接 panic 失败，不会静默变成
+/// "碰巧还是绿的"。
+#[tauri::command]
+pub async fn ensure_game_icon(
+    app: tauri::AppHandle,
+    game_id: String,
+) -> Result<Option<String>, String> {
+    let Some(icon_url) = gs_host::catalog::icon_url_for(&game_id) else {
+        return Ok(None);
+    };
+
+    let cache_root = resolve_icon_cache_root(&app)?;
+    download_icon_data_url(cache_root, game_id, icon_url).await
+}
+
+/// `ensure_game_icon` 的核心逻辑，拆成独立函数是为了不依赖真实的
+/// `AppHandle` 就能单测——`cache_root`/`game_id`/`icon_url` 全部是拥有
+/// 所有权的值，测试可以直接构造，不需要启动一个真实的 Tauri App。
+///
+/// 真正做网络请求与落盘的部分必须经 `spawn_blocking` 调度，理由见
+/// [`ensure_game_icon`] 文档——这不是可选的性能优化，是避免一个必现 panic
+/// 的正确性要求。
+async fn download_icon_data_url(
+    cache_root: std::path::PathBuf,
+    game_id: String,
+    icon_url: String,
+) -> Result<Option<String>, String> {
+    let icon = tauri::async_runtime::spawn_blocking(move || {
+        gs_host::icon_cache::ensure_icon(&cache_root, &game_id, &icon_url, &ReqwestIconFetcher)
+    })
+    .await
+    .map_err(to_message)?
+    .map_err(to_message)?;
+
+    Ok(icon.map(|icon| {
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&icon.bytes);
+        format!("data:{};base64,{encoded}", icon.content_type)
+    }))
+}
+
+/// 图标下载缓存的根目录：应用数据目录本身（[`gs_host::icon_cache::ensure_icon`]
+/// 自己会在下面建 `icons/` 子目录）——与 `lib.rs::resolve_db_path` 解析的
+/// 是同一个目录，数据库文件与图标缓存平级存放，不需要为图标缓存单独找
+/// 一个位置。
+fn resolve_icon_cache_root(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
+    let app_data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|err| format!("无法解析应用数据目录: {err}"))?;
+    std::fs::create_dir_all(&app_data_dir).map_err(|err| format!("创建应用数据目录失败: {err}"))?;
+    Ok(app_data_dir)
+}
+
 /// `Mutex` 被毒化时的消息。毒化只可能发生在某个持有锁的命令 panic 之后，
 /// 那时数据库连接的状态不可知，继续用它比报错更危险。
 const POISONED: &str = "宿主运行时状态已损坏（此前有命令执行中崩溃），请重启应用";
@@ -279,4 +389,63 @@ fn now_millis() -> i64 {
         // 这条记录"的溯源信息，不参与去重也不参与保底计算，用一个明显异常
         // 的值继续跑，比让整次导入失败更合理。
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 回归测试：复现并守住"图标一个都下载不出来"这个此前必现的 panic。
+    ///
+    /// # 为什么必须放在这里，而不是 `gs-host`
+    ///
+    /// panic 的触发条件不是"调用了 `reqwest::blocking`"本身，而是"在一个
+    /// Tokio 运行时的执行上下文里"调用它——`gs-host` 至今不依赖任何异步
+    /// 运行时（`icon_cache.rs` 的 19 个单测全部是同步的，从未在这个坑上
+    /// 摔过跤，这正是这个 bug 能够存在了一整轮复核都没被发现的原因）。
+    /// 要真实复现，测试本身必须运行在 Tauri 派发 async 命令所用的那同一个
+    /// 运行时上——`tauri::async_runtime::block_on` 就是这个运行时的入口，
+    /// 本 crate 已经依赖 `tauri`，不需要为了这一条测试额外引入 `tokio`
+    /// dev-dependency（并且引入了也只是"很像"，不是"就是"那个运行时）。
+    ///
+    /// # 为什么用 `https://127.0.0.1:1/...` 而不是真实地址
+    ///
+    /// 这个 panic 发生在 `reqwest::blocking::Client` **构造/销毁**的时候，
+    /// 与请求本身成功还是失败无关——1 号端口在绝大多数机器上都没有服务
+    /// 监听，连接会立刻被拒绝（`ConnectionRefused`），不需要真实网络、不
+    /// 依赖外部服务可用性，结果确定：`fetch` 必定返回 `Err`，
+    /// `ensure_icon` 因此必定返回 `Ok(None)`。测试断言的正是这个"下载
+    /// 失败但没有 panic"的结果，不是"下载成功"。
+    #[test]
+    fn ensure_game_icon_survives_download_failure_inside_tauri_async_runtime() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let cache_root = std::env::temp_dir().join(format!(
+            "gacha-studio-icon-panic-regression-{}-{nanos}",
+            std::process::id()
+        ));
+
+        // `download_icon_data_url` 是 async fn，必须在一个真实的 Tokio
+        // 运行时上下文里被驱动到完成——`tauri::async_runtime::block_on`
+        // 正是 Tauri 派发 `ensure_game_icon` 这个 async 命令时使用的那个
+        // 运行时，用它驱动才是"在生产环境同一种执行上下文里跑一遍"，不是
+        // 随便找一个 async 执行器凑数。
+        let result = tauri::async_runtime::block_on(download_icon_data_url(
+            cache_root.clone(),
+            "genshin".to_string(),
+            "https://127.0.0.1:1/unreachable.png".to_string(),
+        ));
+
+        assert_eq!(
+            result,
+            Ok(None),
+            "下载失败应当得到 Ok(None)（图标缺席是正常路径），且这一整个过程\
+             不应当 panic——旧实现会在这里因为在 async 上下文里构造/销毁\
+             reqwest::blocking::Client 而必现 panic"
+        );
+
+        let _ = std::fs::remove_dir_all(&cache_root);
+    }
 }

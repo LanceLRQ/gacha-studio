@@ -20,15 +20,6 @@ export interface GameMeta {
   colorVar: string;
   rarity: RaritySpec;
   banners: BannerSpec[];
-  /**
-   * ⚠️ 已知数据缺口：`GameView`（`crates/gs-host/src/views.rs`）刻意只透出
-   * `pluginId`/`displayName`/`rarity`/`banners` 四个字段，不包含
-   * `PluginManifest.iconUrl`——插件图标地址目前不经 IPC 传到前端。这里恒为
-   * `undefined`，`GameIcon`/`GameIconAuto` 组件对"没有 iconUrl"的处理路径
-   * 本来就是回落到「游戏名首字 + 游戏色圆底」，不需要额外适配；只是要如实
-   * 记录"图标目前永远走 fallback"这件事，不是这几个组件本身的缺陷。
-   */
-  iconUrl?: string;
 }
 
 /**

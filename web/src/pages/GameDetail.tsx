@@ -4,7 +4,7 @@ import { RefreshCw, Table as TableIcon } from "lucide-react";
 import { Link, Navigate, useParams } from "react-router-dom";
 
 import { EmptyState, ErrorState, LoadingState } from "@/components/async-view";
-import { GameIcon } from "@/components/game-icon";
+import { GameIconAuto } from "@/components/game-icon-auto";
 import { PityBar } from "@/components/pity-bar";
 import { RarityBar } from "@/components/rarity-bar";
 import { Badge } from "@/components/ui/badge";
@@ -155,7 +155,7 @@ export function GameDetail() {
     <div className="flex min-h-0 flex-1 flex-col">
       <header className="flex shrink-0 items-center justify-between gap-3 px-7 pt-4.5 pb-3.5">
         <div className="flex items-center gap-3">
-          <GameIcon displayName={game.displayName} colorVar={game.colorVar} size={36} />
+          <GameIconAuto game={game} size={36} />
           <div>
             <h1 className="text-[19px] font-bold tracking-tight">{game.displayName}</h1>
             {account && (

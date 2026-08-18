@@ -10,17 +10,15 @@ import {
   Upload,
 } from "lucide-react";
 
-import { GameIcon } from "@/components/game-icon";
+import { GameIconAuto } from "@/components/game-icon-auto";
 import { ErrorState, LoadingState } from "@/components/async-view";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardHeader, CardTitle, CardTitleGroup } from "@/components/ui/card";
-import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useAppState } from "@/lib/app-state";
 import { formatCount, formatDate, maskUid } from "@/lib/format";
-import { downloadAndVerifyIcon, isValidIconUrl } from "@/lib/game-icon";
 import type { GameMeta } from "@/lib/games";
 import { importArchiveViaPicker, listAccounts } from "@/lib/ipc-client";
 import type { AccountView, ImportReport } from "@/lib/ipc/generated";
@@ -176,39 +174,10 @@ function SectionLabel({ children }: { children: ReactNode }) {
 // ============================================================
 
 function GameSettingsCard({ game, accounts }: { game: GameMeta; accounts: AccountView[] }) {
-  const [iconUrl, setIconUrl] = useState(game.iconUrl ?? "");
-  const [iconState, setIconState] = useState<
-    { status: "idle" } | { status: "loading" } | { status: "success"; previewSrc: string } | { status: "error"; message: string }
-  >({ status: "idle" });
-
-  async function handleRedownload() {
-    if (!isValidIconUrl(iconUrl)) {
-      setIconState({ status: "error", message: "仅支持 https 地址" });
-      return;
-    }
-    setIconState({ status: "loading" });
-    const result = await downloadAndVerifyIcon(iconUrl);
-    if (result.ok) {
-      setIconState({ status: "success", previewSrc: result.objectUrl });
-    } else {
-      const reasonText: Record<typeof result.reason, string> = {
-        invalidUrl: "仅支持 https 地址",
-        networkError: "下载失败，请检查网络或地址是否可访问",
-        notAnImage: "响应内容不是可识别的图片格式",
-        contentTypeMismatch: "响应头 content-type 与实际图片格式不一致",
-      };
-      setIconState({ status: "error", message: reasonText[result.reason] });
-    }
-  }
-
   return (
     <Card>
       <CardHeader>
-        <GameIcon
-          displayName={game.displayName}
-          colorVar={game.colorVar}
-          iconSrc={iconState.status === "success" ? iconState.previewSrc : undefined}
-        />
+        <GameIconAuto game={game} />
         <CardTitleGroup>
           <CardTitle>{game.displayName}</CardTitle>
           <span className="text-[11.5px] text-muted-foreground">{accounts.length} 个账号</span>
@@ -234,30 +203,6 @@ function GameSettingsCard({ game, accounts }: { game: GameMeta; accounts: Accoun
           ))}
         </div>
       )}
-
-      <div className="mt-3">
-        <span className="mb-1.5 block text-[11.5px] text-muted-foreground">
-          游戏图标
-          {/* GameView 目前不透出 iconUrl（见 lib/games.ts 的 GameMeta 文档），
-              这里填的地址只在本次会话内生效，刷新即丢失，纯粹用于预览下载校验逻辑。 */}
-        </span>
-        <div className="flex items-center gap-2.5">
-          <Input
-            value={iconUrl}
-            onChange={(e) => setIconUrl(e.target.value)}
-            placeholder="https://…"
-            className="flex-1"
-          />
-          <Button variant="outline" size="sm" onClick={() => void handleRedownload()} disabled={iconState.status === "loading"}>
-            <RefreshCw className={cn(iconState.status === "loading" && "animate-spin")} />
-            重新下载
-          </Button>
-        </div>
-        {iconState.status === "success" && (
-          <p className="mt-1.5 text-[11px] text-primary">下载成功，已通过 content-type / magic bytes 校验</p>
-        )}
-        {iconState.status === "error" && <p className="mt-1.5 text-[11px] text-destructive">{iconState.message}</p>}
-      </div>
     </Card>
   );
 }

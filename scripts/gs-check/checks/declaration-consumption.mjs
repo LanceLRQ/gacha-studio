@@ -345,8 +345,16 @@ const CONTRACT_SECTIONS = [
     // 2026-08-17：扫描 PluginManifest 全部顶层字段（19 个）发现登记制留下的
     // 盲区——platforms/sdkVersion 是两个"承重"字段（真正驱动 L1 执行行为），
     // 却从未被登记过，也从未被消费过；iconUrl/metadata/drawCounting/
-    // maintainers/exchangeFormats 五个字段同样从未登记，但逐个核实后确认
+    // maintainers/exchangeFormats 五个字段同样从未登记，当时逐个核实后确认
     // 是"暂时确无消费点，但理由各不相同"的白名单，不是遗漏。
+    //
+    // 图标下载/缓存管线落地后（crates/gs-host/src/icon_cache.rs +
+    // crates/gs-host/src/catalog.rs 的 icon_url_for），iconUrl 已经有真实
+    // 消费点（`.get("iconUrl")`），从 knownUnconsumed 移除——继续留在
+    // onlyFields 里，让本区块照常机械核实这个消费点存在，不是把字段整个
+    // 移出检查范围（onlyFields 缩小的是"检查哪些字段"，不是"哪些字段必须
+    // 通过"，移出 onlyFields 反而会让这个字段以后悄悄失去消费点也不会被
+    // 本门发现，与 HC-4 的立门理由相悖）。
     //
     // 只用 onlyFields 登记这 7 个字段，不登记整个 PluginManifest——理由见
     // CONTRACT_SECTIONS 顶部关于 onlyFields 的说明，这里不重复。
@@ -370,17 +378,6 @@ const CONTRACT_SECTIONS = [
     // 是整个 crates/**/*.rs），这里指向前者。
     rustFile: 'crates/gs-analysis/src/manifest_lookup.rs',
     knownUnconsumed: [
-      {
-        field: 'iconUrl',
-        reason:
-          '图标下载/缓存管线尚未实现——manifest.ts 对本字段的文档已经写清楚落地形态（限 https、由宿主下载' +
-          '缓存、不提供通用 fetchAsset 窄口、落盘前按 content-type + magic bytes 校验、不按扩展名判断），' +
-          '但当前四个插件全部省略这个可选字段（0/4 声明），Rust 侧自然没有消费点——没有值可读，谈不上' +
-          '"声明了没消费"。前端已经有"游戏名首字 + 游戏色圆底"的兜底渲染（web/src/lib/game-icon.ts 等），' +
-          '缺省路径完整可用，不是被卡住的功能。移除条件：任意插件真的声明 iconUrl 且宿主落地了' +
-          '下载/缓存/校验管线（iconUrl 从 manifest 纯数据 JSON 被读出、下载、按 content-type + magic bytes ' +
-          '校验后落盘）之后。',
-      },
       {
         field: 'metadata',
         reason:

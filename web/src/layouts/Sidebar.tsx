@@ -2,6 +2,7 @@ import { LayoutGrid, Layers, Settings as SettingsIcon } from "lucide-react";
 import type { ReactNode } from "react";
 import { NavLink } from "react-router-dom";
 
+import { GameIconAuto } from "@/components/game-icon-auto";
 import { useAppState } from "@/lib/app-state";
 import { cn } from "@/lib/utils";
 
@@ -9,8 +10,11 @@ import { cn } from "@/lib/utils";
  * 侧栏——贯通到顶，游戏项常驻文字名（界面设计方向 §4.1）。不做「折叠成
  * 图标条」：图标首次下载前会缺席，纯图标导航对读屏软件等于没有导航。
  *
- * 游戏色在这里只以「圆点」形式出现，是身份标识层的合法落点（§3.1）；
- * 完整的图标/fallback 头像在总览卡片、设置页、游戏详情顶栏才会出现。
+ * 游戏项用真实图标（`GameIconAuto`，缺席时走游戏色圆底 fallback，§3.1 的
+ * 身份标识层色仍然保留，只是从纯圆点换成了圆底衬字/衬图），尺寸 20px——
+ * 取自界面设计方向 §6.2「180×180 对桌面应用足够——侧栏 20px、卡片 48px
+ * 均可覆盖高分屏 2x」。这里的列表只渲染已启用游戏（见下方 `games` 的过滤），
+ * 符合 §6.3「启用某游戏时才下载图标」的前提。
  */
 export function Sidebar() {
   const { games: allGames, gamesStatus, enabledGameIds } = useAppState();
@@ -61,10 +65,7 @@ export function Sidebar() {
               )
             }
           >
-            <span
-              className="size-2 shrink-0 rounded-full"
-              style={{ background: `var(${game.colorVar})` }}
-            />
+            <GameIconAuto game={game} size={20} />
             <span className="overflow-hidden text-ellipsis whitespace-nowrap">
               {game.displayName}
             </span>

@@ -88,6 +88,14 @@ export const manifest = {
   platforms: ["windows"],
   maintainers: ["gacha-studio"],
 
+  // exchangeFormats 不声明，见文件头注释。
+
+  // 图标地址来自 TapTap 应用市场页面，已实测验证，同 `plugins/genshin/
+  // manifest.ts` 同款教训——地址以 .jpg 结尾但实际内容是 PNG，不要"纠正"
+  // 扩展名，格式校验（content-type + magic bytes）是宿主侧职责。
+  iconUrl:
+    "https://img-tc.tapimg.com/market/images/cca4b17d6dd9030037095c19aa9fe78a.png/_tap_appicon_m.jpg",
+
   collect: {
     paradigm: "credentialedApi",
     params: {

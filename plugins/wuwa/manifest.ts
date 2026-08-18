@@ -248,6 +248,12 @@ export const manifest = {
   // 未经证实，`research/01` §3.2 已确认参考实现的本地存档是自定义 JSON 结构
   // 而非任何标准格式），声明一个不存在的格式比不声明更有害。
 
+  // 图标地址来自 TapTap 应用市场页面，已实测验证，同 `plugins/genshin/
+  // manifest.ts` 同款教训——地址以 .jpg 结尾但实际内容是 PNG，不要"纠正"
+  // 扩展名，格式校验（content-type + magic bytes）是宿主侧职责。
+  iconUrl:
+    "https://img-tc.tapimg.com/market/images/a465e34f0e4afb3631e8ee5b1f02c992.png/_tap_appicon_m.jpg",
+
   // ============================================================
   // collect：先从 Client.log 拿凭据（gachaLink），再调 record/query 接口
   // ============================================================

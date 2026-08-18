@@ -15,6 +15,7 @@
     "exchangeFormats": [
       "uigf-v4"
     ],
+    "iconUrl": "https://img-tc.tapimg.com/market/images/4c441769b5fb3b670c8b59a6124d9ff2.png/_tap_appicon_m.jpg",
     "collect": {
       "paradigm": "credentialedApi",
       "params": {
@@ -142,6 +143,7 @@
     "maintainers": [
       "gacha-studio"
     ],
+    "iconUrl": "https://img-tc.tapimg.com/market/images/1b7385da5dbf6d5342a832e6685e2066.png/_tap_appicon_m.jpg",
     "collect": {
       "paradigm": "credentialedApi",
       "params": {
@@ -360,6 +362,7 @@
     "maintainers": [
       "gacha-studio"
     ],
+    "iconUrl": "https://img-tc.tapimg.com/market/images/a465e34f0e4afb3631e8ee5b1f02c992.png/_tap_appicon_m.jpg",
     "collect": {
       "paradigm": "credentialedApi",
       "params": {
@@ -1148,6 +1151,7 @@
     "maintainers": [
       "gacha-studio"
     ],
+    "iconUrl": "https://img-tc.tapimg.com/market/images/cca4b17d6dd9030037095c19aa9fe78a.png/_tap_appicon_m.jpg",
     "collect": {
       "paradigm": "credentialedApi",
       "params": {

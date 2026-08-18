@@ -983,6 +983,7 @@ dependencies = [
 name = "gacha-studio"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "gs-host",
  "gs-plugin-runtime",
  "gs-storage",
@@ -1271,11 +1272,14 @@ dependencies = [
  "gs-analysis",
  "gs-core",
  "gs-exchange",
+ "gs-manifest-data",
  "gs-p-authkey",
  "gs-plugin-runtime",
  "gs-storage",
+ "reqwest",
  "serde",
  "serde_json",
+ "sha2",
  "ts-rs",
 ]
 

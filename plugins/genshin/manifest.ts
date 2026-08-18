@@ -63,6 +63,14 @@ export const manifest = {
   maintainers: ["gacha-studio"],
   exchangeFormats: ["uigf-v4"],
 
+  // 图标地址来自 TapTap 应用市场页面，已实测验证（HTTP 200、无防盗链/无需
+  // referer、content-type 均为 image/png、magic bytes 89504e47、50~74 KB）。
+  // ⚠️ 地址以 .jpg 结尾但实际内容是 PNG——这是 TapTap CDN 的真实行为，不是
+  // 拼写错误，不要"纠正"扩展名；落盘前的格式校验（content-type + magic
+  // bytes，不信任 URL 扩展名）是宿主侧职责，见 `iconUrl` 字段本身的文档。
+  iconUrl:
+    "https://img-tc.tapimg.com/market/images/4c441769b5fb3b670c8b59a6124d9ff2.png/_tap_appicon_m.jpg",
+
   collect: {
     paradigm: "credentialedApi",
     params: {

@@ -29,6 +29,24 @@ pub fn list_games() -> Vec<GameView> {
         .collect()
 }
 
+/// 按插件 id 读取 manifest 声明的图标下载地址（`iconUrl`，可选字段）。
+///
+/// 与 [`list_games`] 用的 `gs_analysis` 那条通路不同，这里直接读
+/// `gs_manifest_data::plugin_manifest_data`——`iconUrl` 是纯展示字段，不
+/// 参与保底/稀有度这类分析计算，不需要为它专门在 `gs-analysis` 里加一个
+/// 反序列化函数（多一层间接只会让"图标地址从哪读出来"更难找）。
+///
+/// 未注册的插件 id、或已注册但没有声明 `iconUrl` 的插件（可选字段，允许
+/// 省略），一律返回 `None`——两种情况在这里合并处理，调用方
+/// （`ensure_game_icon` 命令）不需要分辨"插件不存在"与"插件存在但没图标"，
+/// 反正结果都是走前端的"游戏名首字 + 游戏色圆底" fallback。
+pub fn icon_url_for(plugin_id: &str) -> Option<String> {
+    gs_manifest_data::plugin_manifest_data(plugin_id)?
+        .get("iconUrl")?
+        .as_str()
+        .map(str::to_string)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -89,5 +107,25 @@ mod tests {
         assert_eq!(zzz.display_name, "绝区零");
         // 绝区零声明了 6 个卡池，用它验证 banners 没有被截断成"只取第一个"。
         assert_eq!(zzz.banners.len(), 6);
+    }
+
+    #[test]
+    fn icon_url_for_reads_declared_https_address_for_every_registered_plugin() {
+        // 不硬编码具体的 TapTap hash 值——那是插件作者可能会替换的内容，
+        // 这里只钉住契约本身："已声明的 iconUrl 一定是个 https 地址"。
+        for plugin_id in ["genshin", "starrail", "wuwa", "zzz"] {
+            let url = icon_url_for(plugin_id).unwrap_or_else(|| {
+                panic!("插件 \"{plugin_id}\" 应当已经声明 iconUrl");
+            });
+            assert!(
+                url.starts_with("https://"),
+                "iconUrl 应当是 https 地址，实际: {url}"
+            );
+        }
+    }
+
+    #[test]
+    fn icon_url_for_returns_none_for_unregistered_plugin_id() {
+        assert_eq!(icon_url_for("does-not-exist"), None);
     }
 }

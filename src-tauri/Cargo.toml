@@ -24,3 +24,9 @@ gs-plugin-runtime.workspace = true
 # 这里必须显式声明。
 gs-storage.workspace = true
 tauri-plugin-dialog = "2.7.2"
+# ensure_game_icon 命令把 gs_host::icon_cache::CachedIcon 的字节编码成 data
+# URL 字符串——已经是 Cargo.lock 里 tauri-codegen/reqwest 的传递依赖（锁定
+# 0.22.1），这里升级为直接依赖。base64 编码属于"给前端的 wire 格式"这一层
+# 的翻译工作，因此放在 src-tauri 而不是 gs-host——同一分工原则见本文件
+# commands.rs 头部"这一层做什么"的说明。
+base64 = "0.22"

@@ -116,6 +116,12 @@ export const manifest = {
   // exchangeFormats 不声明：星铁的 UIGF 字段映射未经真实实现校准，不在本次
   // 接入范围内编造（与 drills/starrail/manifest.ts 的既有立场一致）。
 
+  // 图标地址来自 TapTap 应用市场页面，已实测验证，同 `plugins/genshin/
+  // manifest.ts` 同款教训——地址以 .jpg 结尾但实际内容是 PNG，不要"纠正"
+  // 扩展名，格式校验（content-type + magic bytes）是宿主侧职责。
+  iconUrl:
+    "https://img-tc.tapimg.com/market/images/1b7385da5dbf6d5342a832e6685e2066.png/_tap_appicon_m.jpg",
+
   collect: {
     paradigm: "credentialedApi",
     params: {
